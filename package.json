@@ -1,0 +1,25 @@
+{
+  "name": "gm-mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing gm's spool dispatch cycle (write, poll, cleaned response) to any MCP client",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "gm-mcp": "bin/gm-mcp-server.js"
+  },
+  "files": [
+    "src/",
+    "bin/"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "latest",
+    "js-yaml": "latest",
+    "zod": "latest"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AnEntrypoint/gm-mcp.git"
+  },
+  "author": "AnEntrypoint",
+  "license": "MIT"
+}
