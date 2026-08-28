@@ -33,8 +33,10 @@ export async function main() {
     const server = createServer()
     const transport = new StdioServerTransport()
 
+    const keepAlive = setInterval(() => {}, 1 << 30)
+
     process.stdin.on('end', () => {
-        console.error('gm-mcp: stdin closed by client, shutting down')
+        console.error('gm-mcp: stdin ended (client disconnected or platform pipe quirk) -- server stays up')
     })
     process.on('uncaughtException', (err) => {
         console.error('gm-mcp: uncaught exception', err)
