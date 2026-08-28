@@ -32,5 +32,19 @@ export function createServer() {
 export async function main() {
     const server = createServer()
     const transport = new StdioServerTransport()
+
+    process.stdin.on('end', () => {
+        console.error('gm-mcp: stdin closed by client, shutting down')
+    })
+    process.on('uncaughtException', (err) => {
+        console.error('gm-mcp: uncaught exception', err)
+        process.exit(1)
+    })
+    process.on('unhandledRejection', (err) => {
+        console.error('gm-mcp: unhandled rejection', err)
+        process.exit(1)
+    })
+
     await server.connect(transport)
+    console.error('gm-mcp: connected, serving on stdio')
 }
