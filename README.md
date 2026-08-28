@@ -26,7 +26,14 @@ registry. Run it straight from this repo:
 npx github:AnEntrypoint/gm-mcp
 ```
 
-Or add it to your MCP client's server config, e.g.:
+`npx github:AnEntrypoint/gm-mcp` run bare in a terminal with no MCP client
+attached exits as soon as stdin closes -- that is correct MCP stdio-transport
+behavior, not a hang or crash. `gm-mcp: connected, serving on stdio` and
+`gm-mcp: stdin closed by client, shutting down` on stderr confirm this. A real
+MCP client keeps stdin open for the life of the session, so the server stays
+running for as long as the client does.
+
+Add it to your MCP client's server config, e.g.:
 
 ```json
 {
