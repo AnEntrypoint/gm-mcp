@@ -19,8 +19,11 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
 
 ## Usage
 
+Not published to npm -- `gm-mcp` is an unrelated package on the npm
+registry. Run it straight from this repo:
+
 ```bash
-npx gm-mcp
+npx github:AnEntrypoint/gm-mcp
 ```
 
 Or add it to your MCP client's server config, e.g.:
@@ -30,7 +33,7 @@ Or add it to your MCP client's server config, e.g.:
   "mcpServers": {
     "gm": {
       "command": "npx",
-      "args": ["gm-mcp"]
+      "args": ["github:AnEntrypoint/gm-mcp"]
     }
   }
 }
