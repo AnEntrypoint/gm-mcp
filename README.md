@@ -23,15 +23,19 @@ Not published to npm -- `gm-mcp` is an unrelated package on the npm
 registry. Run it straight from this repo:
 
 ```bash
-npx github:AnEntrypoint/gm-mcp
+npx -y github:AnEntrypoint/gm-mcp
 ```
 
-`npx github:AnEntrypoint/gm-mcp` run bare in a terminal with no MCP client
-attached exits as soon as stdin closes -- that is correct MCP stdio-transport
-behavior, not a hang or crash. `gm-mcp: connected, serving on stdio` and
-`gm-mcp: stdin closed by client, shutting down` on stderr confirm this. A real
-MCP client keeps stdin open for the life of the session, so the server stays
-running for as long as the client does.
+The shipped `bin/gm-mcp-server.js` is a pre-bundled, dependency-free file (see
+Development below) -- `npx` only needs to fetch the repo and run `node` on it,
+no separate `npm install` of transitive dependencies is required at launch.
+
+`npx -y github:AnEntrypoint/gm-mcp` run bare in a terminal with no MCP client
+attached stays running until stdin closes or the process is killed; a stdin
+close alone no longer exits the process (`gm-mcp: stdin ended (client
+disconnected or platform pipe quirk) -- server stays up` on stderr), since an
+MCP stdio client can legitimately half-close stdin without ending the session.
+`gm-mcp: connected, serving on stdio` on stderr confirms the server started.
 
 Add it to your MCP client's server config, e.g.:
 
@@ -40,11 +44,29 @@ Add it to your MCP client's server config, e.g.:
   "mcpServers": {
     "gm": {
       "command": "npx",
-      "args": ["github:AnEntrypoint/gm-mcp"]
+      "args": ["-y", "github:AnEntrypoint/gm-mcp"]
     }
   }
 }
 ```
+
+## Development
+
+`bin/gm-mcp-server.js` is a committed build artifact, not hand-edited source --
+edit `src/index.js`/`src/dispatch.js`/`src/cli.js` instead, then rebuild:
+
+```bash
+npm install   # pulls the real deps into devDependencies for the build only
+npm run build # bundles src/cli.js -> bin/gm-mcp-server.js, no runtime deps left
+```
+
+Bundling exists because `npx github:...` installs have been observed to
+produce a corrupted transitive-dependency install (a `node_modules/ajv`
+directory present but missing its `package.json`) on some npm/npx versions,
+crashing the server before it can connect (`CONNECTION_CLOSED` on the client
+side). Shipping a self-contained bundle with `"dependencies": {}` removes that
+failure mode entirely -- there is nothing left for the installer to get wrong
+at launch time.
 
 ## Tool: `gm`
 

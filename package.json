@@ -1,6 +1,6 @@
 {
   "name": "gm-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server exposing gm's spool dispatch cycle (write, poll, cleaned response) to any MCP client",
   "type": "module",
   "main": "src/index.js",
@@ -11,8 +11,13 @@
     "src/",
     "bin/"
   ],
-  "dependencies": {
+  "scripts": {
+    "build": "esbuild src/cli.js --bundle --platform=node --format=esm --outfile=bin/gm-mcp-server.js --external:node:* --banner:js=\"#!/usr/bin/env node\""
+  },
+  "dependencies": {},
+  "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "esbuild": "^0.28.2",
     "js-yaml": "^5.4.1",
     "zod": "^4.4.3"
   },
