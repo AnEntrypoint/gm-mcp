@@ -35676,7 +35676,9 @@ var StdioServerTransport = class {
 
 // src/dispatch.js
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
 
 // node_modules/js-yaml/dist/js-yaml.mjs
 var NOT_RESOLVED = /* @__PURE__ */ Symbol("NOT_RESOLVED");
@@ -37517,6 +37519,33 @@ function nextN(sessionId) {
   counter += 1;
   return `${sessionId}-${Date.now()}-${counter}`;
 }
+var RUNNER_DIR = path.join(os.homedir(), ".gm-tools");
+var RUNNER_PATH = path.join(RUNNER_DIR, process.platform === "win32" ? "agentplug-runner.exe" : "agentplug-runner");
+var ENSURE_INTERVAL_MS = 15e3;
+var lastEnsuredAtByRoot = /* @__PURE__ */ new Map();
+function runnerBinaryMissing() {
+  return !fs.existsSync(RUNNER_PATH);
+}
+function ensureSpoolRunnerRunning(root) {
+  if (runnerBinaryMissing()) return;
+  const now = Date.now();
+  const last = lastEnsuredAtByRoot.get(root) || 0;
+  if (now - last < ENSURE_INTERVAL_MS) return;
+  lastEnsuredAtByRoot.set(root, now);
+  try {
+    const child = spawn(RUNNER_PATH, ["spool"], {
+      cwd: root,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    });
+    child.on("error", () => {
+    });
+    child.unref();
+  } catch {
+  }
+}
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(resolve, ms);
@@ -37569,25 +37598,44 @@ function cleanResponse(value, keyHint, outPath) {
   return value;
 }
 var PLAIN_TEXT_BODY_VERBS = /* @__PURE__ */ new Set(["exec_js", "bash", "python", "powershell", "ssh", "go", "rust", "c", "cpp", "java", "deno", "serp", "browser", "cdp"]);
-async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds }, signal) {
+var DAEMON_HEARTBEAT_STALE_MS = 2e4;
+function readDaemonLiveness(spoolDir) {
+  let status;
+  try {
+    status = JSON.parse(fs.readFileSync(path.join(spoolDir, ".status.json"), "utf8"));
+  } catch {
+    return { alive: null, note: "no .status.json heartbeat found for this project yet -- the daemon may not have picked up this project at all" };
+  }
+  const now = Date.now();
+  const heartbeatAgeMs = typeof status.ts === "number" ? now - status.ts : null;
+  const alive = heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS;
+  const busyForMs = typeof status.busy_until === "number" ? status.busy_until - now : null;
+  const busy = busyForMs !== null && busyForMs > 0;
+  const note = !alive ? "daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch's fault" : busy ? "daemon is alive and still actively working on this project -- this is very likely NOT a hang. Re-dispatch with resume_task set to this response's task field to keep waiting on the SAME in-flight request instead of starting a new, duplicate one" : "daemon is alive but reports no busy work for this project right now -- the original request may have already finished (re-check out_path) or was never claimed";
+  return { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note };
+}
+async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, resume_task }, signal) {
   if (!verb) return "error: verb required";
   if (!session_id) return "error: session_id required";
   const root = cwd || process.cwd();
   const spoolDir = path.join(root, ".gm", "exec-spool");
   const inDir = path.join(spoolDir, "in", verb);
   const outDir = path.join(spoolDir, "out");
-  const n = nextN(session_id);
+  const n = resume_task || nextN(session_id);
   const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === "string";
   if (isPlainText && typeof raw_body !== "string") {
     return `error: ${verb} takes a plain-text body -- pass raw_body (a string), not body (a JSON object)`;
   }
-  fs.mkdirSync(inDir, { recursive: true });
   const inPath = path.join(inDir, `${n}.txt`);
-  if (isPlainText) {
-    fs.writeFileSync(inPath, raw_body, "utf8");
-  } else {
-    const fullBody = { session_id, ...body || {} };
-    fs.writeFileSync(inPath, JSON.stringify(fullBody), "utf8");
+  if (!resume_task) {
+    ensureSpoolRunnerRunning(root);
+    fs.mkdirSync(inDir, { recursive: true });
+    if (isPlainText) {
+      fs.writeFileSync(inPath, raw_body, "utf8");
+    } else {
+      const fullBody = { session_id, ...body || {} };
+      fs.writeFileSync(inPath, JSON.stringify(fullBody), "utf8");
+    }
   }
   const outPath = path.join(outDir, `${verb}-${n}.json`);
   const timeoutMs = Math.max(0, (Number(timeout_seconds) || 120) * 1e3);
@@ -37611,7 +37659,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
         return toYaml({ error: `response file was not valid JSON: ${e.message}`, out_path: outPath });
       }
     }
-    if (Date.now() >= deadline) return toYaml({ timed_out: true, in_path: inPath, out_path: outPath });
+    if (Date.now() >= deadline) return toYaml({ timed_out: true, in_path: inPath, out_path: outPath, daemon: readDaemonLiveness(spoolDir) });
     try {
       await sleep(Math.min(pollMs, deadline - Date.now()), signal);
     } catch {

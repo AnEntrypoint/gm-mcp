@@ -18,6 +18,7 @@ export function createServer() {
                 cwd: z.string().optional().describe('Project root containing .gm/exec-spool -- defaults to process.cwd()'),
                 timeout_seconds: z.number().optional().describe('Give up and return timed_out:true after this many seconds (default 120)'),
                 poll_interval_seconds: z.number().optional().describe('How often to check for the response (default 1)'),
+                resume_task: z.string().optional().describe('Pass the `task` field from a previous timed_out/aborted response to keep polling that SAME dispatch instead of writing a new one -- a first-time cold index/embed pass on a large repo can legitimately outrun a short timeout_seconds, and re-dispatching from scratch discards a result that may already be in flight or done. A timed_out response also includes a `daemon` liveness block (alive/busy/heartbeat age) so you can tell a slow-but-working daemon from one that looks actually dead before deciding whether to resume or investigate.'),
             },
         },
         async (args, extra) => {
