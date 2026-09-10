@@ -51,12 +51,36 @@ function runnerBinaryMissing() {
 // a separate, independent concern). Never throws: a spawn failure here must
 // not break the actual dispatch, which still proceeds and can time out with
 // a clear reason.
+// A sweeper is already draining this root's spool if its heartbeat is recent.
+// Threshold is deliberately far looser than the runner's own 20s
+// DAEMON_STALE_MS: that constant governs a cheap lose-and-exit race to become
+// the shared daemon, while a spawn from here can end up a long-lived standalone
+// watcher, and a BUSY sweeper's heartbeat legitimately oscillates past 20s while
+// one dispatch occupies it. Reading 20s as "absent" is what turned one
+// 15s-per-root ensure tick per MCP-server process into seven concurrent
+// standalone watchers on a single project (2026-09-10): each watcher keeps its
+// own in-flight map, so each one's orphan sweep answered dispatch_orphaned for
+// the others' running work and deleted the claim under it -- a dispatch_orphaned
+// storm with a rotating sweeping_pid, out-files that never arrived, and a
+// machine saturated by seven copies of the gm wasm pool.
+const SWEEPER_HEARTBEAT_TRUSTED_MS = 120_000
+
+function spoolAlreadySweptBySomeone(root) {
+    try {
+        const status = JSON.parse(fs.readFileSync(path.join(root, '.gm', 'exec-spool', '.status.json'), 'utf8'))
+        return Date.now() - (status.ts || 0) < SWEEPER_HEARTBEAT_TRUSTED_MS
+    } catch {
+        return false
+    }
+}
+
 function ensureSpoolRunnerRunning(root) {
     if (runnerBinaryMissing()) return
     const now = Date.now()
     const last = lastEnsuredAtByRoot.get(root) || 0
     if (now - last < ENSURE_INTERVAL_MS) return
     lastEnsuredAtByRoot.set(root, now)
+    if (spoolAlreadySweptBySomeone(root)) return
     try {
         const child = spawn(RUNNER_PATH, ['spool'], {
             cwd: root,
