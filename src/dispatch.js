@@ -10,6 +10,17 @@ function nextN(sessionId) {
     return `${sessionId}-${Date.now()}-${counter}`
 }
 
+function publishSpoolRequest(inDir, inPath, task, body) {
+    fs.mkdirSync(inDir, { recursive: true })
+    const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.tmp`)
+    try {
+        fs.writeFileSync(tempPath, body, 'utf8')
+        fs.renameSync(tempPath, inPath)
+    } finally {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
+    }
+}
+
 // gm's shared daemon only services project roots present in its own
 // registry (~/.agentplug/daemon-registry.txt) -- a root is added to that
 // registry ONLY by running the locally-installed runner binary's `spool`
@@ -374,12 +385,11 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         // was already accepted once (the daemon that's servicing it is, by
         // definition, already running and already knows this root).
         ensureSpoolRunnerRunning(root)
-        fs.mkdirSync(inDir, { recursive: true })
         if (isPlainText) {
-            fs.writeFileSync(inPath, raw_body, 'utf8')
+            publishSpoolRequest(inDir, inPath, n, raw_body)
         } else {
             const fullBody = { session_id, ...(body || {}) }
-            fs.writeFileSync(inPath, JSON.stringify(fullBody), 'utf8')
+            publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody))
         }
     }
 
