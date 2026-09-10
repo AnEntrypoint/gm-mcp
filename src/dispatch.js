@@ -188,6 +188,13 @@ const DAEMON_HEARTBEAT_STALE_MS = 20000
 // identically to a wedged/dead daemon, which is exactly the ambiguity a
 // caller needs resolved to know whether raising timeout_seconds (or resuming
 // via resume_task below) is worth it versus the daemon actually being down.
+//
+// `busy_until` is PROJECT-scoped, not per-dispatch: a daemon servicing this
+// project's other tickets, or one whose worker auto-detached, reports
+// busy=false while this exact request is still genuinely in flight. So this
+// block states daemon liveness only and never speaks about the fate of the
+// caller's own dispatch -- readSpoolDispatchState below is the per-dispatch
+// authority, because the claim protocol leaves a real on-disk witness.
 function readDaemonLiveness(spoolDir) {
     let status
     try {
@@ -203,9 +210,72 @@ function readDaemonLiveness(spoolDir) {
     const note = !alive
         ? 'daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch\'s fault'
         : busy
-            ? 'daemon is alive and still actively working on this project -- this is very likely NOT a hang. Re-dispatch with resume_task set to this response\'s task field to keep waiting on the SAME in-flight request instead of starting a new, duplicate one'
-            : 'daemon is alive but reports no busy work for this project right now -- the original request may have already finished (re-check out_path) or was never claimed'
-    return { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note }
+            ? 'daemon is alive and still actively working on this project'
+            : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that'
+    const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note }
+    if (status.runtime) liveness.runtime = status.runtime
+    if (typeof status.queue_wait_ms === 'number') liveness.queue_wait_ms = status.queue_wait_ms
+    if (status.runner_update_in_progress) {
+        liveness.runner_update_in_progress = true
+        liveness.runner_update_waiting_ms = status.runner_update_waiting_ms ?? null
+    }
+    return liveness
+}
+
+// The daemon's claim protocol (agentplug-runner's daemon.rs
+// inflight_claim_path) renames `in/<verb>/<task>.txt` to
+// `in/<verb>/<task>.txt.inflight` IN PLACE the moment it takes the request,
+// and removes that file only once the out-file has been written. So the spool
+// directory itself carries an exact, per-dispatch answer to "was this request
+// ever claimed" -- the question the old timeout note guessed at from a
+// project-wide `busy_until` and got wrong whenever the out-file landed moments
+// after the wrapper gave up.
+function readSpoolDispatchState(spoolDir, verb, task) {
+    const queuedPath = path.join(spoolDir, 'in', verb, `${task}.txt`)
+    const claimedPath = `${queuedPath}.inflight`
+    const claimed = fs.existsSync(claimedPath)
+    const queued = !claimed && fs.existsSync(queuedPath)
+    const state = claimed ? 'claimed_still_in_flight' : queued ? 'queued_not_yet_claimed' : 'no_input_file_left'
+    const note = claimed
+        ? `the daemon HAS claimed this dispatch (${claimedPath} exists) and has not written its out-file yet -- it is still running, not lost. Re-dispatch with resume_task set to this response's task to keep waiting on the SAME request instead of starting a duplicate`
+        : queued
+            ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet, typically because its worker pool is saturated by other tickets. Re-dispatch with resume_task set to this response's task; writing a second dispatch only deepens the queue`
+            : 'neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id'
+    return { state, claimed, queued, note }
+}
+
+// The out-file lands atomically (rename, then a `.ready` marker), but the
+// daemon writes it whenever its own dispatch finishes -- which is routinely a
+// fraction of a second after a caller's chosen timeout_seconds elapses. Giving
+// up on the exact deadline tick and reporting "never claimed" threw away a
+// correct, already-paid-for result; this window re-checks past the deadline
+// before any timeout is reported, and a hit is returned as the ordinary
+// success it is.
+const FINAL_OUT_RECHECK_WINDOW_MS = 2500
+const FINAL_OUT_RECHECK_INTERVAL_MS = 150
+
+// A resume re-polls a dispatch the daemon already accepted, so it deliberately
+// sends no body at all -- which means every error text it returns was produced
+// by the ORIGINAL dispatch and must be labelled as such, or a caller reads a
+// verb-level body-validation failure ("query required") as a verdict on the
+// resume call it just made and cannot act on it.
+function resumeDisclosure(task, landedAtMs, callStartedAtMs) {
+    const resultPredatesResume = typeof landedAtMs === 'number' && landedAtMs < callStartedAtMs
+    return {
+        task,
+        sent_no_body: true,
+        wrote_no_new_dispatch: true,
+        result_predates_this_resume: resultPredatesResume,
+        note: resultPredatesResume
+            ? 'this is the original dispatch\'s stored result, read back unchanged -- any error below (including a missing-body/validation error) came from that dispatch, NOT from this resume call, which sent no body'
+            : 'the original dispatch finished while this resume was polling -- the result below is its own',
+    }
+}
+
+function withResumeDisclosure(out, disclosure) {
+    if (!out || typeof out !== 'object' || Array.isArray(out)) return { resumed: disclosure, response: out }
+    const key = 'resumed' in out ? 'resumed_dispatch' : 'resumed'
+    return { ...out, [key]: disclosure }
 }
 
 // Runs the whole gm spool write-then-poll-for-response cycle for one verb
@@ -238,13 +308,41 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
     const inDir = path.join(spoolDir, 'in', verb)
     const outDir = path.join(spoolDir, 'out')
     const n = resume_task || nextN(session_id)
+    const callStartedAtMs = Date.now()
+    const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })
 
     const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === 'string'
-    if (isPlainText && typeof raw_body !== 'string') {
+    // Body shape is only this call's business when this call actually writes a
+    // body. A resume writes none, so demanding raw_body (or any body field)
+    // from it would reject the exact call the resume path exists to serve --
+    // the same defect that made a body-less resume of a JSON-body verb come
+    // back as that verb's own "<field> required".
+    if (!resume_task && isPlainText && typeof raw_body !== 'string') {
         return `error: ${verb} takes a plain-text body -- pass raw_body (a string), not body (a JSON object)`
     }
 
     const inPath = path.join(inDir, `${n}.txt`)
+    const outPath = path.join(outDir, `${verb}-${n}.json`)
+
+    // A resume addresses a dispatch by (verb, cwd, task). If none of that
+    // dispatch's three on-disk witnesses exist, the triple is wrong and
+    // polling it would burn the whole timeout before reporting a plain
+    // timed_out that reads like a slow daemon. Say so immediately instead.
+    if (resume_task && !fs.existsSync(outPath) && !fs.existsSync(inPath) && !fs.existsSync(`${inPath}.inflight`)) {
+        return toYaml({
+            error: `resume_task "${n}" names no dispatch in this project's spool -- nothing was dispatched`,
+            resumed: {
+                task: n,
+                sent_no_body: true,
+                wrote_no_new_dispatch: true,
+                checked_out_file: outPath,
+                checked_queued_input: inPath,
+                checked_claimed_input: `${inPath}.inflight`,
+                note: 'a resume never re-sends a body; it only re-polls a dispatch the daemon already accepted, so verb and cwd must match the original call exactly and task must be the `task` field copied verbatim from that call\'s timed_out/aborted response. A task whose out-file has since been cleaned up cannot be resumed -- dispatch it again with its original body',
+            },
+        })
+    }
+
     if (!resume_task) {
         // Make sure something is actually watching `root`'s spool BEFORE
         // handing it a request -- see ensureSpoolRunnerRunning's comment.
@@ -261,45 +359,88 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         }
     }
 
-    const outPath = path.join(outDir, `${verb}-${n}.json`)
     const timeoutMs = Math.max(0, (Number(timeout_seconds) || 120) * 1000)
     const pollMs = Math.max(200, (Number(poll_interval_seconds) || 1) * 1000)
     const deadline = Date.now() + timeoutMs
 
-    // YAML instead of JSON: no braces/quotes/commas, meaningfully more
-    // compact for an LLM to read back for the same information -- gm's own
-    // spool files stay JSON (that's the daemon's own wire format,
-    // untouched), only this returned text is reformatted.
-    const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })
+    // toYaml (declared above, before the resume-triple check that also needs
+    // it): YAML instead of JSON -- no braces/quotes/commas, meaningfully more
+    // compact for an LLM to read back for the same information. gm's own spool
+    // files stay JSON (that's the daemon's own wire format, untouched); only
+    // this returned text is reformatted.
+
+    // Returns the formatted response text if the out-file is present and
+    // parseable, otherwise undefined -- so both the normal poll loop and the
+    // post-deadline re-check read the landed result through exactly one code
+    // path instead of the re-check reimplementing (and drifting from) it.
+    const readLandedOutFile = () => {
+        if (!fs.existsSync(outPath)) return undefined
+        let landedAtMs = null
+        try {
+            landedAtMs = fs.statSync(outPath).mtimeMs
+        } catch {
+            landedAtMs = null
+        }
+        try {
+            const parsed = JSON.parse(fs.readFileSync(outPath, 'utf8'))
+            const cleaned = cleanResponse(parsed, undefined, outPath)
+            // The raw gm response is already a flat object carrying its
+            // own ok/verb/data/... at the top level -- data is a second
+            // pure-nesting level every real gm verb response wraps its
+            // actual payload one key deep in. Flatten it up one level
+            // UNLESS doing so would silently overwrite a same-named
+            // sibling field.
+            let out = cleaned
+            if (cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
+                const { data, ...rest } = cleaned
+                const collides = Object.keys(data).some(k => k in rest)
+                if (!collides) out = { ...rest, ...data }
+            }
+            if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
+            return toYaml(out)
+        } catch (e) {
+            const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
+            return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
+        }
+    }
 
     while (true) {
         if (signal?.aborted) return toYaml({ error: 'aborted', task: n, in_path: inPath, out_path: outPath })
-        if (fs.existsSync(outPath)) {
-            try {
-                const parsed = JSON.parse(fs.readFileSync(outPath, 'utf8'))
-                const cleaned = cleanResponse(parsed, undefined, outPath)
-                // The raw gm response is already a flat object carrying its
-                // own ok/verb/data/... at the top level -- data is a second
-                // pure-nesting level every real gm verb response wraps its
-                // actual payload one key deep in. Flatten it up one level
-                // UNLESS doing so would silently overwrite a same-named
-                // sibling field.
-                let out = cleaned
-                if (cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
-                    const { data, ...rest } = cleaned
-                    const collides = Object.keys(data).some(k => k in rest)
-                    if (!collides) out = { ...rest, ...data }
+        const landed = readLandedOutFile()
+        if (landed !== undefined) return landed
+        if (Date.now() >= deadline) {
+            const finalRecheckDeadline = Date.now() + FINAL_OUT_RECHECK_WINDOW_MS
+            while (Date.now() < finalRecheckDeadline) {
+                try {
+                    await sleep(FINAL_OUT_RECHECK_INTERVAL_MS, signal)
+                } catch {
+                    break
                 }
-                return toYaml(out)
-            } catch (e) {
-                return toYaml({ error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath })
+                const landedLate = readLandedOutFile()
+                if (landedLate !== undefined) return landedLate
             }
+            // task is only surfaced on a NOT-yet-successful outcome (matching
+            // the existing in_path/out_path convention above this loop) -- it
+            // is the one piece of information a caller needs to resume THIS
+            // dispatch via resume_task instead of starting a new, duplicate one.
+            // resume_task_supported is absent from older builds of this
+            // server, so its presence is the caller's only falsifiable way to
+            // know the resume argument will reach the resume path at all
+            // rather than being dropped as an unknown field by the MCP SDK's
+            // schema strip -- the failure that returns the resumed verb's own
+            // body-validation error instead of its result.
+            return toYaml({
+                timed_out: true,
+                task: n,
+                resume_task_supported: true,
+                resumed_this_call: Boolean(resume_task),
+                in_path: inPath,
+                out_path: outPath,
+                final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
+                dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
+                daemon: readDaemonLiveness(spoolDir),
+            })
         }
-        // task is only surfaced on a NOT-yet-successful outcome (matching the
-        // existing in_path/out_path convention above this loop) -- it is the
-        // one piece of information a caller needs to resume THIS dispatch via
-        // resume_task instead of starting a new, duplicate one next call.
-        if (Date.now() >= deadline) return toYaml({ timed_out: true, task: n, in_path: inPath, out_path: outPath, daemon: readDaemonLiveness(spoolDir) })
         try {
             await sleep(Math.min(pollMs, deadline - Date.now()), signal)
         } catch {
