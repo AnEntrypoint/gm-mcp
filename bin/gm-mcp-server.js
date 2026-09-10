@@ -37526,12 +37526,22 @@ var lastEnsuredAtByRoot = /* @__PURE__ */ new Map();
 function runnerBinaryMissing() {
   return !fs.existsSync(RUNNER_PATH);
 }
+var SWEEPER_HEARTBEAT_TRUSTED_MS = 12e4;
+function spoolAlreadySweptBySomeone(root) {
+  try {
+    const status = JSON.parse(fs.readFileSync(path.join(root, ".gm", "exec-spool", ".status.json"), "utf8"));
+    return Date.now() - (status.ts || 0) < SWEEPER_HEARTBEAT_TRUSTED_MS;
+  } catch {
+    return false;
+  }
+}
 function ensureSpoolRunnerRunning(root) {
   if (runnerBinaryMissing()) return;
   const now = Date.now();
   const last = lastEnsuredAtByRoot.get(root) || 0;
   if (now - last < ENSURE_INTERVAL_MS) return;
   lastEnsuredAtByRoot.set(root, now);
+  if (spoolAlreadySweptBySomeone(root)) return;
   try {
     const child = spawn(RUNNER_PATH, ["spool"], {
       cwd: root,
