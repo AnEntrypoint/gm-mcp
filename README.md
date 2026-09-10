@@ -60,6 +60,16 @@ npm install   # pulls the real deps into devDependencies for the build only
 npm run build # bundles src/cli.js -> bin/gm-mcp-server.js, no runtime deps left
 ```
 
+Rebuilding is not cosmetic: the bundle carries the tool's `inputSchema`, and
+the MCP SDK silently STRIPS arguments the schema does not declare. A committed
+bundle older than `src/` therefore ships a server that drops a caller's new
+argument without a word -- witnessed at commit `d7f7cb6`, whose `src/` declared
+`resume_task` while its bundle did not: `{resume_task}` with no body reached
+`gmDispatch` as `undefined`, a fresh task was minted, a new spool entry was
+written with an empty body, and the caller got the resumed verb's own
+body-validation error (`query required`) with nothing pointing at the stale
+bundle. Rebuild in the same commit as any `src/` change.
+
 Bundling exists because `npx github:...` installs have been observed to
 produce a corrupted transitive-dependency install (a `node_modules/ajv`
 directory present but missing its `package.json`) on some npm/npx versions,
@@ -79,3 +89,30 @@ at launch time.
 | `cwd` | string | no | Project root containing `.gm/exec-spool` -- defaults to `process.cwd()` |
 | `timeout_seconds` | number | no | Give up and return `timed_out:true` after this many seconds (default 120) |
 | `poll_interval_seconds` | number | no | How often to check for the response (default 1) |
+| `resume_task` | string | no | The `task` field from a previous `timed_out`/aborted response -- keep polling that SAME dispatch instead of writing a new one |
+
+### Resuming a dispatch
+
+A dispatch that outran its `timeout_seconds` is not lost: the daemon keeps
+working and still writes its out-file. The `timed_out` response carries the
+`task` that names it, plus `dispatch_state` (read from the spool itself:
+`claimed_still_in_flight` / `queued_not_yet_claimed` / `no_input_file_left`) and
+a project-scoped `daemon` liveness block.
+
+Pass that `task` back as `resume_task` to re-poll the same dispatch:
+
+- a resume sends **no body** -- omit `body`/`raw_body`; the dispatch being
+  resumed already carries its own, and nothing new is written to the spool
+- `verb` and `cwd` must match the original call exactly; together with the task
+  name they are how the dispatch is addressed on disk
+- `session_id` is still required by the tool for every call, though a resume
+  writes no new spool file with it
+- a triple matching no spool artifact returns an immediate error naming the
+  three paths checked, rather than polling a task that cannot arrive
+- the response carries a `resumed` block stating that this call sent no body,
+  wrote no new dispatch, and whether the result predates the resume -- so a
+  stored error from the ORIGINAL dispatch is never misread as a verdict on the
+  resume call
+- `resume_task_supported: true` on a `timed_out` response is the falsifiable
+  signal that this server build honours the argument; older builds omit the
+  field and silently drop it

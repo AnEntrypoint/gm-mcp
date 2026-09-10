@@ -37611,8 +37611,41 @@ function readDaemonLiveness(spoolDir) {
   const alive = heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS;
   const busyForMs = typeof status.busy_until === "number" ? status.busy_until - now : null;
   const busy = busyForMs !== null && busyForMs > 0;
-  const note = !alive ? "daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch's fault" : busy ? "daemon is alive and still actively working on this project -- this is very likely NOT a hang. Re-dispatch with resume_task set to this response's task field to keep waiting on the SAME in-flight request instead of starting a new, duplicate one" : "daemon is alive but reports no busy work for this project right now -- the original request may have already finished (re-check out_path) or was never claimed";
-  return { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note };
+  const note = !alive ? "daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch's fault" : busy ? "daemon is alive and still actively working on this project" : "daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that";
+  const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note };
+  if (status.runtime) liveness.runtime = status.runtime;
+  if (typeof status.queue_wait_ms === "number") liveness.queue_wait_ms = status.queue_wait_ms;
+  if (status.runner_update_in_progress) {
+    liveness.runner_update_in_progress = true;
+    liveness.runner_update_waiting_ms = status.runner_update_waiting_ms ?? null;
+  }
+  return liveness;
+}
+function readSpoolDispatchState(spoolDir, verb, task) {
+  const queuedPath = path.join(spoolDir, "in", verb, `${task}.txt`);
+  const claimedPath = `${queuedPath}.inflight`;
+  const claimed = fs.existsSync(claimedPath);
+  const queued = !claimed && fs.existsSync(queuedPath);
+  const state = claimed ? "claimed_still_in_flight" : queued ? "queued_not_yet_claimed" : "no_input_file_left";
+  const note = claimed ? `the daemon HAS claimed this dispatch (${claimedPath} exists) and has not written its out-file yet -- it is still running, not lost. Re-dispatch with resume_task set to this response's task to keep waiting on the SAME request instead of starting a duplicate` : queued ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet, typically because its worker pool is saturated by other tickets. Re-dispatch with resume_task set to this response's task; writing a second dispatch only deepens the queue` : "neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id";
+  return { state, claimed, queued, note };
+}
+var FINAL_OUT_RECHECK_WINDOW_MS = 2500;
+var FINAL_OUT_RECHECK_INTERVAL_MS = 150;
+function resumeDisclosure(task, landedAtMs, callStartedAtMs) {
+  const resultPredatesResume = typeof landedAtMs === "number" && landedAtMs < callStartedAtMs;
+  return {
+    task,
+    sent_no_body: true,
+    wrote_no_new_dispatch: true,
+    result_predates_this_resume: resultPredatesResume,
+    note: resultPredatesResume ? "this is the original dispatch's stored result, read back unchanged -- any error below (including a missing-body/validation error) came from that dispatch, NOT from this resume call, which sent no body" : "the original dispatch finished while this resume was polling -- the result below is its own"
+  };
+}
+function withResumeDisclosure(out, disclosure) {
+  if (!out || typeof out !== "object" || Array.isArray(out)) return { resumed: disclosure, response: out };
+  const key = "resumed" in out ? "resumed_dispatch" : "resumed";
+  return { ...out, [key]: disclosure };
 }
 async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, resume_task }, signal) {
   if (!verb) return "error: verb required";
@@ -37622,11 +37655,28 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
   const inDir = path.join(spoolDir, "in", verb);
   const outDir = path.join(spoolDir, "out");
   const n = resume_task || nextN(session_id);
+  const callStartedAtMs = Date.now();
+  const toYaml = (obj) => dump(obj, { lineWidth: 100 });
   const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === "string";
-  if (isPlainText && typeof raw_body !== "string") {
+  if (!resume_task && isPlainText && typeof raw_body !== "string") {
     return `error: ${verb} takes a plain-text body -- pass raw_body (a string), not body (a JSON object)`;
   }
   const inPath = path.join(inDir, `${n}.txt`);
+  const outPath = path.join(outDir, `${verb}-${n}.json`);
+  if (resume_task && !fs.existsSync(outPath) && !fs.existsSync(inPath) && !fs.existsSync(`${inPath}.inflight`)) {
+    return toYaml({
+      error: `resume_task "${n}" names no dispatch in this project's spool -- nothing was dispatched`,
+      resumed: {
+        task: n,
+        sent_no_body: true,
+        wrote_no_new_dispatch: true,
+        checked_out_file: outPath,
+        checked_queued_input: inPath,
+        checked_claimed_input: `${inPath}.inflight`,
+        note: "a resume never re-sends a body; it only re-polls a dispatch the daemon already accepted, so verb and cwd must match the original call exactly and task must be the `task` field copied verbatim from that call's timed_out/aborted response. A task whose out-file has since been cleaned up cannot be resumed -- dispatch it again with its original body"
+      }
+    });
+  }
   if (!resume_task) {
     ensureSpoolRunnerRunning(root);
     fs.mkdirSync(inDir, { recursive: true });
@@ -37637,33 +37687,64 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
       fs.writeFileSync(inPath, JSON.stringify(fullBody), "utf8");
     }
   }
-  const outPath = path.join(outDir, `${verb}-${n}.json`);
   const timeoutMs = Math.max(0, (Number(timeout_seconds) || 120) * 1e3);
   const pollMs = Math.max(200, (Number(poll_interval_seconds) || 1) * 1e3);
   const deadline = Date.now() + timeoutMs;
-  const toYaml = (obj) => dump(obj, { lineWidth: 100 });
-  while (true) {
-    if (signal?.aborted) return toYaml({ error: "aborted", in_path: inPath, out_path: outPath });
-    if (fs.existsSync(outPath)) {
-      try {
-        const parsed = JSON.parse(fs.readFileSync(outPath, "utf8"));
-        const cleaned = cleanResponse(parsed, void 0, outPath);
-        let out = cleaned;
-        if (cleaned && typeof cleaned === "object" && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === "object" && !Array.isArray(cleaned.data)) {
-          const { data, ...rest } = cleaned;
-          const collides = Object.keys(data).some((k) => k in rest);
-          if (!collides) out = { ...rest, ...data };
-        }
-        return toYaml(out);
-      } catch (e) {
-        return toYaml({ error: `response file was not valid JSON: ${e.message}`, out_path: outPath });
-      }
+  const readLandedOutFile = () => {
+    if (!fs.existsSync(outPath)) return void 0;
+    let landedAtMs = null;
+    try {
+      landedAtMs = fs.statSync(outPath).mtimeMs;
+    } catch {
+      landedAtMs = null;
     }
-    if (Date.now() >= deadline) return toYaml({ timed_out: true, in_path: inPath, out_path: outPath, daemon: readDaemonLiveness(spoolDir) });
+    try {
+      const parsed = JSON.parse(fs.readFileSync(outPath, "utf8"));
+      const cleaned = cleanResponse(parsed, void 0, outPath);
+      let out = cleaned;
+      if (cleaned && typeof cleaned === "object" && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === "object" && !Array.isArray(cleaned.data)) {
+        const { data, ...rest } = cleaned;
+        const collides = Object.keys(data).some((k) => k in rest);
+        if (!collides) out = { ...rest, ...data };
+      }
+      if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs));
+      return toYaml(out);
+    } catch (e) {
+      const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath };
+      return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed);
+    }
+  };
+  while (true) {
+    if (signal?.aborted) return toYaml({ error: "aborted", task: n, in_path: inPath, out_path: outPath });
+    const landed = readLandedOutFile();
+    if (landed !== void 0) return landed;
+    if (Date.now() >= deadline) {
+      const finalRecheckDeadline = Date.now() + FINAL_OUT_RECHECK_WINDOW_MS;
+      while (Date.now() < finalRecheckDeadline) {
+        try {
+          await sleep(FINAL_OUT_RECHECK_INTERVAL_MS, signal);
+        } catch {
+          break;
+        }
+        const landedLate = readLandedOutFile();
+        if (landedLate !== void 0) return landedLate;
+      }
+      return toYaml({
+        timed_out: true,
+        task: n,
+        resume_task_supported: true,
+        resumed_this_call: Boolean(resume_task),
+        in_path: inPath,
+        out_path: outPath,
+        final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
+        dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
+        daemon: readDaemonLiveness(spoolDir)
+      });
+    }
     try {
       await sleep(Math.min(pollMs, deadline - Date.now()), signal);
     } catch {
-      return toYaml({ error: "aborted", in_path: inPath, out_path: outPath });
+      return toYaml({ error: "aborted", task: n, in_path: inPath, out_path: outPath });
     }
   }
 }
@@ -37682,7 +37763,8 @@ function createServer() {
         session_id: external_exports.string().describe("gm SESSION_ID for this dispatch (required by gm on every body)"),
         cwd: external_exports.string().optional().describe("Project root containing .gm/exec-spool -- defaults to process.cwd()"),
         timeout_seconds: external_exports.number().optional().describe("Give up and return timed_out:true after this many seconds (default 120)"),
-        poll_interval_seconds: external_exports.number().optional().describe("How often to check for the response (default 1)")
+        poll_interval_seconds: external_exports.number().optional().describe("How often to check for the response (default 1)"),
+        resume_task: external_exports.string().optional().describe("Pass the `task` field from a previous timed_out/aborted response to keep polling that SAME dispatch instead of writing a new one -- a first-time cold index/embed pass on a large repo can legitimately outrun a short timeout_seconds, and re-dispatching from scratch discards a result that may already be in flight or done. A resume sends NO body: omit body/raw_body entirely (they are ignored if passed), since the dispatch being resumed already carries its own. It still needs `verb` and `cwd` to match the original call exactly -- those two plus the task name are how the dispatch is addressed on disk -- and `session_id` remains required by this tool for every call, though a resume never writes a new spool file with it. If that triple matches no dispatch in the project spool, the call returns an immediate error naming the three paths it checked instead of polling a task that cannot arrive. A resumed result carries a `resumed` block stating that this call sent no body and whether the result predates it, so a stored error from the ORIGINAL dispatch is never misread as a verdict on the resume call. Before any timeout is reported the out-file is re-checked past the deadline, so a result that lands moments late comes back as the ordinary success it is. A genuine timed_out response carries `resume_task_supported: true` (absent on older server builds, which silently drop this argument), a `dispatch_state` block read from the spool itself (claimed_still_in_flight / queued_not_yet_claimed / no_input_file_left) plus a `daemon` liveness block (alive/heartbeat age/runtime/queue wait) -- dispatch_state is the per-dispatch authority, daemon.busy is project-scoped and says nothing about your own request.")
       }
     },
     async (args, extra) => {
