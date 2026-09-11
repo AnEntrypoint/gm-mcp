@@ -37517,11 +37517,22 @@ var CHOMPING_KEEP = CHOMPING_MODE.KEEP;
 var counter = 0;
 function nextN(sessionId) {
   counter += 1;
-  return `${sessionId}-${Date.now()}-${counter}`;
+  return `${sessionId}-${process.pid}-${Date.now()}-${counter}`;
+}
+function publishSpoolRequest(inDir, inPath, task, body) {
+  fs.mkdirSync(inDir, { recursive: true });
+  const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.tmp`);
+  try {
+    fs.writeFileSync(tempPath, body, "utf8");
+    fs.renameSync(tempPath, inPath);
+  } finally {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  }
 }
 var RUNNER_DIR = path.join(os.homedir(), ".gm-tools");
 var RUNNER_PATH = path.join(RUNNER_DIR, process.platform === "win32" ? "agentplug-runner.exe" : "agentplug-runner");
 var ENSURE_INTERVAL_MS = 15e3;
+var ENSURE_LEASE_MS = 5e3;
 var lastEnsuredAtByRoot = /* @__PURE__ */ new Map();
 function runnerBinaryMissing() {
   return !fs.existsSync(RUNNER_PATH);
@@ -37535,6 +37546,36 @@ function spoolAlreadySweptBySomeone(root) {
     return false;
   }
 }
+function claimRunnerEnsure(root) {
+  const lockPath = path.join(root, ".gm", "exec-spool", ".runner-ensure.lock");
+  const claim2 = () => {
+    const fd = fs.openSync(lockPath, "wx", 384);
+    try {
+      fs.writeFileSync(fd, `${process.pid} ${Date.now()}`, "utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+    return true;
+  };
+  try {
+    return claim2();
+  } catch (error61) {
+    if (error61?.code !== "EEXIST") return false;
+  }
+  try {
+    if (Date.now() - fs.statSync(lockPath).mtimeMs <= ENSURE_LEASE_MS) return false;
+    const stalePath = `${lockPath}.${process.pid}.${Date.now()}.stale`;
+    fs.renameSync(lockPath, stalePath);
+    fs.unlinkSync(stalePath);
+  } catch {
+    return false;
+  }
+  try {
+    return claim2();
+  } catch {
+    return false;
+  }
+}
 function ensureSpoolRunnerRunning(root) {
   if (runnerBinaryMissing()) return;
   const now = Date.now();
@@ -37542,6 +37583,7 @@ function ensureSpoolRunnerRunning(root) {
   if (now - last < ENSURE_INTERVAL_MS) return;
   lastEnsuredAtByRoot.set(root, now);
   if (spoolAlreadySweptBySomeone(root)) return;
+  if (!claimRunnerEnsure(root)) return;
   try {
     const child = spawn(RUNNER_PATH, ["spool"], {
       cwd: root,
@@ -37558,12 +37600,51 @@ function ensureSpoolRunnerRunning(root) {
 }
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
-    const t = setTimeout(resolve, ms);
     const onAbort = () => {
       clearTimeout(t);
+      signal?.removeEventListener("abort", onAbort);
       reject(new Error("aborted"));
     };
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
     signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
+  return new Promise((resolve, reject) => {
+    let watcher;
+    let wakeTimer;
+    let fallbackTimer;
+    let settled = false;
+    const finish = (wakeSource, error61) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(wakeTimer);
+      clearTimeout(fallbackTimer);
+      watcher?.close();
+      signal?.removeEventListener("abort", onAbort);
+      if (error61) reject(error61);
+      else resolve(wakeSource);
+    };
+    const onAbort = () => finish(void 0, new Error("aborted"));
+    const wake = (_event, filename) => {
+      if (!filename || filename.toString() === path.basename(outPath)) finish("filesystem_event");
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      watcher = fs.watch(outDir, { persistent: false }, wake);
+      watcher.on("error", () => {
+        watcher?.close();
+        watcher = void 0;
+      });
+    } catch {
+      watcher = void 0;
+    }
+    if (fs.existsSync(outPath)) return finish("already_landed");
+    wakeTimer = setTimeout(() => finish("deadline"), Math.max(1, waitMs));
+    fallbackTimer = setTimeout(() => finish("fallback_poll"), Math.min(Math.max(25, fallbackMs), Math.max(1, waitMs)));
   });
 }
 var NOISE_KEYS = /* @__PURE__ */ new Set(["dispatch_id", "request_fingerprint"]);
@@ -37657,15 +37738,17 @@ function withResumeDisclosure(out, disclosure) {
   const key = "resumed" in out ? "resumed_dispatch" : "resumed";
   return { ...out, [key]: disclosure };
 }
-async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, resume_task }, signal) {
+async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task }, signal) {
   if (!verb) return "error: verb required";
   if (!session_id) return "error: session_id required";
   const root = cwd || process.cwd();
   const spoolDir = path.join(root, ".gm", "exec-spool");
   const inDir = path.join(spoolDir, "in", verb);
   const outDir = path.join(spoolDir, "out");
+  fs.mkdirSync(outDir, { recursive: true });
   const n = resume_task || nextN(session_id);
   const callStartedAtMs = Date.now();
+  let lastWakeSource = "initial_check";
   const toYaml = (obj) => dump(obj, { lineWidth: 100 });
   const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === "string";
   if (!resume_task && isPlainText && typeof raw_body !== "string") {
@@ -37689,16 +37772,15 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
   }
   if (!resume_task) {
     ensureSpoolRunnerRunning(root);
-    fs.mkdirSync(inDir, { recursive: true });
     if (isPlainText) {
-      fs.writeFileSync(inPath, raw_body, "utf8");
+      publishSpoolRequest(inDir, inPath, n, raw_body);
     } else {
-      const fullBody = { session_id, ...body || {} };
-      fs.writeFileSync(inPath, JSON.stringify(fullBody), "utf8");
+      const fullBody = { ...body || {}, session_id };
+      publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody));
     }
   }
   const timeoutMs = Math.max(0, (Number(timeout_seconds) || 120) * 1e3);
-  const pollMs = Math.max(200, (Number(poll_interval_seconds) || 1) * 1e3);
+  const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1e3);
   const deadline = Date.now() + timeoutMs;
   const readLandedOutFile = () => {
     if (!fs.existsSync(outPath)) return void 0;
@@ -37718,6 +37800,16 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
         if (!collides) out = { ...rest, ...data };
       }
       if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs));
+      if (include_timing) {
+        const timingKey = out && typeof out === "object" && !Array.isArray(out) && "mcp_timing" in out ? "mcp_client_timing" : "mcp_timing";
+        const timing = {
+          submitted_at_ms: callStartedAtMs,
+          response_observed_at_ms: Date.now(),
+          round_trip_ms: Date.now() - callStartedAtMs,
+          response_wakeup: lastWakeSource
+        };
+        out = out && typeof out === "object" && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing };
+      }
       return toYaml(out);
     } catch (e) {
       const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath };
@@ -37752,7 +37844,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
       });
     }
     try {
-      await sleep(Math.min(pollMs, deadline - Date.now()), signal);
+      lastWakeSource = await waitForSpoolChange(outDir, outPath, deadline - Date.now(), pollMs, signal);
     } catch {
       return toYaml({ error: "aborted", task: n, in_path: inPath, out_path: outPath });
     }
@@ -37768,12 +37860,13 @@ function createServer() {
       description: "Run the whole gm spool write-then-poll-for-response cycle for one verb dispatch in a single call, instead of writing the input file, polling for the output file, and reading it as three separate steps. Writes .gm/exec-spool/in/<verb>/<N>.txt, polls .gm/exec-spool/out/<verb>-<N>.json until it appears (or the timeout elapses), and returns its contents as flat YAML text, auto-cleaned for readability: opaque internal ids (dispatch_id, request_fingerprint) stripped, the redundant response/data nesting levels flattened up to the top (unless a field name would collide), long text fields (e.g. instruction phase prose) truncated with a pointer naming the on-disk file to read for the full text, hit-array ranking internals (cos/score/recency in recall_hits/bm25_hits/vector_hits) dropped, and empty/null fields removed at every level. A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look. For plain-text-body verbs (exec_js and every language stem it backs, serp, browser, cdp), pass raw_body instead of body -- these verbs reject a JSON object outright.",
       inputSchema: {
         verb: external_exports.string().describe("gm spool verb name, e.g. instruction, prd-add, git_status, exec_js"),
-        body: external_exports.record(external_exports.any()).optional().describe("JSON body for the dispatch. session_id is added automatically if not present. Not valid for plain-text-body verbs (exec_js and its language stems, serp, browser, cdp) -- use raw_body for those instead."),
+        body: external_exports.record(external_exports.string(), external_exports.unknown()).optional().describe("JSON body for the dispatch. session_id is added automatically if not present. Not valid for plain-text-body verbs (exec_js and its language stems, serp, browser, cdp) -- use raw_body for those instead."),
         raw_body: external_exports.string().optional().describe("Literal text body for a plain-text-body verb (exec_js/bash/python/etc, serp, browser, cdp) -- sent exactly as given, no JSON wrapping. Mutually exclusive with body."),
         session_id: external_exports.string().describe("gm SESSION_ID for this dispatch (required by gm on every body)"),
         cwd: external_exports.string().optional().describe("Project root containing .gm/exec-spool -- defaults to process.cwd()"),
         timeout_seconds: external_exports.number().optional().describe("Give up and return timed_out:true after this many seconds (default 120)"),
-        poll_interval_seconds: external_exports.number().optional().describe("How often to check for the response (default 1)"),
+        poll_interval_seconds: external_exports.number().optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)"),
+        include_timing: external_exports.boolean().optional().describe("Include MCP submission-to-response timing and the last response wakeup source"),
         resume_task: external_exports.string().optional().describe("Pass the `task` field from a previous timed_out/aborted response to keep polling that SAME dispatch instead of writing a new one -- a first-time cold index/embed pass on a large repo can legitimately outrun a short timeout_seconds, and re-dispatching from scratch discards a result that may already be in flight or done. A resume sends NO body: omit body/raw_body entirely (they are ignored if passed), since the dispatch being resumed already carries its own. It still needs `verb` and `cwd` to match the original call exactly -- those two plus the task name are how the dispatch is addressed on disk -- and `session_id` remains required by this tool for every call, though a resume never writes a new spool file with it. If that triple matches no dispatch in the project spool, the call returns an immediate error naming the three paths it checked instead of polling a task that cannot arrive. A resumed result carries a `resumed` block stating that this call sent no body and whether the result predates it, so a stored error from the ORIGINAL dispatch is never misread as a verdict on the resume call. Before any timeout is reported the out-file is re-checked past the deadline, so a result that lands moments late comes back as the ordinary success it is. A genuine timed_out response carries `resume_task_supported: true` (absent on older server builds, which silently drop this argument), a `dispatch_state` block read from the spool itself (claimed_still_in_flight / queued_not_yet_claimed / no_input_file_left) plus a `daemon` liveness block (alive/heartbeat age/runtime/queue wait) -- dispatch_state is the per-dispatch authority, daemon.busy is project-scoped and says nothing about your own request.")
       }
     },

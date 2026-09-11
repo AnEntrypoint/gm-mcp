@@ -88,7 +88,8 @@ at launch time.
 | `raw_body` | string | no | Literal text body for a plain-text-body verb, mutually exclusive with `body` |
 | `cwd` | string | no | Project root containing `.gm/exec-spool` -- defaults to `process.cwd()` |
 | `timeout_seconds` | number | no | Give up and return `timed_out:true` after this many seconds (default 120) |
-| `poll_interval_seconds` | number | no | How often to check for the response (default 1) |
+| `poll_interval_seconds` | number | no | Fallback response check interval when filesystem events are unavailable (default 0.25) |
+| `include_timing` | boolean | no | Include MCP submission-to-response timing and the last response wakeup source |
 | `resume_task` | string | no | The `task` field from a previous `timed_out`/aborted response -- keep polling that SAME dispatch instead of writing a new one |
 
 ### Resuming a dispatch
