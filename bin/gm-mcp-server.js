@@ -37854,6 +37854,35 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
 // src/index.js
 function createServer() {
   const server = new McpServer({ name: "gm-mcp", version: "0.1.0" });
+  const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`;
+  server.registerTool(
+    "gm_instruction",
+    {
+      description: "Dispatch gm instruction directly. Accepts the prompt-only call shape used by MCP clients and creates a stable server-local gm session when one is not supplied.",
+      inputSchema: {
+        prompt: external_exports.string().optional().describe("Current task prompt. An omitted prompt is dispatched as an empty string."),
+        session_id: external_exports.string().optional().describe("Optional gm session id. A stable server-local id is used when omitted."),
+        cwd: external_exports.string().optional().describe("Project root containing .gm/exec-spool -- defaults to process.cwd()."),
+        timeout_seconds: external_exports.number().optional().describe("Give up and return timed_out:true after this many seconds (default 120)."),
+        poll_interval_seconds: external_exports.number().optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)."),
+        include_timing: external_exports.boolean().optional().describe("Include MCP submission-to-response timing and the last response wakeup source."),
+        resume_task: external_exports.string().optional().describe("Resume a previous instruction dispatch without writing a new request.")
+      }
+    },
+    async (args = {}, extra) => {
+      const text = await gmDispatch({
+        verb: "instruction",
+        body: args.resume_task ? void 0 : { prompt: args.prompt ?? "" },
+        session_id: args.session_id || instructionSessionId,
+        cwd: args.cwd,
+        timeout_seconds: args.timeout_seconds,
+        poll_interval_seconds: args.poll_interval_seconds,
+        include_timing: args.include_timing,
+        resume_task: args.resume_task
+      }, extra?.signal);
+      return { content: [{ type: "text", text }] };
+    }
+  );
   server.registerTool(
     "gm",
     {
@@ -37870,7 +37899,7 @@ function createServer() {
         resume_task: external_exports.string().optional().describe("Pass the `task` field from a previous timed_out/aborted response to keep polling that SAME dispatch instead of writing a new one -- a first-time cold index/embed pass on a large repo can legitimately outrun a short timeout_seconds, and re-dispatching from scratch discards a result that may already be in flight or done. A resume sends NO body: omit body/raw_body entirely (they are ignored if passed), since the dispatch being resumed already carries its own. It still needs `verb` and `cwd` to match the original call exactly -- those two plus the task name are how the dispatch is addressed on disk -- and `session_id` remains required by this tool for every call, though a resume never writes a new spool file with it. If that triple matches no dispatch in the project spool, the call returns an immediate error naming the three paths it checked instead of polling a task that cannot arrive. A resumed result carries a `resumed` block stating that this call sent no body and whether the result predates it, so a stored error from the ORIGINAL dispatch is never misread as a verdict on the resume call. Before any timeout is reported the out-file is re-checked past the deadline, so a result that lands moments late comes back as the ordinary success it is. A genuine timed_out response carries `resume_task_supported: true` (absent on older server builds, which silently drop this argument), a `dispatch_state` block read from the spool itself (claimed_still_in_flight / queued_not_yet_claimed / no_input_file_left) plus a `daemon` liveness block (alive/heartbeat age/runtime/queue wait) -- dispatch_state is the per-dispatch authority, daemon.busy is project-scoped and says nothing about your own request.")
       }
     },
-    async (args, extra) => {
+    async (args = {}, extra) => {
       const text = await gmDispatch(args, extra?.signal);
       return { content: [{ type: "text", text }] };
     }
