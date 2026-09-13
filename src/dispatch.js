@@ -21,6 +21,37 @@ function publishSpoolRequest(inDir, inPath, task, body) {
     }
 }
 
+function normalizedObjectBody(verb, body) {
+    if (body === undefined || body === null) return { value: {} }
+    if (typeof body === 'string') {
+        let parsed
+        try {
+            parsed = JSON.parse(body)
+        } catch (error) {
+            return { error: `${verb} body is a JSON string that cannot be parsed: ${error.message}. Pass body as an object, or pass a valid JSON object string.` }
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            return { error: `${verb} body string must decode to a JSON object; received ${Array.isArray(parsed) ? 'an array' : typeof parsed}.` }
+        }
+        return { value: parsed }
+    }
+    if (typeof body !== 'object' || Array.isArray(body)) {
+        return { error: `${verb} body must be a JSON object; received ${Array.isArray(body) ? 'an array' : typeof body}.` }
+    }
+    return { value: body }
+}
+
+function objectBodyDiagnostic(verb, body) {
+    if (verb === 'prd-add' && (typeof body.id !== 'string' || !body.id.trim())) {
+        return 'prd-add requires a non-empty body.id. A blank id would create an unaddressable PRD row; provide a stable identifier before dispatching.'
+    }
+    if (verb !== 'git_merge' || typeof body.ref === 'string' && body.ref.trim()) return undefined
+    if (typeof body.branch === 'string' && body.branch.trim()) {
+        return 'git_merge requires body.ref. body.branch is not a git_merge field; call again with {"ref":"' + body.branch + '"}.'
+    }
+    return 'git_merge requires a non-empty body.ref, for example {"ref":"origin/main"}.'
+}
+
 const RUNNER_DIR = path.join(os.homedir(), '.gm-tools')
 const RUNNER_PATH = path.join(RUNNER_DIR, process.platform === 'win32' ? 'agentplug-runner.exe' : 'agentplug-runner')
 
@@ -220,7 +251,10 @@ function readDaemonLiveness(spoolDir) {
             : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that'
     const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note }
     if (status.runtime) liveness.runtime = status.runtime
+    if (typeof status.shared_process === 'boolean') liveness.shared_process = status.shared_process
     if (typeof status.queue_wait_ms === 'number') liveness.queue_wait_ms = status.queue_wait_ms
+    if (typeof status.queue_depth === 'number') liveness.queue_depth = status.queue_depth
+    if (typeof status.queue_position === 'number') liveness.queue_position = status.queue_position
     if (status.runner_update_in_progress) {
         liveness.runner_update_in_progress = true
         liveness.runner_update_waiting_ms = status.runner_update_waiting_ms ?? null
@@ -282,6 +316,15 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         return `error: ${verb} takes a plain-text body -- pass raw_body (a string), not body (a JSON object)`
     }
 
+    let normalizedBody
+    if (!resume_task && !isPlainText) {
+        const normalized = normalizedObjectBody(verb, body)
+        if (normalized.error) return `error: ${normalized.error}`
+        const diagnostic = objectBodyDiagnostic(verb, normalized.value)
+        if (diagnostic) return `error: ${diagnostic}`
+        normalizedBody = normalized.value
+    }
+
     const inPath = path.join(inDir, `${n}.txt`)
     const outPath = path.join(outDir, `${verb}-${n}.json`)
 
@@ -305,7 +348,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         if (isPlainText) {
             publishSpoolRequest(inDir, inPath, n, raw_body)
         } else {
-            const fullBody = { ...(body || {}), session_id }
+            const fullBody = { ...normalizedBody, session_id }
             publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody))
         }
     }
@@ -340,6 +383,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
                     response_observed_at_ms: Date.now(),
                     round_trip_ms: Date.now() - callStartedAtMs,
                     response_wakeup: lastWakeSource,
+                    daemon_at_submission: readDaemonLiveness(spoolDir),
                 }
                 out = out && typeof out === 'object' && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
             }
