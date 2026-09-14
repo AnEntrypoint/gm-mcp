@@ -228,7 +228,36 @@ function cleanResponse(value, keyHint, outPath) {
     return value
 }
 
-const PLAIN_TEXT_BODY_VERBS = new Set(['exec_js', 'bash', 'python', 'powershell', 'ssh', 'go', 'rust', 'c', 'cpp', 'java', 'deno', 'serp', 'browser', 'cdp'])
+const BROWSER_PLAIN_TEXT_VERBS = ['serp', 'browser', 'cdp']
+
+// The exec family: exec_js, its aliases, and every language stem it backs.
+// gm rejects a body for these verbs that carries no `timeoutMs=<ms>` line
+// (`invalid_args: missing timeoutMs`), so the wrapper adds one from its own
+// timeout_seconds when the caller did not write it.
+const EXEC_FAMILY_VERBS = ['exec_js', 'nodejs', 'javascript', 'node', 'js', 'typescript', 'bash', 'sh', 'shell', 'zsh', 'python', 'py', 'powershell', 'ps1', 'ssh', 'go', 'rust', 'c', 'cpp', 'java', 'deno']
+
+const PLAIN_TEXT_BODY_VERBS = new Set([...EXEC_FAMILY_VERBS, ...BROWSER_PLAIN_TEXT_VERBS])
+
+const TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS)
+
+// Mirrors gm's own strip_timeout_ms_prefix_directive: leading whitespace is
+// skipped, then the first line must start with timeoutMs= or timeout_ms=.
+const TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/
+
+const DEFAULT_TIMEOUT_SECONDS = 120
+
+function timeoutMsFor(timeout_seconds) {
+    const seconds = Number(timeout_seconds)
+    return Math.max(100, Math.round((seconds > 0 ? seconds : DEFAULT_TIMEOUT_SECONDS) * 1000))
+}
+
+// Returns the raw body with a timeoutMs=<ms> first line for an exec-family
+// verb that lacks one. An explicit timeoutMs=/timeout_ms= line always wins.
+export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
+    if (!TIMEOUT_MS_PREFIX_VERBS.has(verb)) return raw_body
+    if (TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return raw_body
+    return `timeoutMs=${timeoutMsFor(timeout_seconds)}\n${raw_body}`
+}
 
 const DAEMON_HEARTBEAT_STALE_MS = 20000
 
@@ -379,7 +408,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
     if (!resume_task) {
         ensureSpoolRunnerRunning(root)
         if (isPlainText) {
-            publishSpoolRequest(inDir, inPath, n, raw_body)
+            publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds))
         } else {
             const fullBody = { ...normalizedBody, session_id }
             publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody))

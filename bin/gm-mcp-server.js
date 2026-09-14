@@ -37717,7 +37717,22 @@ function cleanResponse(value, keyHint, outPath) {
   if (typeof value === "string" && keyHint) return truncateLongText(value, keyHint, outPath);
   return value;
 }
-var PLAIN_TEXT_BODY_VERBS = /* @__PURE__ */ new Set(["exec_js", "bash", "python", "powershell", "ssh", "go", "rust", "c", "cpp", "java", "deno", "serp", "browser", "cdp"]);
+var BROWSER_PLAIN_TEXT_VERBS = ["serp", "browser", "cdp"];
+var EXEC_FAMILY_VERBS = ["exec_js", "nodejs", "javascript", "node", "js", "typescript", "bash", "sh", "shell", "zsh", "python", "py", "powershell", "ps1", "ssh", "go", "rust", "c", "cpp", "java", "deno"];
+var PLAIN_TEXT_BODY_VERBS = /* @__PURE__ */ new Set([...EXEC_FAMILY_VERBS, ...BROWSER_PLAIN_TEXT_VERBS]);
+var TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS);
+var TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/;
+var DEFAULT_TIMEOUT_SECONDS = 120;
+function timeoutMsFor(timeout_seconds) {
+  const seconds = Number(timeout_seconds);
+  return Math.max(100, Math.round((seconds > 0 ? seconds : DEFAULT_TIMEOUT_SECONDS) * 1e3));
+}
+function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
+  if (!TIMEOUT_MS_PREFIX_VERBS.has(verb)) return raw_body;
+  if (TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return raw_body;
+  return `timeoutMs=${timeoutMsFor(timeout_seconds)}
+${raw_body}`;
+}
 var DAEMON_HEARTBEAT_STALE_MS = 2e4;
 function readDaemonLiveness(spoolDir) {
   let status;
@@ -37833,7 +37848,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
   if (!resume_task) {
     ensureSpoolRunnerRunning(root);
     if (isPlainText) {
-      publishSpoolRequest(inDir, inPath, n, raw_body);
+      publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds));
     } else {
       const fullBody = { ...normalizedBody, session_id };
       publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody));
@@ -37918,7 +37933,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
 
 // src/index.js
 function createServer() {
-  const server = new McpServer({ name: "gm-mcp", version: "0.1.0" });
+  const server = new McpServer({ name: "gm-mcp", version: "0.2.1" });
   const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`;
   server.registerTool(
     "gm_instruction",

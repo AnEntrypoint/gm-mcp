@@ -1,6 +1,6 @@
 {
   "name": "gm-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "MCP server exposing gm's spool dispatch cycle (write, poll, cleaned response) to any MCP client",
   "type": "module",
   "main": "src/index.js",
