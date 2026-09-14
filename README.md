@@ -21,35 +21,33 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
 ## Usage
 
 Not published to npm -- `gm-mcp` is an unrelated package on the npm
-registry. Run it straight from this repo:
-
-```bash
-npx -y github:AnEntrypoint/gm-mcp
-```
-
-The shipped `bin/gm-mcp-server.js` is a pre-bundled, dependency-free file (see
-Development below) -- `npx` only needs to fetch the repo and run `node` on it,
-no separate `npm install` of transitive dependencies is required at launch.
-
-`npx -y github:AnEntrypoint/gm-mcp` run bare in a terminal with no MCP client
-attached stays running until stdin closes or the process is killed; a stdin
-close alone no longer exits the process (`gm-mcp: stdin ended (client
-disconnected or platform pipe quirk) -- server stays up` on stderr), since an
-MCP stdio client can legitimately half-close stdin without ending the session.
-`gm-mcp: connected, serving on stdio` on stderr confirms the server started.
-
-Add it to your MCP client's server config, e.g.:
+registry. The shipped `bin/gm-mcp-server.js` is a pre-bundled, dependency-free
+file (see Development below); `npx github:AnEntrypoint/gm -g` (the gm
+installer) vendors it to `~/.gm-tools/gm-mcp-server.mjs` and registers that
+local file with every agent host:
 
 ```json
 {
   "mcpServers": {
     "gm": {
-      "command": "npx",
-      "args": ["-y", "github:AnEntrypoint/gm-mcp"]
+      "command": "node",
+      "args": ["/home/you/.gm-tools/gm-mcp-server.mjs"]
     }
   }
 }
 ```
+
+Never register `npx -y github:AnEntrypoint/gm-mcp` as the server command: npx
+re-resolves the git ref over the network and reinstalls on every connect
+(8.2s warm cache, 22.2s cold, vs 0.19s launching the bundle from disk), which
+trips Claude Code's 30s connect timeout under load.
+
+Run bare in a terminal with no MCP client attached the server stays running
+until stdin closes or the process is killed; a stdin close alone does not exit
+the process (`gm-mcp: stdin ended (client disconnected or platform pipe quirk)
+-- server stays up` on stderr), since an MCP stdio client can legitimately
+half-close stdin without ending the session. `gm-mcp: connected, serving on
+stdio` on stderr confirms the server started.
 
 ## Development
 
