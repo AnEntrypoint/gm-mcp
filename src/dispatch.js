@@ -298,6 +298,39 @@ function withResumeDisclosure(out, disclosure) {
     return { ...out, [key]: disclosure }
 }
 
+// instruction's served phase prose is tens of kilobytes and identical on
+// nearly every call within a phase. The server omits it (instruction_unchanged:
+// true, instruction: "") only when the caller asserts the hash of prose it is
+// already holding -- so this process remembers, per (project root, session),
+// the hash of the last prose it actually returned to a caller, and asserts it
+// on that owner's next instruction dispatch. Keyed on the session as well as
+// the root because the assertion is a claim about what THIS caller has seen;
+// process-lifetime only, so a restarted server (a new agent session) is served
+// the prose once again rather than inheriting a claim it cannot honour.
+const deliveredInstructionHashByOwner = new Map()
+
+function instructionOwnerKey(root, sessionId) {
+    return `${path.resolve(root)} ${sessionId}`
+}
+
+function withAssertedInstructionHash(verb, body, root, sessionId) {
+    if (verb !== 'instruction') return body
+    if (typeof body.instruction_hash === 'string' || typeof body.known_instruction_hash === 'string') return body
+    const known = deliveredInstructionHashByOwner.get(instructionOwnerKey(root, sessionId))
+    return known ? { ...body, instruction_hash: known } : body
+}
+
+function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
+    if (verb !== 'instruction' || !parsed || parsed.ok === false) return
+    const data = parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed
+    const hash = typeof data.instruction_hash === 'string' ? data.instruction_hash : ''
+    if (!hash) return
+    const prose = typeof data.instruction === 'string' ? data.instruction : ''
+    if (prose || data.instruction_unchanged === true) {
+        deliveredInstructionHashByOwner.set(instructionOwnerKey(root, sessionId), hash)
+    }
+}
+
 export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task }, signal) {
     if (!verb) return 'error: verb required'
     if (!session_id) return 'error: session_id required'
@@ -322,7 +355,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         if (normalized.error) return `error: ${normalized.error}`
         const diagnostic = objectBodyDiagnostic(verb, normalized.value)
         if (diagnostic) return `error: ${diagnostic}`
-        normalizedBody = normalized.value
+        normalizedBody = withAssertedInstructionHash(verb, normalized.value, root, session_id)
     }
 
     const inPath = path.join(inDir, `${n}.txt`)
@@ -368,6 +401,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         }
         try {
             const parsed = JSON.parse(fs.readFileSync(outPath, 'utf8'))
+            rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const cleaned = cleanResponse(parsed, undefined, outPath)
             let out = cleaned
             if (cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
@@ -376,6 +410,9 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
                 if (!collides) out = { ...rest, ...data }
             }
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
+            if (out && typeof out === 'object' && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
+                out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
+            }
             if (include_timing) {
                 const timingKey = out && typeof out === 'object' && !Array.isArray(out) && 'mcp_timing' in out ? 'mcp_client_timing' : 'mcp_timing'
                 const timing = {

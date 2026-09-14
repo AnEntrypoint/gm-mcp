@@ -37529,6 +37529,35 @@ function publishSpoolRequest(inDir, inPath, task, body) {
     if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
   }
 }
+function normalizedObjectBody(verb, body) {
+  if (body === void 0 || body === null) return { value: {} };
+  if (typeof body === "string") {
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch (error61) {
+      return { error: `${verb} body is a JSON string that cannot be parsed: ${error61.message}. Pass body as an object, or pass a valid JSON object string.` };
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { error: `${verb} body string must decode to a JSON object; received ${Array.isArray(parsed) ? "an array" : typeof parsed}.` };
+    }
+    return { value: parsed };
+  }
+  if (typeof body !== "object" || Array.isArray(body)) {
+    return { error: `${verb} body must be a JSON object; received ${Array.isArray(body) ? "an array" : typeof body}.` };
+  }
+  return { value: body };
+}
+function objectBodyDiagnostic(verb, body) {
+  if (verb === "prd-add" && (typeof body.id !== "string" || !body.id.trim())) {
+    return "prd-add requires a non-empty body.id. A blank id would create an unaddressable PRD row; provide a stable identifier before dispatching.";
+  }
+  if (verb !== "git_merge" || typeof body.ref === "string" && body.ref.trim()) return void 0;
+  if (typeof body.branch === "string" && body.branch.trim()) {
+    return 'git_merge requires body.ref. body.branch is not a git_merge field; call again with {"ref":"' + body.branch + '"}.';
+  }
+  return 'git_merge requires a non-empty body.ref, for example {"ref":"origin/main"}.';
+}
 var RUNNER_DIR = path.join(os.homedir(), ".gm-tools");
 var RUNNER_PATH = path.join(RUNNER_DIR, process.platform === "win32" ? "agentplug-runner.exe" : "agentplug-runner");
 var ENSURE_INTERVAL_MS = 15e3;
@@ -37705,7 +37734,10 @@ function readDaemonLiveness(spoolDir) {
   const note = !alive ? "daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch's fault" : busy ? "daemon is alive and still actively working on this project" : "daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that";
   const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note };
   if (status.runtime) liveness.runtime = status.runtime;
+  if (typeof status.shared_process === "boolean") liveness.shared_process = status.shared_process;
   if (typeof status.queue_wait_ms === "number") liveness.queue_wait_ms = status.queue_wait_ms;
+  if (typeof status.queue_depth === "number") liveness.queue_depth = status.queue_depth;
+  if (typeof status.queue_position === "number") liveness.queue_position = status.queue_position;
   if (status.runner_update_in_progress) {
     liveness.runner_update_in_progress = true;
     liveness.runner_update_waiting_ms = status.runner_update_waiting_ms ?? null;
@@ -37738,6 +37770,26 @@ function withResumeDisclosure(out, disclosure) {
   const key = "resumed" in out ? "resumed_dispatch" : "resumed";
   return { ...out, [key]: disclosure };
 }
+var deliveredInstructionHashByOwner = /* @__PURE__ */ new Map();
+function instructionOwnerKey(root, sessionId) {
+  return `${path.resolve(root)}\0${sessionId}`;
+}
+function withAssertedInstructionHash(verb, body, root, sessionId) {
+  if (verb !== "instruction") return body;
+  if (typeof body.instruction_hash === "string" || typeof body.known_instruction_hash === "string") return body;
+  const known = deliveredInstructionHashByOwner.get(instructionOwnerKey(root, sessionId));
+  return known ? { ...body, instruction_hash: known } : body;
+}
+function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
+  if (verb !== "instruction" || !parsed || parsed.ok === false) return;
+  const data = parsed.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  const hash2 = typeof data.instruction_hash === "string" ? data.instruction_hash : "";
+  if (!hash2) return;
+  const prose = typeof data.instruction === "string" ? data.instruction : "";
+  if (prose || data.instruction_unchanged === true) {
+    deliveredInstructionHashByOwner.set(instructionOwnerKey(root, sessionId), hash2);
+  }
+}
 async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task }, signal) {
   if (!verb) return "error: verb required";
   if (!session_id) return "error: session_id required";
@@ -37753,6 +37805,14 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
   const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === "string";
   if (!resume_task && isPlainText && typeof raw_body !== "string") {
     return `error: ${verb} takes a plain-text body -- pass raw_body (a string), not body (a JSON object)`;
+  }
+  let normalizedBody;
+  if (!resume_task && !isPlainText) {
+    const normalized = normalizedObjectBody(verb, body);
+    if (normalized.error) return `error: ${normalized.error}`;
+    const diagnostic = objectBodyDiagnostic(verb, normalized.value);
+    if (diagnostic) return `error: ${diagnostic}`;
+    normalizedBody = withAssertedInstructionHash(verb, normalized.value, root, session_id);
   }
   const inPath = path.join(inDir, `${n}.txt`);
   const outPath = path.join(outDir, `${verb}-${n}.json`);
@@ -37775,7 +37835,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
     if (isPlainText) {
       publishSpoolRequest(inDir, inPath, n, raw_body);
     } else {
-      const fullBody = { ...body || {}, session_id };
+      const fullBody = { ...normalizedBody, session_id };
       publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody));
     }
   }
@@ -37792,6 +37852,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
     }
     try {
       const parsed = JSON.parse(fs.readFileSync(outPath, "utf8"));
+      rememberDeliveredInstructionHash(verb, parsed, root, session_id);
       const cleaned = cleanResponse(parsed, void 0, outPath);
       let out = cleaned;
       if (cleaned && typeof cleaned === "object" && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === "object" && !Array.isArray(cleaned.data)) {
@@ -37800,13 +37861,17 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
         if (!collides) out = { ...rest, ...data };
       }
       if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs));
+      if (out && typeof out === "object" && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
+        out = { ...out, instruction_text_at: path.join(root, ".gm", "next-step.md") };
+      }
       if (include_timing) {
         const timingKey = out && typeof out === "object" && !Array.isArray(out) && "mcp_timing" in out ? "mcp_client_timing" : "mcp_timing";
         const timing = {
           submitted_at_ms: callStartedAtMs,
           response_observed_at_ms: Date.now(),
           round_trip_ms: Date.now() - callStartedAtMs,
-          response_wakeup: lastWakeSource
+          response_wakeup: lastWakeSource,
+          daemon_at_submission: readDaemonLiveness(spoolDir)
         };
         out = out && typeof out === "object" && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing };
       }
