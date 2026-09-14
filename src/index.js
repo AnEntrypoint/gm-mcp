@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { gmDispatch } from './dispatch.js'
 
 export function createServer() {
-    const server = new McpServer({ name: 'gm-mcp', version: '0.1.0' })
+    const server = new McpServer({ name: 'gm-mcp', version: '0.2.1' })
     const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`
 
     server.registerTool(

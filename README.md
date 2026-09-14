@@ -16,6 +16,7 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
   - empty/null fields removed at every level
 - A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look
 - Supports plain-text-body verbs (`exec_js` and every language stem it backs, `serp`, `browser`, `cdp`) via a `raw_body` string parameter, since these verbs reject a JSON-object body outright
+- Adds a `timeoutMs=<ms>` first line to an exec-family `raw_body` that has none, derived from `timeout_seconds` (see "Exec-family timeout prefix" below)
 
 ## Usage
 
@@ -91,6 +92,27 @@ at launch time.
 | `poll_interval_seconds` | number | no | Fallback response check interval when filesystem events are unavailable (default 0.25) |
 | `include_timing` | boolean | no | Include MCP submission-to-response timing and the last response wakeup source |
 | `resume_task` | string | no | The `task` field from a previous `timed_out`/aborted response -- keep polling that SAME dispatch instead of writing a new one |
+
+### Exec-family timeout prefix
+
+gm rejects an exec-family body that carries no `timeoutMs=<ms>` line. The
+error is `invalid_args: missing timeoutMs`. That answer costs one round trip
+and does no work. The exec family is `exec_js` (aliases `nodejs`, `javascript`, `node`, `js`,
+`typescript`) and every language stem: `bash`, `sh`, `shell`, `zsh`,
+`python`, `py`, `powershell`, `ps1`, `ssh`, `go`, `rust`, `c`, `cpp`,
+`java`, `deno`.
+
+For these verbs the server adds the line itself when `raw_body` lacks one:
+
+- the value is `timeout_seconds * 1000` (default 120000), floored at 100
+- a `raw_body` that already starts with `timeoutMs=<ms>` or `timeout_ms=<ms>`
+  (leading whitespace allowed) is sent unchanged -- an explicit line wins
+- `serp`, `browser` and `cdp` are not touched; they take a `timeout=<ms>`
+  line and carry their own default
+
+The daemon tails a task for 30 s of wall clock and then returns a partial
+result with its `task_id`. A `timeoutMs` above that window is still correct:
+the task keeps running and the response says how to continue it.
 
 ### Resuming a dispatch
 
