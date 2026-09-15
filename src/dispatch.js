@@ -193,6 +193,26 @@ function truncateLongText(value, key, outPath) {
 const HIT_ARRAY_KEYS = new Set(['recall_hits', 'bm25_hits', 'vector_hits'])
 const HIT_NOISE_KEYS = new Set(['cos', 'score', 'recency'])
 
+const FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS = new Set([
+    'session_mismatch',
+    'instruction_unchanged',
+    'instruction_suppressible_by_asserting_hash',
+    'recall_embed_failed',
+    'should_residual_scan',
+    'fsm_graph_rejected',
+])
+
+function dropDuplicateRows(rows) {
+    const seen = new Set()
+    return rows.filter(row => {
+        if (!row || typeof row !== 'object') return true
+        const fingerprint = JSON.stringify(row)
+        if (seen.has(fingerprint)) return false
+        seen.add(fingerprint)
+        return true
+    })
+}
+
 function cleanHit(hit, outPath) {
     if (!hit || typeof hit !== 'object') return hit
     const out = {}
@@ -208,15 +228,16 @@ function cleanHit(hit, outPath) {
 
 function cleanResponse(value, keyHint, outPath) {
     if (Array.isArray(value)) {
-        if (HIT_ARRAY_KEYS.has(keyHint)) return value.map(h => cleanHit(h, outPath))
+        if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map(h => cleanHit(h, outPath)))
         const cleaned = value.map(v => cleanResponse(v, undefined, outPath)).filter(v => v !== undefined)
-        return cleaned
+        return dropDuplicateRows(cleaned)
     }
     if (value && typeof value === 'object') {
         const out = {}
         for (const [k, v] of Object.entries(value)) {
             if (NOISE_KEYS.has(k)) continue
-            if (v === null || v === undefined) continue
+            if (v === null || v === undefined || v === '') continue
+            if (v === false && FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS.has(k)) continue
             const cleanedV = cleanResponse(v, k, outPath)
             if (Array.isArray(cleanedV) && cleanedV.length === 0) continue
             if (cleanedV && typeof cleanedV === 'object' && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue

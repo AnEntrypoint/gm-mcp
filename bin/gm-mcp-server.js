@@ -37686,6 +37686,24 @@ function truncateLongText(value, key, outPath) {
 }
 var HIT_ARRAY_KEYS = /* @__PURE__ */ new Set(["recall_hits", "bm25_hits", "vector_hits"]);
 var HIT_NOISE_KEYS = /* @__PURE__ */ new Set(["cos", "score", "recency"]);
+var FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS = /* @__PURE__ */ new Set([
+  "session_mismatch",
+  "instruction_unchanged",
+  "instruction_suppressible_by_asserting_hash",
+  "recall_embed_failed",
+  "should_residual_scan",
+  "fsm_graph_rejected"
+]);
+function dropDuplicateRows(rows) {
+  const seen = /* @__PURE__ */ new Set();
+  return rows.filter((row) => {
+    if (!row || typeof row !== "object") return true;
+    const fingerprint = JSON.stringify(row);
+    if (seen.has(fingerprint)) return false;
+    seen.add(fingerprint);
+    return true;
+  });
+}
 function cleanHit(hit, outPath) {
   if (!hit || typeof hit !== "object") return hit;
   const out = {};
@@ -37698,15 +37716,16 @@ function cleanHit(hit, outPath) {
 }
 function cleanResponse(value, keyHint, outPath) {
   if (Array.isArray(value)) {
-    if (HIT_ARRAY_KEYS.has(keyHint)) return value.map((h) => cleanHit(h, outPath));
+    if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map((h) => cleanHit(h, outPath)));
     const cleaned = value.map((v) => cleanResponse(v, void 0, outPath)).filter((v) => v !== void 0);
-    return cleaned;
+    return dropDuplicateRows(cleaned);
   }
   if (value && typeof value === "object") {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
       if (NOISE_KEYS.has(k)) continue;
-      if (v === null || v === void 0) continue;
+      if (v === null || v === void 0 || v === "") continue;
+      if (v === false && FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS.has(k)) continue;
       const cleanedV = cleanResponse(v, k, outPath);
       if (Array.isArray(cleanedV) && cleanedV.length === 0) continue;
       if (cleanedV && typeof cleanedV === "object" && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue;
@@ -37966,7 +37985,7 @@ function createServer() {
   server.registerTool(
     "gm",
     {
-      description: "Run the whole gm spool write-then-poll-for-response cycle for one verb dispatch in a single call, instead of writing the input file, polling for the output file, and reading it as three separate steps. Writes .gm/exec-spool/in/<verb>/<N>.txt, polls .gm/exec-spool/out/<verb>-<N>.json until it appears (or the timeout elapses), and returns its contents as flat YAML text, auto-cleaned for readability: opaque internal ids (dispatch_id, request_fingerprint) stripped, the redundant response/data nesting levels flattened up to the top (unless a field name would collide), long text fields (e.g. instruction phase prose) truncated with a pointer naming the on-disk file to read for the full text, hit-array ranking internals (cos/score/recency in recall_hits/bm25_hits/vector_hits) dropped, and empty/null fields removed at every level. A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look. For plain-text-body verbs (exec_js and every language stem it backs, serp, browser, cdp), pass raw_body instead of body -- these verbs reject a JSON object outright.",
+      description: "Run the whole gm spool write-then-poll-for-response cycle for one verb dispatch in a single call, instead of writing the input file, polling for the output file, and reading it as three separate steps. Writes .gm/exec-spool/in/<verb>/<N>.txt, polls .gm/exec-spool/out/<verb>-<N>.json until it appears (or the timeout elapses), and returns its contents as flat YAML text, auto-cleaned for readability: opaque internal ids (dispatch_id, request_fingerprint) stripped, the redundant response/data nesting levels flattened up to the top (unless a field name would collide), long text fields (e.g. instruction phase prose) truncated with a pointer naming the on-disk file to read for the full text, hit-array ranking internals (cos/score/recency in recall_hits/bm25_hits/vector_hits) dropped, byte-identical object rows repeated inside one array collapsed to the first copy, and empty/null/empty-string fields removed at every level along with a false on a flag that only ever means the absence of a problem (session_mismatch, instruction_unchanged, instruction_suppressible_by_asserting_hash, recall_embed_failed, should_residual_scan, fsm_graph_rejected). A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look. For plain-text-body verbs (exec_js and every language stem it backs, serp, browser, cdp), pass raw_body instead of body -- these verbs reject a JSON object outright.",
       inputSchema: {
         verb: external_exports.string().describe("gm spool verb name, e.g. instruction, prd-add, git_status, exec_js"),
         body: external_exports.record(external_exports.string(), external_exports.unknown()).optional().describe("JSON body for the dispatch. session_id is added automatically if not present. Not valid for plain-text-body verbs (exec_js and its language stems, serp, browser, cdp) -- use raw_body for those instead."),
