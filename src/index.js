@@ -19,12 +19,18 @@ export function createServer() {
                 poll_interval_seconds: z.number().optional().describe('Fallback response check interval in seconds when filesystem events are unavailable (default 0.25).'),
                 include_timing: z.boolean().optional().describe('Include MCP submission-to-response timing and the last response wakeup source.'),
                 resume_task: z.string().optional().describe('Resume a previous instruction dispatch without writing a new request.'),
+                mode: z.string().optional().describe('Pass "investigate_readonly" for a read-only/investigate-only ask (scan/grep/report, no code changes). Skips the SPECIFY->PROVE->EMIT->...->COMPLETE phase/PRD orchestration entirely and returns a short direct-execution instruction instead -- no phase is read or changed, no PRD/mutables state is touched. Omit for the normal phase-managed flow.'),
+                git_root_override: z.string().optional().describe('Pin the project root explicitly when cwd is not itself a git repo and is not inside one (e.g. a directory holding many unrelated repos for a cross-repo audit), or when the git subprocess is otherwise unavailable/contended. Skips `git rev-parse --show-toplevel` for this cwd; every .gm/ state file for this dispatch is then read/written under <git_root_override>/.gm. Prefer dispatching with cwd set to one of the actual repos under the directory when that is an option -- this is for the genuinely repo-less or multi-repo case.'),
             },
         },
         async (args = {}, extra) => {
             const text = await gmDispatch({
                 verb: 'instruction',
-                body: args.resume_task ? undefined : { prompt: args.prompt ?? '' },
+                body: args.resume_task ? undefined : {
+                    prompt: args.prompt ?? '',
+                    ...(args.mode ? { mode: args.mode } : {}),
+                    ...(args.git_root_override ? { git_root_override: args.git_root_override } : {}),
+                },
                 session_id: args.session_id || instructionSessionId,
                 cwd: args.cwd,
                 timeout_seconds: args.timeout_seconds,
