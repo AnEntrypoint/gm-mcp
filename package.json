@@ -12,7 +12,9 @@
     "bin/"
   ],
   "scripts": {
-    "build": "esbuild src/cli.js --bundle --platform=node --format=esm --outfile=bin/gm-mcp-server.js --external:node:* --banner:js=\"#!/usr/bin/env node\""
+    "build": "esbuild src/cli.js --bundle --platform=node --format=esm --outfile=bin/gm-mcp-server.js --external:node:* --banner:js=\"#!/usr/bin/env node\"",
+    "verify-build": "node scripts/check-bin-drift.mjs",
+    "postinstall": "node scripts/install-hooks.mjs"
   },
   "dependencies": {},
   "devDependencies": {

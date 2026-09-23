@@ -1,0 +1,5 @@
+#!/bin/sh
+# Blocks a push whose committed bin/gm-mcp-server.js does not match a fresh
+# build of src/ -- see scripts/check-bin-drift.mjs and README "Development".
+cd "$(dirname "$0")/.." || exit 1
+node scripts/check-bin-drift.mjs
