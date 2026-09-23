@@ -70,6 +70,12 @@ written with an empty body, and the caller got the resumed verb's own
 body-validation error (`query required`) with nothing pointing at the stale
 bundle. Rebuild in the same commit as any `src/` change.
 
+`npm run verify-build` rebuilds `src/` into a scratch buffer and fails if it
+differs from the committed `bin/gm-mcp-server.js`, naming the byte-count
+mismatch. `npm install` points this checkout's git hooks at `.githooks/`
+(`core.hooksPath`, local to this checkout, never committed) so `pre-push` runs
+it automatically and blocks a push carrying a stale bundle.
+
 Bundling exists because `npx github:...` installs have been observed to
 produce a corrupted transitive-dependency install (a `node_modules/ajv`
 directory present but missing its `package.json`) on some npm/npx versions,

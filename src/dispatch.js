@@ -251,18 +251,12 @@ function cleanResponse(value, keyHint, outPath) {
 
 const BROWSER_PLAIN_TEXT_VERBS = ['serp', 'browser', 'cdp']
 
-// The exec family: exec_js, its aliases, and every language stem it backs.
-// gm rejects a body for these verbs that carries no `timeoutMs=<ms>` line
-// (`invalid_args: missing timeoutMs`), so the wrapper adds one from its own
-// timeout_seconds when the caller did not write it.
 const EXEC_FAMILY_VERBS = ['exec_js', 'nodejs', 'javascript', 'node', 'js', 'typescript', 'bash', 'sh', 'shell', 'zsh', 'python', 'py', 'powershell', 'ps1', 'ssh', 'go', 'rust', 'c', 'cpp', 'java', 'deno']
 
 const PLAIN_TEXT_BODY_VERBS = new Set([...EXEC_FAMILY_VERBS, ...BROWSER_PLAIN_TEXT_VERBS])
 
 const TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS)
 
-// Mirrors gm's own strip_timeout_ms_prefix_directive: leading whitespace is
-// skipped, then the first line must start with timeoutMs= or timeout_ms=.
 const TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/
 
 const DEFAULT_TIMEOUT_SECONDS = 120
@@ -272,8 +266,6 @@ function timeoutMsFor(timeout_seconds) {
     return Math.max(100, Math.round((seconds > 0 ? seconds : DEFAULT_TIMEOUT_SECONDS) * 1000))
 }
 
-// Returns the raw body with a timeoutMs=<ms> first line for an exec-family
-// verb that lacks one. An explicit timeoutMs=/timeout_ms= line always wins.
 export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
     if (!TIMEOUT_MS_PREFIX_VERBS.has(verb)) return raw_body
     if (TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return raw_body
@@ -348,15 +340,6 @@ function withResumeDisclosure(out, disclosure) {
     return { ...out, [key]: disclosure }
 }
 
-// instruction's served phase prose is tens of kilobytes and identical on
-// nearly every call within a phase. The server omits it (instruction_unchanged:
-// true, instruction: "") only when the caller asserts the hash of prose it is
-// already holding -- so this process remembers, per (project root, session),
-// the hash of the last prose it actually returned to a caller, and asserts it
-// on that owner's next instruction dispatch. Keyed on the session as well as
-// the root because the assertion is a claim about what THIS caller has seen;
-// process-lifetime only, so a restarted server (a new agent session) is served
-// the prose once again rather than inheriting a claim it cannot honour.
 const deliveredInstructionHashByOwner = new Map()
 
 function instructionOwnerKey(root, sessionId) {
