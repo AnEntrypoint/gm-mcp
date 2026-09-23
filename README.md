@@ -12,7 +12,7 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
   - opaque internal ids (`dispatch_id`, `request_fingerprint`) stripped
   - the redundant `response`/`data` nesting levels flattened to the top (unless a field name would collide)
   - long text fields (e.g. `instruction`'s full phase prose) truncated with a pointer naming the on-disk file to read for the full text
-  - hit-array ranking internals (`cos`/`score`/`recency` in `recall_hits`/`bm25_hits`/`vector_hits`) dropped
+  - hit-array ranking internals (`cos`/`recency` in `recall_hits`/`bm25_hits`/`vector_hits`/`commits`) dropped, `score` retained as ranked evidence
   - byte-identical object rows repeated inside one array collapsed to the first copy
   - empty/null/empty-string fields removed at every level, and a `false` on a flag whose only meaning is the absence of a problem (`session_mismatch`, `instruction_unchanged`, `instruction_suppressible_by_asserting_hash`, `recall_embed_failed`, `should_residual_scan`, `fsm_graph_rejected`)
 - A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look

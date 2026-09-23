@@ -190,8 +190,8 @@ function truncateLongText(value, key, outPath) {
     return `${value.slice(0, LONG_TEXT_FIELD_TRUNCATE_AT)}... [${value.length} chars total, full text at ${outPath} field '${key}']`
 }
 
-const HIT_ARRAY_KEYS = new Set(['recall_hits', 'bm25_hits', 'vector_hits'])
-const HIT_NOISE_KEYS = new Set(['cos', 'score', 'recency'])
+const HIT_ARRAY_KEYS = new Set(['recall_hits', 'bm25_hits', 'vector_hits', 'commits'])
+const HIT_NOISE_KEYS = new Set(['cos', 'recency'])
 
 const FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS = new Set([
     'session_mismatch',
@@ -343,7 +343,7 @@ function withResumeDisclosure(out, disclosure) {
 const deliveredInstructionHashByOwner = new Map()
 
 function instructionOwnerKey(root, sessionId) {
-    return `${path.resolve(root)} ${sessionId}`
+    return `${path.resolve(root)} ${sessionId}`
 }
 
 function withAssertedInstructionHash(verb, body, root, sessionId) {
