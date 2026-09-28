@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { gmDispatch } from './dispatch.js'
+import { refreshStaleDeployedBundleInBackground } from './self-update.js'
 
 export function createServer() {
     const server = new McpServer({ name: 'gm-mcp', version: '0.2.1' })
@@ -87,4 +88,5 @@ export async function main() {
 
     await server.connect(transport)
     console.error('gm-mcp: connected, serving on stdio')
+    refreshStaleDeployedBundleInBackground()
 }

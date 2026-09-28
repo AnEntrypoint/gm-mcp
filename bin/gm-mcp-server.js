@@ -3262,8 +3262,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path2) {
-      let input2 = path2;
+    function removeDotSegments(path3) {
+      let input2 = path3;
       const output2 = [];
       let nextSlash = -1;
       let len = 0;
@@ -3672,8 +3672,8 @@ var require_schemes = __commonJS({
       }
       if (wsComponent.resourceName) {
         const queryIndex = wsComponent.resourceName.indexOf("?");
-        const path2 = queryIndex === -1 ? wsComponent.resourceName : wsComponent.resourceName.slice(0, queryIndex);
-        wsComponent.path = path2 && path2 !== "/" ? path2 : void 0;
+        const path3 = queryIndex === -1 ? wsComponent.resourceName : wsComponent.resourceName.slice(0, queryIndex);
+        wsComponent.path = path3 && path3 !== "/" ? path3 : void 0;
         wsComponent.query = queryIndex === -1 ? void 0 : wsComponent.resourceName.slice(queryIndex + 1);
         wsComponent.resourceName = void 0;
       }
@@ -7572,8 +7572,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path2, errorMaps, issueData } = params;
-  const fullPath = [...path2, ...issueData.path || []];
+  const { data, path: path3, errorMaps, issueData } = params;
+  const fullPath = [...path3, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7688,11 +7688,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path2, key) {
+  constructor(parent, value, path3, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path2;
+    this._path = path3;
     this._key = key;
   }
   get path() {
@@ -11580,10 +11580,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path2) {
-  if (!path2)
+function getElementAtPath(obj, path3) {
+  if (!path3)
     return obj;
-  return path2.reduce((acc, key) => acc?.[key], obj);
+  return path3.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11995,11 +11995,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path2, issues) {
+function prefixIssues(path3, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path2);
+    iss.path.unshift(path3);
     return iss;
   });
 }
@@ -12432,16 +12432,16 @@ function flattenError(error61, mapper = (issue2) => issue2.message) {
 }
 function formatError(error61, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error62, path2 = []) => {
+  const processError = (error62, path3 = []) => {
     for (const issue2 of error62.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path3, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
       } else {
-        const fullpath = [...path2, ...issue2.path];
+        const fullpath = [...path3, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -12480,17 +12480,17 @@ function formatError(error61, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error61, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error62, path2 = []) => {
+  const processError = (error62, path3 = []) => {
     var _a3;
     for (const issue2 of error62.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path3, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
       } else {
-        const fullpath = [...path2, ...issue2.path];
+        const fullpath = [...path3, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -12529,8 +12529,8 @@ function treeifyError(error61, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path2 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path2) {
+  const path3 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path3) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -27511,11 +27511,11 @@ function normalizeObjectSchema(schema) {
   }
   return void 0;
 }
-function getDotPath(path2) {
-  if (path2.length === 0) {
+function getDotPath(path3) {
+  if (path3.length === 0) {
     return "object root";
   }
-  return path2.reduce((acc, seg, index) => {
+  return path3.reduce((acc, seg, index) => {
     if (index === 0) {
       return String(seg);
     }
@@ -29678,13 +29678,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path2 = ref.slice(1).split("/").filter(Boolean);
-  if (path2.length === 0) {
+  const path3 = ref.slice(1).split("/").filter(Boolean);
+  if (path3.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path2[0] === defsKey) {
-    const key = path2[1] === void 0 ? void 0 : decodeJSONPointerSegment(path2[1]);
+  if (path3[0] === defsKey) {
+    const key = path3[1] === void 0 ? void 0 : decodeJSONPointerSegment(path3[1]);
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -37975,6 +37975,94 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
   }
 }
 
+// src/self-update.js
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import path2 from "node:path";
+import { fileURLToPath } from "node:url";
+var DEPLOYED_BUNDLE_FILE_NAME = "gm-mcp-server.mjs";
+var DEFAULT_BUNDLE_URL = "https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js";
+var DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1e3;
+var FETCH_TIMEOUT_MS = 2e4;
+var MIN_PLAUSIBLE_BUNDLE_BYTES = 1e5;
+var BUNDLE_SHEBANG = "#!/usr/bin/env node";
+var sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+var shortHash = (hex3) => hex3.slice(0, 12);
+function toolsDir() {
+  return process.env.GM_TOOLS_DIR || path2.join(homedir(), ".gm-tools");
+}
+function canonicalPath(file2) {
+  const resolved = realpathSync(file2);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+function isRunningFromDeployedBundle(deployedPath) {
+  if (!existsSync(deployedPath)) return false;
+  return canonicalPath(fileURLToPath(import.meta.url)) === canonicalPath(deployedPath);
+}
+function checkedRecently(stampPath) {
+  const intervalMs = Number(process.env.GM_MCP_SELF_UPDATE_INTERVAL_MS ?? DEFAULT_CHECK_INTERVAL_MS);
+  if (!existsSync(stampPath)) return false;
+  return Date.now() - statSync(stampPath).mtimeMs < intervalMs;
+}
+function touch(stampPath) {
+  if (!existsSync(stampPath)) writeFileSync(stampPath, "");
+  const now = /* @__PURE__ */ new Date();
+  utimesSync(stampPath, now, now);
+}
+async function fetchBundleBytes(url2) {
+  if (url2.startsWith("file:")) return readFileSync(fileURLToPath(url2));
+  const response = await fetch(url2, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  if (!response.ok) throw new Error(`HTTP ${response.status} from ${url2}`);
+  return Buffer.from(await response.arrayBuffer());
+}
+function assertLoadableBundle(bytes, candidatePath) {
+  if (bytes.length < MIN_PLAUSIBLE_BUNDLE_BYTES) throw new Error(`candidate bundle is only ${bytes.length} bytes`);
+  if (!bytes.subarray(0, BUNDLE_SHEBANG.length).toString("utf8").startsWith(BUNDLE_SHEBANG)) throw new Error("candidate bundle has no node shebang");
+  const syntaxCheck = spawnSync(process.execPath, ["--check", candidatePath], { encoding: "utf8" });
+  if (syntaxCheck.status !== 0) throw new Error(`candidate bundle fails node --check: ${syntaxCheck.stderr.trim().split("\n")[0]}`);
+}
+function replaceDeployedBundle(deployedPath, bytes) {
+  const candidatePath = `${deployedPath}.candidate.${process.pid}.mjs`;
+  writeFileSync(candidatePath, bytes);
+  try {
+    assertLoadableBundle(bytes, candidatePath);
+    copyFileSync(deployedPath, `${deployedPath}.prev`);
+    renameSync(candidatePath, deployedPath);
+  } catch (error61) {
+    if (existsSync(candidatePath)) unlinkSync(candidatePath);
+    throw error61;
+  }
+}
+async function refreshStaleDeployedBundle() {
+  if (process.env.GM_MCP_SELF_UPDATE === "0") return { outcome: "disabled" };
+  const deployedPath = path2.join(toolsDir(), DEPLOYED_BUNDLE_FILE_NAME);
+  if (!isRunningFromDeployedBundle(deployedPath)) return { outcome: "not-deployed-copy" };
+  const stampPath = `${deployedPath}.checked`;
+  if (checkedRecently(stampPath)) return { outcome: "checked-recently" };
+  const url2 = process.env.GM_MCP_BUNDLE_URL || DEFAULT_BUNDLE_URL;
+  const freshBytes = await fetchBundleBytes(url2);
+  const freshHash = sha256(freshBytes);
+  const deployedHash = sha256(readFileSync(deployedPath));
+  if (freshHash === deployedHash) {
+    touch(stampPath);
+    return { outcome: "current", hash: freshHash };
+  }
+  replaceDeployedBundle(deployedPath, freshBytes);
+  touch(stampPath);
+  return { outcome: "refreshed", from: deployedHash, to: freshHash, url: url2 };
+}
+function refreshStaleDeployedBundleInBackground() {
+  refreshStaleDeployedBundle().then((result) => {
+    if (result.outcome === "refreshed") {
+      console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} from ${result.url}; takes effect on next connect (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`);
+    }
+  }).catch((error61) => {
+    console.error(`gm-mcp: bundle staleness check failed (${error61.message}); keeping the deployed copy`);
+  });
+}
+
 // src/index.js
 function createServer() {
   const server = new McpServer({ name: "gm-mcp", version: "0.2.1" });
@@ -38054,6 +38142,7 @@ async function main() {
   });
   await server.connect(transport);
   console.error("gm-mcp: connected, serving on stdio");
+  refreshStaleDeployedBundleInBackground();
 }
 
 // src/cli.js
