@@ -188,11 +188,14 @@ const EXEC_OUTPUT_KEYS = new Set(['stdout', 'stderr', 'result'])
 
 const EXEC_OUTPUT_FIELD_TRUNCATE_AT = 16_000
 
-function truncateLongText(value, key, outPath) {
+function truncateLongText(value, key, outPath, plainTextFile) {
     if (typeof value !== 'string') return value
     if (EXEC_OUTPUT_KEYS.has(key)) {
         if (value.length <= EXEC_OUTPUT_FIELD_TRUNCATE_AT) return value
-        return `${value.slice(0, EXEC_OUTPUT_FIELD_TRUNCATE_AT)}... [OUTPUT TRUNCATED: showing ${EXEC_OUTPUT_FIELD_TRUNCATE_AT} of ${value.length} chars of '${key}' -- the full output is in ${outPath}, in the JSON string field 'data' (parse it, then read '${key}')]`
+        const where = plainTextFile
+            ? `the full text is in ${plainTextFile}, plain text with a '## ${key}' section, readable directly`
+            : `the full output is in ${outPath}, in the JSON string field 'data' (parse it, then read '${key}')`
+        return `${value.slice(0, EXEC_OUTPUT_FIELD_TRUNCATE_AT)}... [OUTPUT TRUNCATED: showing ${EXEC_OUTPUT_FIELD_TRUNCATE_AT} of ${value.length} chars of '${key}' -- ${where}]`
     }
     if (value.length <= LONG_TEXT_FIELD_TRUNCATE_AT) return value
     if (NEVER_TRUNCATE_KEYS.has(key)) return value
@@ -222,23 +225,23 @@ function dropDuplicateRows(rows) {
     })
 }
 
-function cleanHit(hit, outPath) {
+function cleanHit(hit, outPath, plainTextFile) {
     if (!hit || typeof hit !== 'object') return hit
     const out = {}
     for (const [k, v] of Object.entries(hit)) {
         if (HIT_NOISE_KEYS.has(k)) continue
         if (v === '' || v === null || v === undefined) continue
-        out[k] = typeof v === 'string' ? truncateLongText(v, k, outPath)
-            : (v && typeof v === 'object' && !Array.isArray(v)) ? cleanHit(v, outPath)
+        out[k] = typeof v === 'string' ? truncateLongText(v, k, outPath, plainTextFile)
+            : (v && typeof v === 'object' && !Array.isArray(v)) ? cleanHit(v, outPath, plainTextFile)
             : v
     }
     return out
 }
 
-function cleanResponse(value, keyHint, outPath) {
+function cleanResponse(value, keyHint, outPath, plainTextFile) {
     if (Array.isArray(value)) {
-        if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map(h => cleanHit(h, outPath)))
-        const cleaned = value.map(v => cleanResponse(v, undefined, outPath)).filter(v => v !== undefined)
+        if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map(h => cleanHit(h, outPath, plainTextFile)))
+        const cleaned = value.map(v => cleanResponse(v, undefined, outPath, plainTextFile)).filter(v => v !== undefined)
         return dropDuplicateRows(cleaned)
     }
     if (value && typeof value === 'object') {
@@ -247,14 +250,21 @@ function cleanResponse(value, keyHint, outPath) {
             if (NOISE_KEYS.has(k)) continue
             if (v === null || v === undefined || v === '') continue
             if (v === false && FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS.has(k)) continue
-            const cleanedV = cleanResponse(v, k, outPath)
+            if (plainTextFile && k === 'result' && v && typeof v === 'object') {
+                const serialized = JSON.stringify(v)
+                if (serialized.length > EXEC_OUTPUT_FIELD_TRUNCATE_AT) {
+                    out[k] = truncateLongText(serialized, k, outPath, plainTextFile)
+                    continue
+                }
+            }
+            const cleanedV = cleanResponse(v, k, outPath, plainTextFile)
             if (Array.isArray(cleanedV) && cleanedV.length === 0) continue
             if (cleanedV && typeof cleanedV === 'object' && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue
             out[k] = cleanedV
         }
         return out
     }
-    if (typeof value === 'string' && keyHint) return truncateLongText(value, keyHint, outPath)
+    if (typeof value === 'string' && keyHint) return truncateLongText(value, keyHint, outPath, plainTextFile)
     return value
 }
 
@@ -271,6 +281,8 @@ const TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/
 const TIMEOUT_MS_PREFIX_VALUE = /^\s*timeout(?:Ms|_ms)=(\d+)/
 
 const DEFAULT_TIMEOUT_SECONDS = 120
+
+const EXEC_DEFAULT_LIMIT_SECONDS = 300
 
 const POLL_MARGIN_PAST_EXEC_TIMEOUT_MS = 5000
 
@@ -294,7 +306,7 @@ export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
 
 function timeoutMsFor(timeout_seconds) {
     const seconds = Number(timeout_seconds)
-    return Math.max(100, Math.round((seconds > 0 ? seconds : DEFAULT_TIMEOUT_SECONDS) * 1000))
+    return Math.max(100, Math.round((seconds > 0 ? seconds : EXEC_DEFAULT_LIMIT_SECONDS) * 1000))
 }
 
 export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
@@ -466,7 +478,8 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         try {
             const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, 'utf8')))
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
-            const cleaned = cleanResponse(parsed, undefined, outPath)
+            const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
+            const cleaned = cleanResponse(parsed, undefined, outPath, plainTextFile)
             let out = cleaned
             if (cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
                 const { data, ...rest } = cleaned
@@ -495,8 +508,25 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         }
     }
 
+    const withdrawUnclaimedRequest = () => {
+        if (resume_task) return false
+        try {
+            fs.unlinkSync(inPath)
+            return true
+        } catch {
+            return false
+        }
+    }
+    const abortedReply = () => toYaml({
+        error: 'aborted',
+        task: n,
+        in_path: inPath,
+        out_path: outPath,
+        request_withdrawn_before_claim: withdrawUnclaimedRequest(),
+    })
+
     while (true) {
-        if (signal?.aborted) return toYaml({ error: 'aborted', task: n, in_path: inPath, out_path: outPath })
+        if (signal?.aborted) return abortedReply()
         const landed = readLandedOutFile()
         if (landed !== undefined) return landed
         if (Date.now() >= deadline) {
@@ -525,7 +555,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         try {
             lastWakeSource = await waitForSpoolChange(outDir, outPath, deadline - Date.now(), pollMs, signal)
         } catch {
-            return toYaml({ error: 'aborted', task: n, in_path: inPath, out_path: outPath })
+            return abortedReply()
         }
     }
 }
