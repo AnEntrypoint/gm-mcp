@@ -115,16 +115,19 @@ at launch time.
 
 ### Exec-family timeout prefix
 
-gm rejects an exec-family body that carries no `timeoutMs=<ms>` line. The
-error is `invalid_args: missing timeoutMs`. That answer costs one round trip
-and does no work. The exec family is `exec_js` (aliases `nodejs`, `javascript`, `node`, `js`,
+The daemon enforces `timeoutMs=<ms>` as a wall-clock limit on the exec child:
+it defaults to 300000 when the line is absent, is clamped to a hard ceiling of
+900000 (the reply then carries `limit_clamped_from_ms`), and at expiry the whole
+process tree is killed and the reply is `{ok:false, timed_out:true, killed:true,
+error_code:"exec_timeout", limit_ms, ...}` with whatever stdout/stderr had been
+produced. The exec family is `exec_js` (aliases `nodejs`, `javascript`, `node`, `js`,
 `typescript`) and every language stem: `bash`, `sh`, `shell`, `zsh`,
 `python`, `py`, `powershell`, `ps1`, `ssh`, `go`, `rust`, `c`, `cpp`,
 `java`, `deno`.
 
 For these verbs the server adds the line itself when `raw_body` lacks one:
 
-- the value is `timeout_seconds * 1000` (default 120000), floored at 100
+- the value is `timeout_seconds * 1000` (default 300000), floored at 100
 - a `raw_body` that already starts with `timeoutMs=<ms>` or `timeout_ms=<ms>`
   (leading whitespace allowed) is sent unchanged -- an explicit line wins
 - `serp`, `browser` and `cdp` are not touched; they take a `timeout=<ms>`
@@ -134,15 +137,19 @@ The prefix is the process budget the daemon enforces; `timeout_seconds` is how
 long this wrapper polls. When only the prefix is given, the wrapper polls for
 the prefix plus 5 s, so a `timeoutMs=240000` body is awaited for 245 s. When
 both are given, `timeout_seconds` wins for the poll: a shorter value returns
-`timed_out:true` with a `task` to `resume_task`, a longer one just waits. A body
-that outlives its own `timeoutMs` is not killed: the daemon answers with
-`in_progress` and a `task_id` that keeps running in the background.
+`timed_out:true` with a `task` to `resume_task`, a longer one just waits. Because
+the daemon kills the child at `timeoutMs`, an abandoned call never leaves a
+runaway process: it ends at the limit. An aborted call also withdraws its
+request from the spool when the daemon has not claimed it yet
+(`request_withdrawn_before_claim`).
 
 Exec-family `stdout`, `stderr` and `result` are shown in full up to 16000
 characters each. The out-file wraps them in a JSON string field `data`; the
 wrapper unpacks it so the fields print flat. A longer field ends in
-`OUTPUT TRUNCATED: showing 16000 of N chars` and names the out-file holding the
-whole value. Other long text fields stay capped at 400 characters with the same
+`OUTPUT TRUNCATED: showing 16000 of N chars` and names `result_file`, a plain
+text `<verb>-<task>.txt` next to the out-file (sections `## result`, `## stdout`,
+`## stderr`, un-escaped) that the daemon writes whenever a field exceeds 2000
+characters; older daemons name the JSON out-file and its `data` field instead. Other long text fields stay capped at 400 characters with the same
 kind of pointer.
 
 ### Resuming a dispatch

@@ -37681,11 +37681,12 @@ var LONG_TEXT_FIELD_TRUNCATE_AT = 400;
 var NEVER_TRUNCATE_KEYS = /* @__PURE__ */ new Set(["error", "reason", "residuals"]);
 var EXEC_OUTPUT_KEYS = /* @__PURE__ */ new Set(["stdout", "stderr", "result"]);
 var EXEC_OUTPUT_FIELD_TRUNCATE_AT = 16e3;
-function truncateLongText(value, key, outPath) {
+function truncateLongText(value, key, outPath, plainTextFile) {
   if (typeof value !== "string") return value;
   if (EXEC_OUTPUT_KEYS.has(key)) {
     if (value.length <= EXEC_OUTPUT_FIELD_TRUNCATE_AT) return value;
-    return `${value.slice(0, EXEC_OUTPUT_FIELD_TRUNCATE_AT)}... [OUTPUT TRUNCATED: showing ${EXEC_OUTPUT_FIELD_TRUNCATE_AT} of ${value.length} chars of '${key}' -- the full output is in ${outPath}, in the JSON string field 'data' (parse it, then read '${key}')]`;
+    const where = plainTextFile ? `the full text is in ${plainTextFile}, plain text with a '## ${key}' section, readable directly` : `the full output is in ${outPath}, in the JSON string field 'data' (parse it, then read '${key}')`;
+    return `${value.slice(0, EXEC_OUTPUT_FIELD_TRUNCATE_AT)}... [OUTPUT TRUNCATED: showing ${EXEC_OUTPUT_FIELD_TRUNCATE_AT} of ${value.length} chars of '${key}' -- ${where}]`;
   }
   if (value.length <= LONG_TEXT_FIELD_TRUNCATE_AT) return value;
   if (NEVER_TRUNCATE_KEYS.has(key)) return value;
@@ -37711,20 +37712,20 @@ function dropDuplicateRows(rows) {
     return true;
   });
 }
-function cleanHit(hit, outPath) {
+function cleanHit(hit, outPath, plainTextFile) {
   if (!hit || typeof hit !== "object") return hit;
   const out = {};
   for (const [k, v] of Object.entries(hit)) {
     if (HIT_NOISE_KEYS.has(k)) continue;
     if (v === "" || v === null || v === void 0) continue;
-    out[k] = typeof v === "string" ? truncateLongText(v, k, outPath) : v && typeof v === "object" && !Array.isArray(v) ? cleanHit(v, outPath) : v;
+    out[k] = typeof v === "string" ? truncateLongText(v, k, outPath, plainTextFile) : v && typeof v === "object" && !Array.isArray(v) ? cleanHit(v, outPath, plainTextFile) : v;
   }
   return out;
 }
-function cleanResponse(value, keyHint, outPath) {
+function cleanResponse(value, keyHint, outPath, plainTextFile) {
   if (Array.isArray(value)) {
-    if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map((h) => cleanHit(h, outPath)));
-    const cleaned = value.map((v) => cleanResponse(v, void 0, outPath)).filter((v) => v !== void 0);
+    if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map((h) => cleanHit(h, outPath, plainTextFile)));
+    const cleaned = value.map((v) => cleanResponse(v, void 0, outPath, plainTextFile)).filter((v) => v !== void 0);
     return dropDuplicateRows(cleaned);
   }
   if (value && typeof value === "object") {
@@ -37733,14 +37734,21 @@ function cleanResponse(value, keyHint, outPath) {
       if (NOISE_KEYS.has(k)) continue;
       if (v === null || v === void 0 || v === "") continue;
       if (v === false && FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS.has(k)) continue;
-      const cleanedV = cleanResponse(v, k, outPath);
+      if (plainTextFile && k === "result" && v && typeof v === "object") {
+        const serialized = JSON.stringify(v);
+        if (serialized.length > EXEC_OUTPUT_FIELD_TRUNCATE_AT) {
+          out[k] = truncateLongText(serialized, k, outPath, plainTextFile);
+          continue;
+        }
+      }
+      const cleanedV = cleanResponse(v, k, outPath, plainTextFile);
       if (Array.isArray(cleanedV) && cleanedV.length === 0) continue;
       if (cleanedV && typeof cleanedV === "object" && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue;
       out[k] = cleanedV;
     }
     return out;
   }
-  if (typeof value === "string" && keyHint) return truncateLongText(value, keyHint, outPath);
+  if (typeof value === "string" && keyHint) return truncateLongText(value, keyHint, outPath, plainTextFile);
   return value;
 }
 var BROWSER_PLAIN_TEXT_VERBS = ["serp", "browser", "cdp"];
@@ -37750,6 +37758,7 @@ var TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS);
 var TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/;
 var TIMEOUT_MS_PREFIX_VALUE = /^\s*timeout(?:Ms|_ms)=(\d+)/;
 var DEFAULT_TIMEOUT_SECONDS = 120;
+var EXEC_DEFAULT_LIMIT_SECONDS = 300;
 var POLL_MARGIN_PAST_EXEC_TIMEOUT_MS = 5e3;
 function unpackExecOutputEnvelope(verb, parsed) {
   if (!EXEC_FAMILY_VERBS.includes(verb) || !parsed || typeof parsed.data !== "string") return parsed;
@@ -37769,7 +37778,7 @@ function pollTimeoutMs(verb, raw_body, timeout_seconds) {
 }
 function timeoutMsFor(timeout_seconds) {
   const seconds = Number(timeout_seconds);
-  return Math.max(100, Math.round((seconds > 0 ? seconds : DEFAULT_TIMEOUT_SECONDS) * 1e3));
+  return Math.max(100, Math.round((seconds > 0 ? seconds : EXEC_DEFAULT_LIMIT_SECONDS) * 1e3));
 }
 function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
   if (!TIMEOUT_MS_PREFIX_VERBS.has(verb)) return raw_body;
@@ -37912,7 +37921,8 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
     try {
       const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, "utf8")));
       rememberDeliveredInstructionHash(verb, parsed, root, session_id);
-      const cleaned = cleanResponse(parsed, void 0, outPath);
+      const plainTextFile = typeof parsed?.result_file === "string" ? parsed.result_file : void 0;
+      const cleaned = cleanResponse(parsed, void 0, outPath, plainTextFile);
       let out = cleaned;
       if (cleaned && typeof cleaned === "object" && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === "object" && !Array.isArray(cleaned.data)) {
         const { data, ...rest } = cleaned;
@@ -37940,8 +37950,24 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
       return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed);
     }
   };
+  const withdrawUnclaimedRequest = () => {
+    if (resume_task) return false;
+    try {
+      fs.unlinkSync(inPath);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const abortedReply = () => toYaml({
+    error: "aborted",
+    task: n,
+    in_path: inPath,
+    out_path: outPath,
+    request_withdrawn_before_claim: withdrawUnclaimedRequest()
+  });
   while (true) {
-    if (signal?.aborted) return toYaml({ error: "aborted", task: n, in_path: inPath, out_path: outPath });
+    if (signal?.aborted) return abortedReply();
     const landed = readLandedOutFile();
     if (landed !== void 0) return landed;
     if (Date.now() >= deadline) {
@@ -37970,7 +37996,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
     try {
       lastWakeSource = await waitForSpoolChange(outDir, outPath, deadline - Date.now(), pollMs, signal);
     } catch {
-      return toYaml({ error: "aborted", task: n, in_path: inPath, out_path: outPath });
+      return abortedReply();
     }
   }
 }

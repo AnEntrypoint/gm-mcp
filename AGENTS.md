@@ -20,13 +20,17 @@ what README does not.
 - `pollTimeoutMs` is how long the wrapper polls, not what the daemon enforces.
   An explicit `timeout_seconds` wins; otherwise an exec-family body that starts
   with `timeoutMs=<ms>` is awaited for that value plus 5 s (never less than 120 s),
-  because the daemon runs the body for the full `timeoutMs` before it answers with
-  a background `task_id`. A `resume_task` poll sends no body, so it only has
+  because the daemon enforces `timeoutMs` as a wall-clock limit and kills the
+  child tree at expiry, answering with `exec_timeout` at that point. The prefix the
+  wrapper injects when the body has none is 300000 (`EXEC_DEFAULT_LIMIT_SECONDS`),
+  the daemon default, while the poll without a prefix stays 120 s. A `resume_task` poll sends no body, so it only has
   `timeout_seconds` to go on.
 - `unpackExecOutputEnvelope` parses the exec family's `data` JSON string into an
   object before cleaning, so `stdout`, `stderr` and `result` keep their own
   16000-character cap (`EXEC_OUTPUT_FIELD_TRUNCATE_AT`) instead of sharing the
   400-character cap of the packed string. The truncation marker names the
-  out-file and says the value sits inside its `data` string, because the file
-  itself still holds the packed form.
+  daemon's `result_file` (a plain-text sibling of the out-file, written when a field
+  exceeds 2000 characters) and, for a daemon that predates it, the out-file with a
+  note that the value sits inside its `data` string. A structured `result` is
+  capped by its compact JSON length only when `result_file` is present.
 - `src/self-update.js` only replaces the file it is itself running from, and only when that file is the deployed `gm-mcp-server.mjs` under `GM_TOOLS_DIR`/`~/.gm-tools` -- a dev checkout or `src/` run reports `not-deployed-copy` and is never overwritten. The fetch runs after `server.connect` so it can never delay the 30s connect window; the new bundle is served from the next connect, not the current process. `bin/gm-mcp-server.js` on `main` is therefore the live release channel: pushing a drifted bundle publishes it to every deployed copy within an hour.
