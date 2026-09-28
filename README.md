@@ -43,6 +43,21 @@ re-resolves the git ref over the network and reinstalls on every connect
 (8.2s warm cache, 22.2s cold, vs 0.19s launching the bundle from disk), which
 trips Claude Code's 30s connect timeout under load.
 
+### Self-updating deployed copy
+
+A bundle running from `~/.gm-tools/gm-mcp-server.mjs` (or `$GM_TOOLS_DIR`) checks
+itself against `bin/gm-mcp-server.js` on `main` in the background after it
+connects, at most once per hour. On a sha256 mismatch it validates the fresh
+bundle (size, shebang, `node --check`), keeps the old one as
+`gm-mcp-server.mjs.prev`, atomically swaps the new one in, and prints one
+stderr line (`deployed bundle was stale -- refreshed <old> -> <new> ...`); the
+refreshed tool schema is served from the next connect. A failed check keeps the
+deployed copy and prints one line. Env: `GM_MCP_SELF_UPDATE=0` disables,
+`GM_MCP_BUNDLE_URL` (http(s) or `file:`) overrides the source,
+`GM_MCP_SELF_UPDATE_INTERVAL_MS` overrides the throttle. A bundle from before
+this feature cannot update itself: run `npx github:AnEntrypoint/gm --mcp-only`
+once.
+
 Run bare in a terminal with no MCP client attached the server stays running
 until stdin closes or the process is killed; a stdin close alone does not exit
 the process (`gm-mcp: stdin ended (client disconnected or platform pipe quirk)
