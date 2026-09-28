@@ -93,7 +93,7 @@ at launch time.
 | `body` | object | no | JSON body for the dispatch (not valid for plain-text-body verbs) |
 | `raw_body` | string | no | Literal text body for a plain-text-body verb, mutually exclusive with `body` |
 | `cwd` | string | no | Project root containing `.gm/exec-spool` -- defaults to `process.cwd()` |
-| `timeout_seconds` | number | no | Give up and return `timed_out:true` after this many seconds (default 120) |
+| `timeout_seconds` | number | no | Give up polling and return `timed_out:true` after this many seconds. Default 120, or for an exec-family `raw_body` that starts with `timeoutMs=<ms>`, that value plus 5 s. An explicit value always wins. |
 | `poll_interval_seconds` | number | no | Fallback response check interval when filesystem events are unavailable (default 0.25) |
 | `include_timing` | boolean | no | Include MCP submission-to-response timing and the last response wakeup source |
 | `resume_task` | string | no | The `task` field from a previous `timed_out`/aborted response -- keep polling that SAME dispatch instead of writing a new one |
@@ -115,9 +115,20 @@ For these verbs the server adds the line itself when `raw_body` lacks one:
 - `serp`, `browser` and `cdp` are not touched; they take a `timeout=<ms>`
   line and carry their own default
 
-The daemon tails a task for 30 s of wall clock and then returns a partial
-result with its `task_id`. A `timeoutMs` above that window is still correct:
-the task keeps running and the response says how to continue it.
+The prefix is the process budget the daemon enforces; `timeout_seconds` is how
+long this wrapper polls. When only the prefix is given, the wrapper polls for
+the prefix plus 5 s, so a `timeoutMs=240000` body is awaited for 245 s. When
+both are given, `timeout_seconds` wins for the poll: a shorter value returns
+`timed_out:true` with a `task` to `resume_task`, a longer one just waits. A body
+that outlives its own `timeoutMs` is not killed: the daemon answers with
+`in_progress` and a `task_id` that keeps running in the background.
+
+Exec-family `stdout`, `stderr` and `result` are shown in full up to 16000
+characters each. The out-file wraps them in a JSON string field `data`; the
+wrapper unpacks it so the fields print flat. A longer field ends in
+`OUTPUT TRUNCATED: showing 16000 of N chars` and names the out-file holding the
+whole value. Other long text fields stay capped at 400 characters with the same
+kind of pointer.
 
 ### Resuming a dispatch
 

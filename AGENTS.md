@@ -17,3 +17,15 @@ what README does not.
   only and keyed on session as well as root: a restarted server (a new agent
   session) must see the prose again rather than inherit an assertion it
   cannot honor.
+- `pollTimeoutMs` is how long the wrapper polls, not what the daemon enforces.
+  An explicit `timeout_seconds` wins; otherwise an exec-family body that starts
+  with `timeoutMs=<ms>` is awaited for that value plus 5 s (never less than 120 s),
+  because the daemon runs the body for the full `timeoutMs` before it answers with
+  a background `task_id`. A `resume_task` poll sends no body, so it only has
+  `timeout_seconds` to go on.
+- `unpackExecOutputEnvelope` parses the exec family's `data` JSON string into an
+  object before cleaning, so `stdout`, `stderr` and `result` keep their own
+  16000-character cap (`EXEC_OUTPUT_FIELD_TRUNCATE_AT`) instead of sharing the
+  400-character cap of the packed string. The truncation marker names the
+  out-file and says the value sits inside its `data` string, because the file
+  itself still holds the packed form.
