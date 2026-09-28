@@ -184,8 +184,17 @@ const LONG_TEXT_FIELD_TRUNCATE_AT = 400
 
 const NEVER_TRUNCATE_KEYS = new Set(['error', 'reason', 'residuals'])
 
+const EXEC_OUTPUT_KEYS = new Set(['stdout', 'stderr', 'result'])
+
+const EXEC_OUTPUT_FIELD_TRUNCATE_AT = 16_000
+
 function truncateLongText(value, key, outPath) {
-    if (typeof value !== 'string' || value.length <= LONG_TEXT_FIELD_TRUNCATE_AT) return value
+    if (typeof value !== 'string') return value
+    if (EXEC_OUTPUT_KEYS.has(key)) {
+        if (value.length <= EXEC_OUTPUT_FIELD_TRUNCATE_AT) return value
+        return `${value.slice(0, EXEC_OUTPUT_FIELD_TRUNCATE_AT)}... [OUTPUT TRUNCATED: showing ${EXEC_OUTPUT_FIELD_TRUNCATE_AT} of ${value.length} chars of '${key}' -- the full output is in ${outPath}, in the JSON string field 'data' (parse it, then read '${key}')]`
+    }
+    if (value.length <= LONG_TEXT_FIELD_TRUNCATE_AT) return value
     if (NEVER_TRUNCATE_KEYS.has(key)) return value
     return `${value.slice(0, LONG_TEXT_FIELD_TRUNCATE_AT)}... [${value.length} chars total, full text at ${outPath} field '${key}']`
 }
@@ -259,7 +268,29 @@ const TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS)
 
 const TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/
 
+const TIMEOUT_MS_PREFIX_VALUE = /^\s*timeout(?:Ms|_ms)=(\d+)/
+
 const DEFAULT_TIMEOUT_SECONDS = 120
+
+const POLL_MARGIN_PAST_EXEC_TIMEOUT_MS = 5000
+
+function unpackExecOutputEnvelope(verb, parsed) {
+    if (!EXEC_FAMILY_VERBS.includes(verb) || !parsed || typeof parsed.data !== 'string') return parsed
+    try {
+        const inner = JSON.parse(parsed.data)
+        return inner && typeof inner === 'object' && !Array.isArray(inner) ? { ...parsed, data: inner } : parsed
+    } catch {
+        return parsed
+    }
+}
+
+export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
+    const explicitSeconds = Number(timeout_seconds)
+    if (explicitSeconds > 0) return explicitSeconds * 1000
+    const bodyPrefix = TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === 'string' ? TIMEOUT_MS_PREFIX_VALUE.exec(raw_body) : null
+    if (bodyPrefix) return Math.max(DEFAULT_TIMEOUT_SECONDS * 1000, Number(bodyPrefix[1]) + POLL_MARGIN_PAST_EXEC_TIMEOUT_MS)
+    return DEFAULT_TIMEOUT_SECONDS * 1000
+}
 
 function timeoutMsFor(timeout_seconds) {
     const seconds = Number(timeout_seconds)
@@ -419,7 +450,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         }
     }
 
-    const timeoutMs = Math.max(0, (Number(timeout_seconds) || 120) * 1000)
+    const timeoutMs = resume_task ? Math.max(0, (Number(timeout_seconds) || DEFAULT_TIMEOUT_SECONDS) * 1000) : pollTimeoutMs(verb, raw_body, timeout_seconds)
     const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1000)
     const deadline = Date.now() + timeoutMs
 
@@ -433,7 +464,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
             landedAtMs = null
         }
         try {
-            const parsed = JSON.parse(fs.readFileSync(outPath, 'utf8'))
+            const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, 'utf8')))
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const cleaned = cleanResponse(parsed, undefined, outPath)
             let out = cleaned
