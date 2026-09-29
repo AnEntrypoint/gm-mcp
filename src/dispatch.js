@@ -208,11 +208,20 @@ const LONG_TEXT_FIELD_TRUNCATE_AT = 400
 
 const NEVER_TRUNCATE_KEYS = new Set(['error', 'reason', 'residuals'])
 
+const NO_KEYS = new Set()
+
+const EXPANDED_RECALL_KEYS = new Set(['text'])
+
+function untruncatedKeysFor(verb, body) {
+    const expandsRecall = verb === 'recall' && body && typeof body === 'object' && (body.full === true || typeof body.key === 'string')
+    return expandsRecall ? EXPANDED_RECALL_KEYS : NO_KEYS
+}
+
 const EXEC_OUTPUT_KEYS = new Set(['stdout', 'stderr', 'result'])
 
 const EXEC_OUTPUT_FIELD_TRUNCATE_AT = 16_000
 
-function truncateLongText(value, key, outPath, plainTextFile) {
+function truncateLongText(value, key, outPath, plainTextFile, untruncatedKeys = NO_KEYS) {
     if (typeof value !== 'string') return value
     if (EXEC_OUTPUT_KEYS.has(key)) {
         if (value.length <= EXEC_OUTPUT_FIELD_TRUNCATE_AT) return value
@@ -222,7 +231,7 @@ function truncateLongText(value, key, outPath, plainTextFile) {
         return `${value.slice(0, EXEC_OUTPUT_FIELD_TRUNCATE_AT)}... [OUTPUT TRUNCATED: showing ${EXEC_OUTPUT_FIELD_TRUNCATE_AT} of ${value.length} chars of '${key}' -- ${where}]`
     }
     if (value.length <= LONG_TEXT_FIELD_TRUNCATE_AT) return value
-    if (NEVER_TRUNCATE_KEYS.has(key)) return value
+    if (NEVER_TRUNCATE_KEYS.has(key) || untruncatedKeys.has(key)) return value
     return `${value.slice(0, LONG_TEXT_FIELD_TRUNCATE_AT)}... [${value.length} chars total, full text at ${outPath} field '${key}']`
 }
 
@@ -249,23 +258,23 @@ function dropDuplicateRows(rows) {
     })
 }
 
-function cleanHit(hit, outPath, plainTextFile) {
+function cleanHit(hit, outPath, plainTextFile, untruncatedKeys) {
     if (!hit || typeof hit !== 'object') return hit
     const out = {}
     for (const [k, v] of Object.entries(hit)) {
         if (HIT_NOISE_KEYS.has(k)) continue
         if (v === '' || v === null || v === undefined) continue
-        out[k] = typeof v === 'string' ? truncateLongText(v, k, outPath, plainTextFile)
-            : (v && typeof v === 'object' && !Array.isArray(v)) ? cleanHit(v, outPath, plainTextFile)
+        out[k] = typeof v === 'string' ? truncateLongText(v, k, outPath, plainTextFile, untruncatedKeys)
+            : (v && typeof v === 'object' && !Array.isArray(v)) ? cleanHit(v, outPath, plainTextFile, untruncatedKeys)
             : v
     }
     return out
 }
 
-function cleanResponse(value, keyHint, outPath, plainTextFile) {
+function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys = NO_KEYS) {
     if (Array.isArray(value)) {
-        if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map(h => cleanHit(h, outPath, plainTextFile)))
-        const cleaned = value.map(v => cleanResponse(v, undefined, outPath, plainTextFile)).filter(v => v !== undefined)
+        if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map(h => cleanHit(h, outPath, plainTextFile, untruncatedKeys)))
+        const cleaned = value.map(v => cleanResponse(v, undefined, outPath, plainTextFile, untruncatedKeys)).filter(v => v !== undefined)
         return dropDuplicateRows(cleaned)
     }
     if (value && typeof value === 'object') {
@@ -281,14 +290,14 @@ function cleanResponse(value, keyHint, outPath, plainTextFile) {
                     continue
                 }
             }
-            const cleanedV = cleanResponse(v, k, outPath, plainTextFile)
+            const cleanedV = cleanResponse(v, k, outPath, plainTextFile, untruncatedKeys)
             if (Array.isArray(cleanedV) && cleanedV.length === 0) continue
             if (cleanedV && typeof cleanedV === 'object' && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue
             out[k] = cleanedV
         }
         return out
     }
-    if (typeof value === 'string' && keyHint) return truncateLongText(value, keyHint, outPath, plainTextFile)
+    if (typeof value === 'string' && keyHint) return truncateLongText(value, keyHint, outPath, plainTextFile, untruncatedKeys)
     return value
 }
 
@@ -506,7 +515,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
             const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, 'utf8')))
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
-            const cleaned = cleanResponse(parsed, undefined, outPath, plainTextFile)
+            const cleaned = cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody))
             let out = cleaned
             if (cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
                 const { data, ...rest } = cleaned
