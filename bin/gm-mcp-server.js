@@ -37548,6 +37548,26 @@ function normalizedObjectBody(verb, body) {
   }
   return { value: body };
 }
+var CODESEARCH_INTEGER_FIELDS = ["limit", "head_limit", "k", "max_results", "maxResults", "max_matches", "max_files", "max_chars"];
+var CODESEARCH_BOOLEAN_FIELDS = ["case_insensitive", "whole_word", "comments_only"];
+function withCodesearchScalarsCoerced(verb, body) {
+  if (verb !== "codesearch") return body;
+  const coerced = { ...body };
+  for (const field of CODESEARCH_INTEGER_FIELDS) {
+    if (typeof coerced[field] === "string" && /^[0-9]+$/.test(coerced[field].trim())) coerced[field] = Number(coerced[field]);
+  }
+  for (const field of CODESEARCH_BOOLEAN_FIELDS) {
+    if (coerced[field] === "true" || coerced[field] === "false") coerced[field] = coerced[field] === "true";
+  }
+  return coerced;
+}
+var PLAIN_TEXT_BODY_FIELDS = ["raw_body", "code", "script", "command", "source", "text", "body"];
+function plainTextFromBody(body) {
+  if (typeof body === "string") return body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return void 0;
+  const present2 = PLAIN_TEXT_BODY_FIELDS.filter((field) => typeof body[field] === "string");
+  return present2.length === 1 ? body[present2[0]] : void 0;
+}
 function objectBodyDiagnostic(verb, body) {
   if (verb === "prd-add" && (typeof body.id !== "string" || !body.id.trim())) {
     return "prd-add requires a non-empty body.id. A blank id would create an unaddressable PRD row; provide a stable identifier before dispatching.";
@@ -37872,7 +37892,10 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
   const toYaml = (obj) => dump(obj, { lineWidth: 100 });
   const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === "string";
   if (!resume_task && isPlainText && typeof raw_body !== "string") {
-    return `error: ${verb} takes a plain-text body -- pass raw_body (a string), not body (a JSON object)`;
+    raw_body = plainTextFromBody(body);
+    if (typeof raw_body !== "string") {
+      return `error: ${verb} takes a plain-text body -- pass the text as the top-level raw_body argument (a string), e.g. raw_body: "return 1". body is for JSON verbs; here it is accepted only as a string or as an object with exactly one string field among ${PLAIN_TEXT_BODY_FIELDS.join(", ")}`;
+    }
   }
   let normalizedBody;
   if (!resume_task && !isPlainText) {
@@ -37880,7 +37903,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
     if (normalized.error) return `error: ${normalized.error}`;
     const diagnostic = objectBodyDiagnostic(verb, normalized.value);
     if (diagnostic) return `error: ${diagnostic}`;
-    normalizedBody = withAssertedInstructionHash(verb, normalized.value, root, session_id);
+    normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, normalized.value), root, session_id);
   }
   const inPath = path.join(inDir, `${n}.txt`);
   const outPath = path.join(outDir, `${verb}-${n}.json`);
@@ -37933,7 +37956,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
       if (out && typeof out === "object" && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
         out = { ...out, instruction_text_at: path.join(root, ".gm", "next-step.md") };
       }
-      if (include_timing) {
+      if (include_timing === true || include_timing === "true") {
         const timingKey = out && typeof out === "object" && !Array.isArray(out) && "mcp_timing" in out ? "mcp_client_timing" : "mcp_timing";
         const timing = {
           submitted_at_ms: callStartedAtMs,
@@ -38090,6 +38113,8 @@ function refreshStaleDeployedBundleInBackground() {
 }
 
 // src/index.js
+var numberLike = external_exports.union([external_exports.number(), external_exports.string()]);
+var booleanLike = external_exports.union([external_exports.boolean(), external_exports.string()]);
 function createServer() {
   const server = new McpServer({ name: "gm-mcp", version: "0.2.1" });
   const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`;
@@ -38101,9 +38126,9 @@ function createServer() {
         prompt: external_exports.string().optional().describe("Current task prompt. An omitted prompt is dispatched as an empty string."),
         session_id: external_exports.string().optional().describe("Optional gm session id. A stable server-local id is used when omitted."),
         cwd: external_exports.string().optional().describe("Project root containing .gm/exec-spool -- defaults to process.cwd()."),
-        timeout_seconds: external_exports.number().optional().describe("Give up and return timed_out:true after this many seconds (default 120)."),
-        poll_interval_seconds: external_exports.number().optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)."),
-        include_timing: external_exports.boolean().optional().describe("Include MCP submission-to-response timing and the last response wakeup source."),
+        timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120)."),
+        poll_interval_seconds: numberLike.optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)."),
+        include_timing: booleanLike.optional().describe("Include MCP submission-to-response timing and the last response wakeup source."),
         resume_task: external_exports.string().optional().describe("Resume a previous instruction dispatch without writing a new request."),
         mode: external_exports.string().optional().describe('Pass "investigate_readonly" for a read-only/investigate-only ask (scan/grep/report, no code changes). Skips the SPECIFY->PROVE->EMIT->...->COMPLETE phase/PRD orchestration entirely and returns a short direct-execution instruction instead -- no phase is read or changed, no PRD/mutables state is touched. Omit for the normal phase-managed flow.'),
         git_root_override: external_exports.string().optional().describe("Pin the project root explicitly when cwd is not itself a git repo and is not inside one (e.g. a directory holding many unrelated repos for a cross-repo audit), or when the git subprocess is otherwise unavailable/contended. Skips `git rev-parse --show-toplevel` for this cwd; every .gm/ state file for this dispatch is then read/written under <git_root_override>/.gm. Prefer dispatching with cwd set to one of the actual repos under the directory when that is an option -- this is for the genuinely repo-less or multi-repo case.")
@@ -38133,13 +38158,13 @@ function createServer() {
       description: "Run the whole gm spool write-then-poll-for-response cycle for one verb dispatch in a single call, instead of writing the input file, polling for the output file, and reading it as three separate steps. Writes .gm/exec-spool/in/<verb>/<N>.txt, polls .gm/exec-spool/out/<verb>-<N>.json until it appears (or the timeout elapses), and returns its contents as flat YAML text, auto-cleaned for readability: opaque internal ids (dispatch_id, request_fingerprint) stripped, the redundant response/data nesting levels flattened up to the top (unless a field name would collide), long text fields (e.g. instruction phase prose) truncated with a pointer naming the on-disk file to read for the full text, hit-array ranking internals (cos/recency in recall_hits/bm25_hits/vector_hits/commits) dropped, score retained as ranked evidence, byte-identical object rows repeated inside one array collapsed to the first copy, and empty/null/empty-string fields removed at every level along with a false on a flag that only ever means the absence of a problem (session_mismatch, instruction_unchanged, instruction_suppressible_by_asserting_hash, recall_embed_failed, should_residual_scan, fsm_graph_rejected). A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look. For plain-text-body verbs (exec_js and every language stem it backs, serp, browser, cdp), pass raw_body instead of body -- these verbs reject a JSON object outright.",
       inputSchema: {
         verb: external_exports.string().describe("gm spool verb name, e.g. instruction, prd-add, git_status, exec_js"),
-        body: external_exports.record(external_exports.string(), external_exports.unknown()).optional().describe("JSON body for the dispatch. session_id is added automatically if not present. Not valid for plain-text-body verbs (exec_js and its language stems, serp, browser, cdp) -- use raw_body for those instead."),
+        body: external_exports.union([external_exports.record(external_exports.string(), external_exports.unknown()), external_exports.string()]).optional().describe("JSON body for the dispatch (an object, or a string holding a JSON object). session_id is added automatically if not present. Not valid for plain-text-body verbs (exec_js and its language stems, serp, browser, cdp) -- use raw_body for those instead."),
         raw_body: external_exports.string().optional().describe("Literal text body for a plain-text-body verb (exec_js/bash/python/etc, serp, browser, cdp) -- sent exactly as given, no JSON wrapping. Mutually exclusive with body."),
         session_id: external_exports.string().describe("gm SESSION_ID for this dispatch (required by gm on every body)"),
         cwd: external_exports.string().optional().describe("Project root containing .gm/exec-spool -- defaults to process.cwd()"),
-        timeout_seconds: external_exports.number().optional().describe("Give up and return timed_out:true after this many seconds (default 120)"),
-        poll_interval_seconds: external_exports.number().optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)"),
-        include_timing: external_exports.boolean().optional().describe("Include MCP submission-to-response timing and the last response wakeup source"),
+        timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120)"),
+        poll_interval_seconds: numberLike.optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)"),
+        include_timing: booleanLike.optional().describe("Include MCP submission-to-response timing and the last response wakeup source"),
         resume_task: external_exports.string().optional().describe("Pass the `task` field from a previous timed_out/aborted response to keep polling that SAME dispatch instead of writing a new one -- a first-time cold index/embed pass on a large repo can legitimately outrun a short timeout_seconds, and re-dispatching from scratch discards a result that may already be in flight or done. A resume sends NO body: omit body/raw_body entirely (they are ignored if passed), since the dispatch being resumed already carries its own. It still needs `verb` and `cwd` to match the original call exactly -- those two plus the task name are how the dispatch is addressed on disk -- and `session_id` remains required by this tool for every call, though a resume never writes a new spool file with it. If that triple matches no dispatch in the project spool, the call returns an immediate error naming the three paths it checked instead of polling a task that cannot arrive. A resumed result carries a `resumed` block stating that this call sent no body and whether the result predates it, so a stored error from the ORIGINAL dispatch is never misread as a verdict on the resume call. Before any timeout is reported the out-file is re-checked past the deadline, so a result that lands moments late comes back as the ordinary success it is. A genuine timed_out response carries `resume_task_supported: true` (absent on older server builds, which silently drop this argument), a `dispatch_state` block read from the spool itself (claimed_still_in_flight / queued_not_yet_claimed / no_input_file_left) plus a `daemon` liveness block (alive/heartbeat age/runtime/queue wait) -- dispatch_state is the per-dispatch authority, daemon.busy is project-scoped and says nothing about your own request.")
       }
     },

@@ -16,7 +16,7 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
   - byte-identical object rows repeated inside one array collapsed to the first copy
   - empty/null/empty-string fields removed at every level, and a `false` on a flag whose only meaning is the absence of a problem (`session_mismatch`, `instruction_unchanged`, `instruction_suppressible_by_asserting_hash`, `recall_embed_failed`, `should_residual_scan`, `fsm_graph_rejected`)
 - A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look
-- Supports plain-text-body verbs (`exec_js` and every language stem it backs, `serp`, `browser`, `cdp`) via a `raw_body` string parameter, since these verbs reject a JSON-object body outright
+- Supports plain-text-body verbs (`exec_js` and every language stem it backs, `serp`, `browser`, `cdp`) via a `raw_body` string parameter (a string `body`, or a `body` object with exactly one string field among `code`/`script`/`command`/`source`/`text`, is accepted as the same text), since these verbs reject a JSON-object body outright
 - Adds a `timeoutMs=<ms>` first line to an exec-family `raw_body` that has none, derived from `timeout_seconds` (see "Exec-family timeout prefix" below)
 
 ## Usage

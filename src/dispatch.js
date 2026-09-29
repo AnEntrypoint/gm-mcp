@@ -41,6 +41,30 @@ function normalizedObjectBody(verb, body) {
     return { value: body }
 }
 
+const CODESEARCH_INTEGER_FIELDS = ['limit', 'head_limit', 'k', 'max_results', 'maxResults', 'max_matches', 'max_files', 'max_chars']
+const CODESEARCH_BOOLEAN_FIELDS = ['case_insensitive', 'whole_word', 'comments_only']
+
+function withCodesearchScalarsCoerced(verb, body) {
+    if (verb !== 'codesearch') return body
+    const coerced = { ...body }
+    for (const field of CODESEARCH_INTEGER_FIELDS) {
+        if (typeof coerced[field] === 'string' && /^[0-9]+$/.test(coerced[field].trim())) coerced[field] = Number(coerced[field])
+    }
+    for (const field of CODESEARCH_BOOLEAN_FIELDS) {
+        if (coerced[field] === 'true' || coerced[field] === 'false') coerced[field] = coerced[field] === 'true'
+    }
+    return coerced
+}
+
+const PLAIN_TEXT_BODY_FIELDS = ['raw_body', 'code', 'script', 'command', 'source', 'text', 'body']
+
+function plainTextFromBody(body) {
+    if (typeof body === 'string') return body
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined
+    const present = PLAIN_TEXT_BODY_FIELDS.filter(field => typeof body[field] === 'string')
+    return present.length === 1 ? body[present[0]] : undefined
+}
+
 function objectBodyDiagnostic(verb, body) {
     if (verb === 'prd-add' && (typeof body.id !== 'string' || !body.id.trim())) {
         return 'prd-add requires a non-empty body.id. A blank id would create an unaddressable PRD row; provide a stable identifier before dispatching.'
@@ -422,7 +446,10 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
 
     const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === 'string'
     if (!resume_task && isPlainText && typeof raw_body !== 'string') {
-        return `error: ${verb} takes a plain-text body -- pass raw_body (a string), not body (a JSON object)`
+        raw_body = plainTextFromBody(body)
+        if (typeof raw_body !== 'string') {
+            return `error: ${verb} takes a plain-text body -- pass the text as the top-level raw_body argument (a string), e.g. raw_body: "return 1". body is for JSON verbs; here it is accepted only as a string or as an object with exactly one string field among ${PLAIN_TEXT_BODY_FIELDS.join(', ')}`
+        }
     }
 
     let normalizedBody
@@ -431,7 +458,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         if (normalized.error) return `error: ${normalized.error}`
         const diagnostic = objectBodyDiagnostic(verb, normalized.value)
         if (diagnostic) return `error: ${diagnostic}`
-        normalizedBody = withAssertedInstructionHash(verb, normalized.value, root, session_id)
+        normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, normalized.value), root, session_id)
     }
 
     const inPath = path.join(inDir, `${n}.txt`)
@@ -490,7 +517,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
             if (out && typeof out === 'object' && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
                 out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
             }
-            if (include_timing) {
+            if (include_timing === true || include_timing === 'true') {
                 const timingKey = out && typeof out === 'object' && !Array.isArray(out) && 'mcp_timing' in out ? 'mcp_client_timing' : 'mcp_timing'
                 const timing = {
                     submitted_at_ms: callStartedAtMs,
