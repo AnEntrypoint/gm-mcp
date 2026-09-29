@@ -18,6 +18,7 @@ const result = await esbuild.build({
     format: 'esm',
     external: ['node:*'],
     banner: { js: '#!/usr/bin/env node' },
+    preserveSymlinks: true,
     write: false,
 })
 
