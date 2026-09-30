@@ -422,11 +422,16 @@ function instructionOwnerKey(root, sessionId) {
     return `${path.resolve(root)} ${sessionId}`
 }
 
+const deliveredReplyHashByOwner = new Map()
+
 function withAssertedInstructionHash(verb, body, root, sessionId) {
     if (verb !== 'instruction') return body
-    if (typeof body.instruction_hash === 'string' || typeof body.known_instruction_hash === 'string') return body
-    const known = deliveredInstructionHashByOwner.get(instructionOwnerKey(root, sessionId))
-    return known ? { ...body, instruction_hash: known } : body
+    const owner = instructionOwnerKey(root, sessionId)
+    const knownReply = deliveredReplyHashByOwner.get(owner)
+    const withReply = knownReply && typeof body.known_reply_hash !== 'string' ? { ...body, known_reply_hash: knownReply } : body
+    if (typeof body.instruction_hash === 'string' || typeof body.known_instruction_hash === 'string') return withReply
+    const known = deliveredInstructionHashByOwner.get(owner)
+    return known ? { ...withReply, instruction_hash: known } : withReply
 }
 
 function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
@@ -437,6 +442,9 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
     const prose = typeof data.instruction === 'string' ? data.instruction : ''
     if (prose || data.instruction_unchanged === true) {
         deliveredInstructionHashByOwner.set(instructionOwnerKey(root, sessionId), hash)
+    }
+    if (typeof data.reply_hash === 'string' && data.reply_hash) {
+        deliveredReplyHashByOwner.set(instructionOwnerKey(root, sessionId), data.reply_hash)
     }
 }
 

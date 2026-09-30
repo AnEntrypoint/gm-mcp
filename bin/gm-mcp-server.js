@@ -37868,11 +37868,15 @@ var deliveredInstructionHashByOwner = /* @__PURE__ */ new Map();
 function instructionOwnerKey(root, sessionId) {
   return `${path.resolve(root)} ${sessionId}`;
 }
+var deliveredReplyHashByOwner = /* @__PURE__ */ new Map();
 function withAssertedInstructionHash(verb, body, root, sessionId) {
   if (verb !== "instruction") return body;
-  if (typeof body.instruction_hash === "string" || typeof body.known_instruction_hash === "string") return body;
-  const known = deliveredInstructionHashByOwner.get(instructionOwnerKey(root, sessionId));
-  return known ? { ...body, instruction_hash: known } : body;
+  const owner = instructionOwnerKey(root, sessionId);
+  const knownReply = deliveredReplyHashByOwner.get(owner);
+  const withReply = knownReply && typeof body.known_reply_hash !== "string" ? { ...body, known_reply_hash: knownReply } : body;
+  if (typeof body.instruction_hash === "string" || typeof body.known_instruction_hash === "string") return withReply;
+  const known = deliveredInstructionHashByOwner.get(owner);
+  return known ? { ...withReply, instruction_hash: known } : withReply;
 }
 function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
   if (verb !== "instruction" || !parsed || parsed.ok === false) return;
@@ -37882,6 +37886,9 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
   const prose = typeof data.instruction === "string" ? data.instruction : "";
   if (prose || data.instruction_unchanged === true) {
     deliveredInstructionHashByOwner.set(instructionOwnerKey(root, sessionId), hash2);
+  }
+  if (typeof data.reply_hash === "string" && data.reply_hash) {
+    deliveredReplyHashByOwner.set(instructionOwnerKey(root, sessionId), data.reply_hash);
   }
 }
 async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task }, signal) {
@@ -38136,7 +38143,7 @@ function createServer() {
         poll_interval_seconds: numberLike.optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)."),
         include_timing: booleanLike.optional().describe("Include MCP submission-to-response timing and the last response wakeup source."),
         resume_task: external_exports.string().optional().describe("Resume a previous instruction dispatch without writing a new request."),
-        mode: external_exports.string().optional().describe('Pass "investigate_readonly" for a read-only/investigate-only ask (scan/grep/report, no code changes). Skips the SPECIFY->PROVE->EMIT->...->COMPLETE phase/PRD orchestration entirely and returns a short direct-execution instruction instead -- no phase is read or changed, no PRD/mutables state is touched. Omit for the normal phase-managed flow.'),
+        mode: external_exports.string().optional().describe('Pass "investigate_readonly" for a read-only/investigate-only ask (scan/grep/report, no code changes). Skips the SPECIFY->PROVE->EMIT->...->COMPLETE phase/PRD orchestration entirely and returns a short direct-execution instruction instead -- no phase is read or changed, no PRD/mutables state is touched. It serves no phase prose, so it never satisfies the long-gap gate mid-chain; a plain re-dispatch is the cheap re-check, since fields unchanged since the last delivered reply come back elided and listed in unchanged_since_last_reply. Omit for the normal phase-managed flow.'),
         git_root_override: external_exports.string().optional().describe("Pin the project root explicitly when cwd is not itself a git repo and is not inside one (e.g. a directory holding many unrelated repos for a cross-repo audit), or when the git subprocess is otherwise unavailable/contended. Skips `git rev-parse --show-toplevel` for this cwd; every .gm/ state file for this dispatch is then read/written under <git_root_override>/.gm. Prefer dispatching with cwd set to one of the actual repos under the directory when that is an option -- this is for the genuinely repo-less or multi-repo case.")
       }
     },
