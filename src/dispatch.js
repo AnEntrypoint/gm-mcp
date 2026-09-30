@@ -247,6 +247,17 @@ const FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS = new Set([
     'fsm_graph_rejected',
 ])
 
+const EMPTY_LIST_IS_THE_ANSWER_KEYS = new Set([
+    'edges',
+    'reachable',
+    'reached',
+    'callees',
+    'functions',
+    'matches',
+    'definitions',
+    'references',
+])
+
 function dropDuplicateRows(rows) {
     const seen = new Set()
     return rows.filter(row => {
@@ -291,7 +302,7 @@ function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys =
                 }
             }
             const cleanedV = cleanResponse(v, k, outPath, plainTextFile, untruncatedKeys)
-            if (Array.isArray(cleanedV) && cleanedV.length === 0) continue
+            if (Array.isArray(cleanedV) && cleanedV.length === 0 && !EMPTY_LIST_IS_THE_ANSWER_KEYS.has(k)) continue
             if (cleanedV && typeof cleanedV === 'object' && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue
             out[k] = cleanedV
         }
