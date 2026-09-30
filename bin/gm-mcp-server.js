@@ -37728,6 +37728,16 @@ var FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS = /* @__PURE__ */ new Set([
   "should_residual_scan",
   "fsm_graph_rejected"
 ]);
+var EMPTY_LIST_IS_THE_ANSWER_KEYS = /* @__PURE__ */ new Set([
+  "edges",
+  "reachable",
+  "reached",
+  "callees",
+  "functions",
+  "matches",
+  "definitions",
+  "references"
+]);
 function dropDuplicateRows(rows) {
   const seen = /* @__PURE__ */ new Set();
   return rows.filter((row) => {
@@ -37768,7 +37778,7 @@ function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys =
         }
       }
       const cleanedV = cleanResponse(v, k, outPath, plainTextFile, untruncatedKeys);
-      if (Array.isArray(cleanedV) && cleanedV.length === 0) continue;
+      if (Array.isArray(cleanedV) && cleanedV.length === 0 && !EMPTY_LIST_IS_THE_ANSWER_KEYS.has(k)) continue;
       if (cleanedV && typeof cleanedV === "object" && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue;
       out[k] = cleanedV;
     }
@@ -38168,7 +38178,7 @@ function createServer() {
   server.registerTool(
     "gm",
     {
-      description: "Run the whole gm spool write-then-poll-for-response cycle for one verb dispatch in a single call, instead of writing the input file, polling for the output file, and reading it as three separate steps. Writes .gm/exec-spool/in/<verb>/<N>.txt, polls .gm/exec-spool/out/<verb>-<N>.json until it appears (or the timeout elapses), and returns its contents as flat YAML text, auto-cleaned for readability: opaque internal ids (dispatch_id, request_fingerprint) stripped, the redundant response/data nesting levels flattened up to the top (unless a field name would collide), long text fields (e.g. instruction phase prose) truncated with a pointer naming the on-disk file to read for the full text, hit-array ranking internals (cos/recency in recall_hits/bm25_hits/vector_hits/commits) dropped, score retained as ranked evidence, byte-identical object rows repeated inside one array collapsed to the first copy, and empty/null/empty-string fields removed at every level along with a false on a flag that only ever means the absence of a problem (session_mismatch, instruction_unchanged, instruction_suppressible_by_asserting_hash, recall_embed_failed, should_residual_scan, fsm_graph_rejected). A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look. For plain-text-body verbs (exec_js and every language stem it backs, serp, browser, cdp), pass raw_body instead of body -- these verbs reject a JSON object outright.",
+      description: "Run the whole gm spool write-then-poll-for-response cycle for one verb dispatch in a single call, instead of writing the input file, polling for the output file, and reading it as three separate steps. Writes .gm/exec-spool/in/<verb>/<N>.txt, polls .gm/exec-spool/out/<verb>-<N>.json until it appears (or the timeout elapses), and returns its contents as flat YAML text, auto-cleaned for readability: opaque internal ids (dispatch_id, request_fingerprint) stripped, the redundant response/data nesting levels flattened up to the top (unless a field name would collide), long text fields (e.g. instruction phase prose) truncated with a pointer naming the on-disk file to read for the full text, hit-array ranking internals (cos/recency in recall_hits/bm25_hits/vector_hits/commits) dropped, score retained as ranked evidence, byte-identical object rows repeated inside one array collapsed to the first copy, and empty/null/empty-string fields removed at every level (an empty result list such as edges/reachable/matches/definitions stays as [] so nothing-found reads as an answer) along with a false on a flag that only ever means the absence of a problem (session_mismatch, instruction_unchanged, instruction_suppressible_by_asserting_hash, recall_embed_failed, should_residual_scan, fsm_graph_rejected). A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look. For plain-text-body verbs (exec_js and every language stem it backs, serp, browser, cdp), pass raw_body instead of body -- these verbs reject a JSON object outright.",
       inputSchema: {
         verb: external_exports.string().describe("gm spool verb name, e.g. instruction, prd-add, git_status, exec_js"),
         body: external_exports.union([external_exports.record(external_exports.string(), external_exports.unknown()), external_exports.string()]).optional().describe("JSON body for the dispatch (an object, or a string holding a JSON object). session_id is added automatically if not present. Not valid for plain-text-body verbs (exec_js and its language stems, serp, browser, cdp) -- use raw_body for those instead."),
