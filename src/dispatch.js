@@ -374,7 +374,9 @@ function readDaemonLiveness(spoolDir) {
     const busyForMs = typeof status.busy_until === 'number' ? status.busy_until - now : null
     const busy = busyForMs !== null && busyForMs > 0
     const note = !alive
-        ? 'daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch\'s fault'
+        ? runnerBinaryMissing()
+            ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed`
+            : 'daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch\'s fault'
         : busy
             ? 'daemon is alive and still actively working on this project'
             : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that'
@@ -389,6 +391,22 @@ function readDaemonLiveness(spoolDir) {
         liveness.runner_update_waiting_ms = status.runner_update_waiting_ms ?? null
     }
     return liveness
+}
+
+// A missing runner binary with no live shared daemon means the daemon can never
+// claim a fresh ticket: without this guard the request is written, sits
+// unclaimed, and the caller only learns the binary is absent after a full poll
+// timeout. Failing fast here keeps a working shared daemon usable (its liveness
+// short-circuits) and turns the silent no-op into one actionable error.
+function runnerUnavailable(root, spoolDir) {
+    if (!runnerBinaryMissing()) return null
+    if (readDaemonLiveness(spoolDir).alive) return null
+    return {
+        error: 'runner-not-installed',
+        runner_binary_missing: true,
+        runner_path: RUNNER_PATH,
+        note: `the agentplug-runner binary is not installed at ${RUNNER_PATH} and no live daemon heartbeat was found for ${path.resolve(root)}, so this dispatch could never be claimed. Install it once, then dispatch again: npx github:AnEntrypoint/gm -g   (or, in this project: curl -fsSL https://raw.githubusercontent.com/AnEntrypoint/gm/main/install.sh | sh -s -- spool)`,
+    }
 }
 
 function readSpoolDispatchState(spoolDir, verb, task) {
@@ -508,6 +526,8 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
     }
 
     if (!resume_task) {
+        const unavailable = runnerUnavailable(root, spoolDir)
+        if (unavailable) return toYaml(unavailable)
         ensureSpoolRunnerRunning(root)
         if (isPlainText) {
             publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds))
