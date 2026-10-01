@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.2 - a missing runner binary fails fast instead of timing out
+
+When `agentplug-runner` was not installed at `~/.gm-tools/agentplug-runner`,
+`ensureSpoolRunnerRunning()` returned without spawning anything, and a fresh
+dispatch was still written to the spool. It could never be claimed, so the
+caller waited out the full poll timeout and got the generic "daemon may not
+have picked up this project" note, with no hint that the runner binary was
+absent. A fresh dispatch now checks for the binary before writing: with no
+runner and no live daemon heartbeat it returns `error: runner-not-installed`
+with the install command instead of queueing. A live shared daemon
+short-circuits the check, so projects served by a running daemon are
+unaffected. The daemon-liveness note in a timeout reply also names the missing
+binary when it applies.
+
 ## 0.2.1 - exec-family bodies get a timeoutMs line
 
 gm rejects an `exec_js` body that has no `timeoutMs=<ms>` line. Two bare

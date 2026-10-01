@@ -37835,7 +37835,7 @@ function readDaemonLiveness(spoolDir) {
   const alive = heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS;
   const busyForMs = typeof status.busy_until === "number" ? status.busy_until - now : null;
   const busy = busyForMs !== null && busyForMs > 0;
-  const note = !alive ? "daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch's fault" : busy ? "daemon is alive and still actively working on this project" : "daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that";
+  const note = !alive ? runnerBinaryMissing() ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed` : "daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch's fault" : busy ? "daemon is alive and still actively working on this project" : "daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that";
   const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note };
   if (status.runtime) liveness.runtime = status.runtime;
   if (typeof status.shared_process === "boolean") liveness.shared_process = status.shared_process;
@@ -37847,6 +37847,16 @@ function readDaemonLiveness(spoolDir) {
     liveness.runner_update_waiting_ms = status.runner_update_waiting_ms ?? null;
   }
   return liveness;
+}
+function runnerUnavailable(root, spoolDir) {
+  if (!runnerBinaryMissing()) return null;
+  if (readDaemonLiveness(spoolDir).alive) return null;
+  return {
+    error: "runner-not-installed",
+    runner_binary_missing: true,
+    runner_path: RUNNER_PATH,
+    note: `the agentplug-runner binary is not installed at ${RUNNER_PATH} and no live daemon heartbeat was found for ${path.resolve(root)}, so this dispatch could never be claimed. Install it once, then dispatch again: npx github:AnEntrypoint/gm -g   (or, in this project: curl -fsSL https://raw.githubusercontent.com/AnEntrypoint/gm/main/install.sh | sh -s -- spool)`
+  };
 }
 function readSpoolDispatchState(spoolDir, verb, task) {
   const queuedPath = path.join(spoolDir, "in", verb, `${task}.txt`);
@@ -37945,6 +37955,8 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
     });
   }
   if (!resume_task) {
+    const unavailable = runnerUnavailable(root, spoolDir);
+    if (unavailable) return toYaml(unavailable);
     ensureSpoolRunnerRunning(root);
     if (isPlainText) {
       publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds));
