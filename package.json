@@ -13,6 +13,7 @@
   ],
   "scripts": {
     "build": "esbuild src/cli.js --bundle --platform=node --format=esm --outfile=bin/gm-mcp-server.js --external:node:* --preserve-symlinks --banner:js=\"#!/usr/bin/env node\"",
+    "test": "node --test",
     "verify-build": "node scripts/check-bin-drift.mjs",
     "postinstall": "node scripts/install-hooks.mjs"
   },
