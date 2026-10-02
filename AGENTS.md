@@ -34,3 +34,37 @@ what README does not.
   note that the value sits inside its `data` string. A structured `result` is
   capped by its compact JSON length only when `result_file` is present.
 - `src/self-update.js` only replaces the file it is itself running from, and only when that file is the deployed `gm-mcp-server.mjs` under `GM_TOOLS_DIR`/`~/.gm-tools` -- a dev checkout or `src/` run reports `not-deployed-copy` and is never overwritten. The fetch runs after `server.connect` so it can never delay the 30s connect window; the new bundle is served from the next connect, not the current process. `bin/gm-mcp-server.js` on `main` is therefore the live release channel: pushing a drifted bundle publishes it to every deployed copy within an hour.
+- `src/response-compact.js` splits the response in two stages. `cleanResponse`
+  is lossless housekeeping (strip opaque ids, drop empties, truncate prose at
+  400 chars with a pointer, keep the exec-family envelope behavior above).
+  `compactWireResponse` is the lossy stage and is
+  the one callers can opt out of with `full_response: true`, which must stay
+  byte-identical to the `cleanResponse` output alone -- that identity is the
+  regression test, so any new compaction rule has to keep it. Compaction runs
+  only when the response carries no failure: a payload with `error`,
+  `timed_out`, or `ok: false` is returned whole, because a caller debugging a
+  failure needs every field.
+
+- Which fields compact, and why, is a judgment the code cannot restate:
+  dropped outright are `route_hint`, `reply_hash`, `orient_nouns` (pure
+  routing/telemetry nobody dispatches on), `supply_chain_scan` when it reports
+  no findings (kept whole when it has any), and
+  `session_owner_before_this_dispatch` unless `session_mismatch` is true.
+  Collapsed to counts are `codeinsight_overview` (the `by_kind`/`by_language`/
+  `largest_files` breakdowns), `codeinsight_start` (to `{ready: true}` -- kept
+  whole when not ready, since that is when it is actionable),
+  `config_changed` (newest transition only, 3 keys), `dream_rsi_strategy` and
+  `dream_rsi_replay` (evidence/replay rows to counts). Row prose in
+  `ready_wave`/`prd_items`/`mutables_pending` and hit prose in
+  `recall_hits`/`bm25_hits`/`vector_hits` are excerpted, with `id`/`key`/
+  `status`/`session_id`/`verb` exempt so a row stays addressable; `recall_hits`
+  also caps at the top 4. Deliberately left whole: `instruction`, `phase`,
+  `ok`, `session_id`, `instruction_hash` and `policy_hash` (both are
+  assert-protocol inputs the caller resends), `discipline_policies` (emitted
+  only when the policy hash moved, and then it is the thing to read), and every
+  count field, because a count is already the smallest honest form.
+
+- Measured on real `instruction` out-files (`scripts/measure-wire-size.mjs`):
+  7839 -> 3737, 8766 -> 5306, 9507 -> 4959 bytes, and one payload left
+  byte-identical because it had nothing worth compacting. Live on this repo's
+  own session, back to back: 8815 -> 5355 bytes.
