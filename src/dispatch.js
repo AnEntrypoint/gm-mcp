@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import * as yaml from 'js-yaml'
+import { cleanResponse, compactWireResponse, untruncatedKeysFor } from './response-compact.js'
 
 let counter = 0
 function nextN(sessionId) {
@@ -202,116 +203,6 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
     })
 }
 
-const NOISE_KEYS = new Set(['dispatch_id', 'request_fingerprint'])
-
-const LONG_TEXT_FIELD_TRUNCATE_AT = 400
-
-const NEVER_TRUNCATE_KEYS = new Set(['error', 'reason', 'residuals'])
-
-const NO_KEYS = new Set()
-
-const EXPANDED_RECALL_KEYS = new Set(['text'])
-
-function untruncatedKeysFor(verb, body) {
-    const expandsRecall = verb === 'recall' && body && typeof body === 'object' && (body.full === true || typeof body.key === 'string')
-    return expandsRecall ? EXPANDED_RECALL_KEYS : NO_KEYS
-}
-
-const EXEC_OUTPUT_KEYS = new Set(['stdout', 'stderr', 'result'])
-
-const EXEC_OUTPUT_FIELD_TRUNCATE_AT = 16_000
-
-function truncateLongText(value, key, outPath, plainTextFile, untruncatedKeys = NO_KEYS) {
-    if (typeof value !== 'string') return value
-    if (EXEC_OUTPUT_KEYS.has(key)) {
-        if (value.length <= EXEC_OUTPUT_FIELD_TRUNCATE_AT) return value
-        const where = plainTextFile
-            ? `the full text is in ${plainTextFile}, plain text with a '## ${key}' section, readable directly`
-            : `the full output is in ${outPath}, in the JSON string field 'data' (parse it, then read '${key}')`
-        return `${value.slice(0, EXEC_OUTPUT_FIELD_TRUNCATE_AT)}... [OUTPUT TRUNCATED: showing ${EXEC_OUTPUT_FIELD_TRUNCATE_AT} of ${value.length} chars of '${key}' -- ${where}]`
-    }
-    if (value.length <= LONG_TEXT_FIELD_TRUNCATE_AT) return value
-    if (NEVER_TRUNCATE_KEYS.has(key) || untruncatedKeys.has(key)) return value
-    return `${value.slice(0, LONG_TEXT_FIELD_TRUNCATE_AT)}... [${value.length} chars total, full text at ${outPath} field '${key}']`
-}
-
-const HIT_ARRAY_KEYS = new Set(['recall_hits', 'bm25_hits', 'vector_hits', 'commits'])
-const HIT_NOISE_KEYS = new Set(['cos', 'recency'])
-
-const FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS = new Set([
-    'session_mismatch',
-    'instruction_unchanged',
-    'instruction_suppressible_by_asserting_hash',
-    'recall_embed_failed',
-    'should_residual_scan',
-    'fsm_graph_rejected',
-])
-
-const EMPTY_LIST_IS_THE_ANSWER_KEYS = new Set([
-    'edges',
-    'reachable',
-    'reached',
-    'callees',
-    'functions',
-    'matches',
-    'definitions',
-    'references',
-])
-
-function dropDuplicateRows(rows) {
-    const seen = new Set()
-    return rows.filter(row => {
-        if (!row || typeof row !== 'object') return true
-        const fingerprint = JSON.stringify(row)
-        if (seen.has(fingerprint)) return false
-        seen.add(fingerprint)
-        return true
-    })
-}
-
-function cleanHit(hit, outPath, plainTextFile, untruncatedKeys) {
-    if (!hit || typeof hit !== 'object') return hit
-    const out = {}
-    for (const [k, v] of Object.entries(hit)) {
-        if (HIT_NOISE_KEYS.has(k)) continue
-        if (v === '' || v === null || v === undefined) continue
-        out[k] = typeof v === 'string' ? truncateLongText(v, k, outPath, plainTextFile, untruncatedKeys)
-            : (v && typeof v === 'object' && !Array.isArray(v)) ? cleanHit(v, outPath, plainTextFile, untruncatedKeys)
-            : v
-    }
-    return out
-}
-
-function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys = NO_KEYS) {
-    if (Array.isArray(value)) {
-        if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map(h => cleanHit(h, outPath, plainTextFile, untruncatedKeys)))
-        const cleaned = value.map(v => cleanResponse(v, undefined, outPath, plainTextFile, untruncatedKeys)).filter(v => v !== undefined)
-        return dropDuplicateRows(cleaned)
-    }
-    if (value && typeof value === 'object') {
-        const out = {}
-        for (const [k, v] of Object.entries(value)) {
-            if (NOISE_KEYS.has(k)) continue
-            if (v === null || v === undefined || v === '') continue
-            if (v === false && FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS.has(k)) continue
-            if (plainTextFile && k === 'result' && v && typeof v === 'object') {
-                const serialized = JSON.stringify(v)
-                if (serialized.length > EXEC_OUTPUT_FIELD_TRUNCATE_AT) {
-                    out[k] = truncateLongText(serialized, k, outPath, plainTextFile)
-                    continue
-                }
-            }
-            const cleanedV = cleanResponse(v, k, outPath, plainTextFile, untruncatedKeys)
-            if (Array.isArray(cleanedV) && cleanedV.length === 0 && !EMPTY_LIST_IS_THE_ANSWER_KEYS.has(k)) continue
-            if (cleanedV && typeof cleanedV === 'object' && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue
-            out[k] = cleanedV
-        }
-        return out
-    }
-    if (typeof value === 'string' && keyHint) return truncateLongText(value, keyHint, outPath, plainTextFile, untruncatedKeys)
-    return value
-}
-
 const BROWSER_PLAIN_TEXT_VERBS = ['serp', 'browser', 'cdp']
 
 const EXEC_FAMILY_VERBS = ['exec_js', 'nodejs', 'javascript', 'node', 'js', 'typescript', 'bash', 'sh', 'shell', 'zsh', 'python', 'py', 'powershell', 'ps1', 'ssh', 'go', 'rust', 'c', 'cpp', 'java', 'deno']
@@ -439,6 +330,11 @@ function resumeDisclosure(task, landedAtMs, callStartedAtMs) {
     }
 }
 
+function carriedNoFailure(out) {
+    return Boolean(out) && typeof out === 'object' && !Array.isArray(out)
+        && out.error === undefined && out.timed_out !== true && out.ok !== false
+}
+
 function withResumeDisclosure(out, disclosure) {
     if (!out || typeof out !== 'object' || Array.isArray(out)) return { resumed: disclosure, response: out }
     const key = 'resumed' in out ? 'resumed_dispatch' : 'resumed'
@@ -477,7 +373,7 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
     }
 }
 
-export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task }, signal) {
+export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response }, signal) {
     if (!verb) return 'error: verb required'
     if (!session_id) return 'error: session_id required'
     const root = cwd || process.cwd()
@@ -561,6 +457,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
                 const collides = Object.keys(data).some(k => k in rest)
                 if (!collides) out = { ...rest, ...data }
             }
+            if (!full_response && carriedNoFailure(out)) out = compactWireResponse(out, outPath)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
             if (out && typeof out === 'object' && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
                 out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }

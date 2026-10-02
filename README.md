@@ -91,6 +91,9 @@ mismatch. `npm install` points this checkout's git hooks at `.githooks/`
 (`core.hooksPath`, local to this checkout, never committed) so `pre-push` runs
 it automatically and blocks a push carrying a stale bundle.
 
+`npm test` runs `test/response-compact.test.mjs`, which covers the payload
+cleaner and the wire compactor in `src/response-compact.js`.
+
 Bundling exists because `npx github:...` installs have been observed to
 produce a corrupted transitive-dependency install (a `node_modules/ajv`
 directory present but missing its `package.json`) on some npm/npx versions,
@@ -112,6 +115,34 @@ at launch time.
 | `poll_interval_seconds` | number | no | Fallback response check interval when filesystem events are unavailable (default 0.25) |
 | `include_timing` | boolean | no | Include MCP submission-to-response timing and the last response wakeup source |
 | `resume_task` | string | no | The `task` field from a previous `timed_out`/aborted response -- keep polling that SAME dispatch instead of writing a new one |
+| `full_response` | boolean | no | Skip wire compaction and return every field verbatim (default: compacted) |
+
+## Wire compaction
+
+Every dispatch response is compacted before it crosses the wire; nothing is
+removed from the out-file on disk. A compacted response carries a
+`wire_compacted` block naming every field dropped or shortened, the on-disk
+file holding the full payload, and the opt-out:
+
+```yaml
+wire_compacted:
+  omitted: orient_nouns reply_hash route_hint supply_chain_scan
+  shortened: >-
+    codeinsight_overview codeinsight_start config_changed(1/2)
+    prd_items_truncated ready_wave(1/1) recall_hits(4/5)
+  full_payload_at: C:/proj/.gm/exec-spool/out/instruction-task-1.json
+  full_payload_via: 'dispatch with {"full_response": true}'
+```
+
+Long prose is cut to a 160-char excerpt ending in `...+<n>`, so an abbreviated
+field always says how much is missing. `full_response: true` returns the
+pre-compaction payload byte for byte.
+
+Measure it against any real dispatch:
+
+```bash
+node scripts/measure-wire-size.mjs .gm/exec-spool/out/instruction-*.json
+```
 
 ### Exec-family timeout prefix
 
