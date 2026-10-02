@@ -1,3 +1,4 @@
 node_modules/
 .gm/
+.agentplug-kv/
 config.bat
