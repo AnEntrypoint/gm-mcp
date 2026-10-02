@@ -4,14 +4,14 @@ MCP server exposing gm's spool dispatch cycle (write, poll, cleaned response) to
 
 ## What it does
 
-Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a single MCP tool call named `gm`, instead of a caller writing the input file, polling for the output file, and reading it as three separate steps.
+Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a single MCP tool call named `gm`, instead of a caller writing the input file, polling for the output file, and reading it as three separate steps. Large cleaned responses name their spool result file: call `gm_result` with that file and an optional field, offset, and limit to retrieve a bounded page. Exec output keeps up to 16 KiB for diagnostics while larger responses remain paged.
 
 - Writes `.gm/exec-spool/in/<verb>/<N>.txt`
 - Polls `.gm/exec-spool/out/<verb>-<N>.json` until it appears (or a timeout elapses)
 - Returns the response as flat YAML text, auto-cleaned for readability:
   - opaque internal ids (`dispatch_id`, `request_fingerprint`) stripped
   - the redundant `response`/`data` nesting levels flattened to the top (unless a field name would collide)
-  - long text fields (e.g. `instruction`'s full phase prose) truncated with a pointer naming the on-disk file to read for the full text
+  - long text fields (e.g. `instruction`'s full phase prose) truncated with a pointer naming the `gm_result` file and field for bounded retrieval
   - hit-array ranking internals (`cos`/`recency` in `recall_hits`/`bm25_hits`/`vector_hits`/`commits`) dropped, `score` retained as ranked evidence
   - byte-identical object rows repeated inside one array collapsed to the first copy
   - empty/null/empty-string fields removed at every level, except an empty result list (`edges`, `reachable`, `reached`, `callees`, `functions`, `matches`, `definitions`, `references`), which stays as `[]` so "nothing found" reads as an answer rather than a missing field; and a `false` on a flag whose only meaning is the absence of a problem (`session_mismatch`, `instruction_unchanged`, `instruction_suppressible_by_asserting_hash`, `recall_embed_failed`, `should_residual_scan`, `fsm_graph_rejected`)
@@ -57,6 +57,8 @@ deployed copy and prints one line. Env: `GM_MCP_SELF_UPDATE=0` disables,
 `GM_MCP_SELF_UPDATE_INTERVAL_MS` overrides the throttle. A bundle from before
 this feature cannot update itself: run `npx github:AnEntrypoint/gm --mcp-only`
 once.
+
+If `~/.gm-tools/agentplug-runner` is absent, dispatch reports `runner-not-installed` immediately instead of waiting for a spool result that cannot be produced.
 
 Run bare in a terminal with no MCP client attached the server stays running
 until stdin closes or the process is killed; a stdin close alone does not exit

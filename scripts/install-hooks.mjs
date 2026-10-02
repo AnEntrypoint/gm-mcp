@@ -1,7 +1,4 @@
 #!/usr/bin/env node
-// Points this checkout's git hooks at the tracked .githooks/ dir so
-// pre-push (which runs verify-build) is active without a manual step --
-// core.hooksPath is a local, per-checkout git config value, never committed.
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'

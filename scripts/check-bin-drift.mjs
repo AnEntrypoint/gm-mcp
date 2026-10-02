@@ -1,8 +1,4 @@
 #!/usr/bin/env node
-// Rebuilds src/cli.js the same way `npm run build` does, then fails if the
-// result differs from the committed bin/gm-mcp-server.js -- the MCP SDK
-// silently strips any tool argument missing from the bundle's inputSchema,
-// so a stale bundle is a silent API regression (see README "Development").
 import * as esbuild from 'esbuild'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'

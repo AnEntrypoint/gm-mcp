@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
-import { gmDispatch } from './dispatch.js'
+import { gmDispatch, gmResult } from './dispatch.js'
 import { refreshStaleDeployedBundleInBackground } from './self-update.js'
 
 const numberLike = z.union([z.number(), z.string()])
@@ -42,6 +42,28 @@ export function createServer() {
                 include_timing: args.include_timing,
                 resume_task: args.resume_task,
             }, extra?.signal)
+            return { content: [{ type: 'text', text }] }
+        }
+    )
+
+    server.registerTool(
+        'gm_result',
+        {
+            description: 'Read a bounded page from a GM spool result named by a truncation notice.',
+            inputSchema: {
+                result_file: z.string(),
+                field: z.string().optional(),
+                offset: numberLike.optional(),
+                limit: numberLike.optional(),
+            },
+        },
+        async (args = {}) => {
+            const text = gmResult({
+                result_file: args.result_file,
+                field: args.field,
+                offset: args.offset,
+                limit: args.limit,
+            })
             return { content: [{ type: 'text', text }] }
         }
     )

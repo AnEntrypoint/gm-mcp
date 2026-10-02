@@ -21,6 +21,17 @@ function publishSpoolRequest(inDir, inPath, task, body) {
     }
 }
 
+function inaccessibleSpoolRootError(root, spoolDir, error) {
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+    return yaml.dump({
+        error: `GM cannot create its project-local spool at ${spoolDir}: ${error.message}`,
+        error_code: code === 'EACCES' || code === 'EPERM' ? 'spool_root_not_writable' : 'spool_root_unavailable',
+        cwd: root,
+        spool_dir: spoolDir,
+        remediation: 'Use a readable and writable project root for cwd and git_root_override. GM stores dispatch state under <root>/.gm and does not redirect it to another directory.',
+    }, { lineWidth: 100 })
+}
+
 function normalizedObjectBody(verb, body) {
     if (body === undefined || body === null) return { value: {} }
     if (typeof body === 'string') {
@@ -41,28 +52,24 @@ function normalizedObjectBody(verb, body) {
     return { value: body }
 }
 
-const CODESEARCH_INTEGER_FIELDS = ['limit', 'head_limit', 'k', 'max_results', 'maxResults', 'max_matches', 'max_files', 'max_chars']
-const CODESEARCH_BOOLEAN_FIELDS = ['case_insensitive', 'whole_word', 'comments_only']
-
-function withCodesearchScalarsCoerced(verb, body) {
-    if (verb !== 'codesearch') return body
-    const coerced = { ...body }
-    for (const field of CODESEARCH_INTEGER_FIELDS) {
-        if (typeof coerced[field] === 'string' && /^[0-9]+$/.test(coerced[field].trim())) coerced[field] = Number(coerced[field])
+function normalizedBashCommand(body) {
+    const normalized = normalizedObjectBody('bash', body)
+    if (normalized.error) return normalized
+    const keys = Object.keys(normalized.value)
+    const unsupportedKeys = keys.filter(key => key !== 'command')
+    if (unsupportedKeys.length > 0) {
+        return { error: `bash body supports only command; received unsupported ${unsupportedKeys.length === 1 ? 'field' : 'fields'}: ${unsupportedKeys.join(', ')}.` }
     }
-    for (const field of CODESEARCH_BOOLEAN_FIELDS) {
-        if (coerced[field] === 'true' || coerced[field] === 'false') coerced[field] = coerced[field] === 'true'
+    if (!Object.hasOwn(normalized.value, 'command')) {
+        return { error: 'bash body requires command, a non-empty string.' }
     }
-    return coerced
-}
-
-const PLAIN_TEXT_BODY_FIELDS = ['raw_body', 'code', 'script', 'command', 'source', 'text', 'body']
-
-function plainTextFromBody(body) {
-    if (typeof body === 'string') return body
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined
-    const present = PLAIN_TEXT_BODY_FIELDS.filter(field => typeof body[field] === 'string')
-    return present.length === 1 ? body[present[0]] : undefined
+    if (typeof normalized.value.command !== 'string') {
+        return { error: `bash body.command must be a string; received ${Array.isArray(normalized.value.command) ? 'an array' : typeof normalized.value.command}.` }
+    }
+    if (!normalized.value.command.trim()) {
+        return { error: 'bash body.command must be a non-empty string.' }
+    }
+    return { value: normalized.value.command }
 }
 
 function objectBodyDiagnostic(verb, body) {
@@ -205,34 +212,33 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
 const NOISE_KEYS = new Set(['dispatch_id', 'request_fingerprint'])
 
 const LONG_TEXT_FIELD_TRUNCATE_AT = 400
+const COLLECTION_ITEMS_TRUNCATE_AT = 40
+const RESULT_CHUNK_DEFAULT_CHARACTERS = 12000
+const RESULT_CHUNK_MAX_CHARACTERS = 16000
+const RESULT_FILE_MAX_BYTES = 4 * 1024 * 1024
+const RESULT_READ_CHUNK_BYTES = 64 * 1024
 
 const NEVER_TRUNCATE_KEYS = new Set(['error', 'reason', 'residuals'])
-
-const NO_KEYS = new Set()
-
-const EXPANDED_RECALL_KEYS = new Set(['text'])
-
-function untruncatedKeysFor(verb, body) {
-    const expandsRecall = verb === 'recall' && body && typeof body === 'object' && (body.full === true || typeof body.key === 'string')
-    return expandsRecall ? EXPANDED_RECALL_KEYS : NO_KEYS
-}
-
 const EXEC_OUTPUT_KEYS = new Set(['stdout', 'stderr', 'result'])
-
 const EXEC_OUTPUT_FIELD_TRUNCATE_AT = 16_000
 
-function truncateLongText(value, key, outPath, plainTextFile, untruncatedKeys = NO_KEYS) {
+function truncateLongText(value, key, outPath) {
     if (typeof value !== 'string') return value
-    if (EXEC_OUTPUT_KEYS.has(key)) {
-        if (value.length <= EXEC_OUTPUT_FIELD_TRUNCATE_AT) return value
-        const where = plainTextFile
-            ? `the full text is in ${plainTextFile}, plain text with a '## ${key}' section, readable directly`
-            : `the full output is in ${outPath}, in the JSON string field 'data' (parse it, then read '${key}')`
-        return `${value.slice(0, EXEC_OUTPUT_FIELD_TRUNCATE_AT)}... [OUTPUT TRUNCATED: showing ${EXEC_OUTPUT_FIELD_TRUNCATE_AT} of ${value.length} chars of '${key}' -- ${where}]`
-    }
-    if (value.length <= LONG_TEXT_FIELD_TRUNCATE_AT) return value
-    if (NEVER_TRUNCATE_KEYS.has(key) || untruncatedKeys.has(key)) return value
-    return `${value.slice(0, LONG_TEXT_FIELD_TRUNCATE_AT)}... [${value.length} chars total, full text at ${outPath} field '${key}']`
+    if (NEVER_TRUNCATE_KEYS.has(key)) return value
+    const truncateAt = EXEC_OUTPUT_KEYS.has(key)
+        ? EXEC_OUTPUT_FIELD_TRUNCATE_AT
+        : LONG_TEXT_FIELD_TRUNCATE_AT
+    if (value.length <= truncateAt) return value
+    return `${value.slice(0, truncateAt)}... [${value.length} chars total; retrieve it with gm_result using result_file ${outPath} and field '${key}']`
+}
+
+function truncateCollection(value, key, outPath) {
+    if (value.length <= COLLECTION_ITEMS_TRUNCATE_AT) return value
+    const field = key || 'nested array'
+    return [
+        ...value.slice(0, COLLECTION_ITEMS_TRUNCATE_AT),
+        `... [${value.length - COLLECTION_ITEMS_TRUNCATE_AT} additional items; retrieve the full result with gm_result using result_file ${outPath} and field '${field}']`,
+    ]
 }
 
 const HIT_ARRAY_KEYS = new Set(['recall_hits', 'bm25_hits', 'vector_hits', 'commits'])
@@ -247,17 +253,6 @@ const FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS = new Set([
     'fsm_graph_rejected',
 ])
 
-const EMPTY_LIST_IS_THE_ANSWER_KEYS = new Set([
-    'edges',
-    'reachable',
-    'reached',
-    'callees',
-    'functions',
-    'matches',
-    'definitions',
-    'references',
-])
-
 function dropDuplicateRows(rows) {
     const seen = new Set()
     return rows.filter(row => {
@@ -269,24 +264,24 @@ function dropDuplicateRows(rows) {
     })
 }
 
-function cleanHit(hit, outPath, plainTextFile, untruncatedKeys) {
+function cleanHit(hit, outPath) {
     if (!hit || typeof hit !== 'object') return hit
     const out = {}
     for (const [k, v] of Object.entries(hit)) {
         if (HIT_NOISE_KEYS.has(k)) continue
         if (v === '' || v === null || v === undefined) continue
-        out[k] = typeof v === 'string' ? truncateLongText(v, k, outPath, plainTextFile, untruncatedKeys)
-            : (v && typeof v === 'object' && !Array.isArray(v)) ? cleanHit(v, outPath, plainTextFile, untruncatedKeys)
+        out[k] = typeof v === 'string' ? truncateLongText(v, k, outPath)
+            : (v && typeof v === 'object' && !Array.isArray(v)) ? cleanHit(v, outPath)
             : v
     }
     return out
 }
 
-function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys = NO_KEYS) {
+function cleanResponse(value, keyHint, outPath) {
     if (Array.isArray(value)) {
-        if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map(h => cleanHit(h, outPath, plainTextFile, untruncatedKeys)))
-        const cleaned = value.map(v => cleanResponse(v, undefined, outPath, plainTextFile, untruncatedKeys)).filter(v => v !== undefined)
-        return dropDuplicateRows(cleaned)
+        if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map(h => cleanHit(h, outPath)))
+        const cleaned = value.map(v => cleanResponse(v, undefined, outPath)).filter(v => v !== undefined)
+        return truncateCollection(dropDuplicateRows(cleaned), keyHint, outPath)
     }
     if (value && typeof value === 'object') {
         const out = {}
@@ -294,21 +289,14 @@ function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys =
             if (NOISE_KEYS.has(k)) continue
             if (v === null || v === undefined || v === '') continue
             if (v === false && FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS.has(k)) continue
-            if (plainTextFile && k === 'result' && v && typeof v === 'object') {
-                const serialized = JSON.stringify(v)
-                if (serialized.length > EXEC_OUTPUT_FIELD_TRUNCATE_AT) {
-                    out[k] = truncateLongText(serialized, k, outPath, plainTextFile)
-                    continue
-                }
-            }
-            const cleanedV = cleanResponse(v, k, outPath, plainTextFile, untruncatedKeys)
-            if (Array.isArray(cleanedV) && cleanedV.length === 0 && !EMPTY_LIST_IS_THE_ANSWER_KEYS.has(k)) continue
+            const cleanedV = cleanResponse(v, k, outPath)
+            if (Array.isArray(cleanedV) && cleanedV.length === 0) continue
             if (cleanedV && typeof cleanedV === 'object' && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue
             out[k] = cleanedV
         }
         return out
     }
-    if (typeof value === 'string' && keyHint) return truncateLongText(value, keyHint, outPath, plainTextFile, untruncatedKeys)
+    if (typeof value === 'string' && keyHint) return truncateLongText(value, keyHint, outPath)
     return value
 }
 
@@ -320,37 +308,168 @@ const PLAIN_TEXT_BODY_VERBS = new Set([...EXEC_FAMILY_VERBS, ...BROWSER_PLAIN_TE
 
 const TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS)
 
-const TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/
+function assertResultFileInsideSpool(root, resultFile) {
+    const outDir = path.join(root, '.gm', 'exec-spool', 'out')
+    const candidate = path.resolve(root, resultFile)
+    const resolvedOutDir = fs.realpathSync(outDir)
+    const resolvedFile = fs.realpathSync(candidate)
+    const relative = path.relative(resolvedOutDir, resolvedFile)
+    if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        throw new Error('result_file must name a file inside this project\'s .gm/exec-spool/out directory')
+    }
+    if (!fs.statSync(resolvedFile).isFile()) throw new Error('result_file must name a regular file')
+    return { candidate, resolvedFile, resolvedOutDir }
+}
 
-const TIMEOUT_MS_PREFIX_VALUE = /^\s*timeout(?:Ms|_ms)=(\d+)/
-
-const DEFAULT_TIMEOUT_SECONDS = 120
-
-const EXEC_DEFAULT_LIMIT_SECONDS = 300
-
-const POLL_MARGIN_PAST_EXEC_TIMEOUT_MS = 5000
-
-function unpackExecOutputEnvelope(verb, parsed) {
-    if (!EXEC_FAMILY_VERBS.includes(verb) || !parsed || typeof parsed.data !== 'string') return parsed
+function openedDescriptorPath(fd) {
+    const descriptorRoot = process.platform === 'linux' ? '/proc/self/fd'
+        : process.platform === 'darwin' ? '/dev/fd'
+            : undefined
+    if (!descriptorRoot) return undefined
     try {
-        const inner = JSON.parse(parsed.data)
-        return inner && typeof inner === 'object' && !Array.isArray(inner) ? { ...parsed, data: inner } : parsed
+        return fs.realpathSync(path.join(descriptorRoot, String(fd)))
     } catch {
-        return parsed
+        return undefined
     }
 }
 
-export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
-    const explicitSeconds = Number(timeout_seconds)
-    if (explicitSeconds > 0) return explicitSeconds * 1000
-    const bodyPrefix = TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === 'string' ? TIMEOUT_MS_PREFIX_VALUE.exec(raw_body) : null
-    if (bodyPrefix) return Math.max(DEFAULT_TIMEOUT_SECONDS * 1000, Number(bodyPrefix[1]) + POLL_MARGIN_PAST_EXEC_TIMEOUT_MS)
-    return DEFAULT_TIMEOUT_SECONDS * 1000
+function openResultFile(root, resultFile) {
+    const { candidate, resolvedFile, resolvedOutDir } = assertResultFileInsideSpool(root, resultFile)
+    const before = fs.lstatSync(candidate)
+    if (!before.isFile() || before.nlink !== 1) {
+        throw new Error('result_file must be an unlinked regular spool file')
+    }
+    const fd = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
+    try {
+        const opened = fs.fstatSync(fd)
+        if (!opened.isFile() || opened.nlink !== 1) {
+            throw new Error('result_file must be an unlinked regular spool file')
+        }
+        if (opened.dev !== before.dev || opened.ino !== before.ino) {
+            throw new Error('result_file changed while opening')
+        }
+        if (opened.size > RESULT_FILE_MAX_BYTES) {
+            throw new Error(`result_file exceeds ${RESULT_FILE_MAX_BYTES} byte limit`)
+        }
+        const descriptorPath = openedDescriptorPath(fd)
+        if (descriptorPath) {
+            const relative = path.relative(resolvedOutDir, descriptorPath)
+            if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+                throw new Error('result_file is outside the GM output spool')
+            }
+        }
+        return { fd, file: resolvedFile, size: opened.size }
+    } catch (error) {
+        fs.closeSync(fd)
+        throw error
+    }
 }
+
+function readAllBounded(fd, size) {
+    const buffer = Buffer.allocUnsafe(size)
+    let position = 0
+    while (position < size) {
+        const read = fs.readSync(fd, buffer, position, size - position, position)
+        if (read === 0) break
+        position += read
+    }
+    return buffer.subarray(0, position).toString('utf8')
+}
+
+function readUtf8Page(fd, size, offset, limit) {
+    const decoder = new TextDecoder()
+    const buffer = Buffer.allocUnsafe(Math.min(RESULT_READ_CHUNK_BYTES, Math.max(size, 1)))
+    let position = 0
+    let totalCharacters = 0
+    let content = ''
+    const consume = text => {
+        const remaining = limit - content.length
+        if (remaining > 0 && totalCharacters + text.length > offset) {
+            const start = Math.max(0, offset - totalCharacters)
+            content += text.slice(start, start + remaining)
+        }
+        totalCharacters += text.length
+    }
+    while (position < size) {
+        const read = fs.readSync(fd, buffer, 0, Math.min(buffer.length, size - position), position)
+        if (read === 0) break
+        position += read
+        consume(decoder.decode(buffer.subarray(0, read), { stream: true }))
+    }
+    consume(decoder.decode())
+    const nextOffset = offset + limit < totalCharacters ? offset + limit : undefined
+    return { content, totalCharacters, nextOffset }
+}
+
+function resultField(value, field) {
+    const segments = field.split('.').filter(Boolean)
+    const atPath = (candidate, candidateSegments) => {
+        let current = candidate
+        for (const segment of candidateSegments) {
+            if (!current || typeof current !== 'object' || !Object.hasOwn(current, segment)) return undefined
+            current = current[segment]
+        }
+        return current
+    }
+    const direct = atPath(value, segments)
+    if (direct !== undefined) return { value: direct, path: field }
+    if (value && typeof value === 'object' && value.data && typeof value.data === 'object') {
+        const nested = atPath(value.data, segments)
+        if (nested !== undefined) return { value: nested, path: `data.${field}` }
+    }
+    throw new Error(`field "${field}" was not found; omit field to read the complete raw response`)
+}
+
+export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_DEFAULT_CHARACTERS, cwd }) {
+    const root = cwd || process.cwd()
+    const toYaml = value => yaml.dump(value, { lineWidth: 100 })
+    if (typeof result_file !== 'string' || !result_file) return toYaml({ error: 'result_file required' })
+    if (field !== undefined && (typeof field !== 'string' || !field)) return toYaml({ error: 'field must be a non-empty string when provided' })
+    if (!Number.isInteger(offset) || offset < 0) return toYaml({ error: 'offset must be a non-negative integer' })
+    if (!Number.isInteger(limit) || limit < 1 || limit > RESULT_CHUNK_MAX_CHARACTERS) {
+        return toYaml({ error: `limit must be an integer from 1 through ${RESULT_CHUNK_MAX_CHARACTERS}` })
+    }
+    try {
+        const { fd, file, size } = openResultFile(root, result_file)
+        try {
+            let content
+            let totalCharacters
+            let nextOffset
+            let resolvedField
+            if (field) {
+                const selected = resultField(JSON.parse(readAllBounded(fd, size)), field)
+                content = JSON.stringify(selected.value, null, 2)
+                resolvedField = selected.path
+                totalCharacters = content.length
+                nextOffset = offset + limit < totalCharacters ? offset + limit : undefined
+            } else {
+                ({ content, totalCharacters, nextOffset } = readUtf8Page(fd, size, offset, limit))
+            }
+            const page = field ? content.slice(offset, offset + limit) : content
+            return toYaml({
+                result_file: file,
+                ...(resolvedField ? { field: resolvedField } : {}),
+                offset,
+                returned_characters: page.length,
+                total_characters: totalCharacters,
+                ...(nextOffset === undefined ? { complete: true } : { next_offset: nextOffset }),
+                content: page,
+            })
+        } finally {
+            fs.closeSync(fd)
+        }
+    } catch (error) {
+        return toYaml({ error: `result_file could not be read: ${error.message}` })
+    }
+}
+
+const TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/
+
+const DEFAULT_TIMEOUT_SECONDS = 120
 
 function timeoutMsFor(timeout_seconds) {
     const seconds = Number(timeout_seconds)
-    return Math.max(100, Math.round((seconds > 0 ? seconds : EXEC_DEFAULT_LIMIT_SECONDS) * 1000))
+    return Math.max(100, Math.round((seconds > 0 ? seconds : DEFAULT_TIMEOUT_SECONDS) * 1000))
 }
 
 export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
@@ -374,9 +493,7 @@ function readDaemonLiveness(spoolDir) {
     const busyForMs = typeof status.busy_until === 'number' ? status.busy_until - now : null
     const busy = busyForMs !== null && busyForMs > 0
     const note = !alive
-        ? runnerBinaryMissing()
-            ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed`
-            : 'daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch\'s fault'
+        ? 'daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch\'s fault'
         : busy
             ? 'daemon is alive and still actively working on this project'
             : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that'
@@ -393,22 +510,6 @@ function readDaemonLiveness(spoolDir) {
     return liveness
 }
 
-// A missing runner binary with no live shared daemon means the daemon can never
-// claim a fresh ticket: without this guard the request is written, sits
-// unclaimed, and the caller only learns the binary is absent after a full poll
-// timeout. Failing fast here keeps a working shared daemon usable (its liveness
-// short-circuits) and turns the silent no-op into one actionable error.
-function runnerUnavailable(root, spoolDir) {
-    if (!runnerBinaryMissing()) return null
-    if (readDaemonLiveness(spoolDir).alive) return null
-    return {
-        error: 'runner-not-installed',
-        runner_binary_missing: true,
-        runner_path: RUNNER_PATH,
-        note: `the agentplug-runner binary is not installed at ${RUNNER_PATH} and no live daemon heartbeat was found for ${path.resolve(root)}, so this dispatch could never be claimed. Install it once, then dispatch again: npx github:AnEntrypoint/gm -g   (or, in this project: curl -fsSL https://raw.githubusercontent.com/AnEntrypoint/gm/main/install.sh | sh -s -- spool)`,
-    }
-}
-
 function readSpoolDispatchState(spoolDir, verb, task) {
     const queuedPath = path.join(spoolDir, 'in', verb, `${task}.txt`)
     const claimedPath = `${queuedPath}.inflight`
@@ -418,7 +519,7 @@ function readSpoolDispatchState(spoolDir, verb, task) {
     const note = claimed
         ? `the daemon HAS claimed this dispatch (${claimedPath} exists) and has not written its out-file yet -- it is still running, not lost. Re-dispatch with resume_task set to this response's task to keep waiting on the SAME request instead of starting a duplicate`
         : queued
-            ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet; it claims every settled ticket on each tick, so this means the daemon is between ticks or still starting, or this project already has its maximum of 32 claimed dispatches in flight. Re-dispatch with resume_task set to this response's task; writing a second dispatch only deepens the queue`
+            ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet, typically because its worker pool is saturated by other tickets. Re-dispatch with resume_task set to this response's task; writing a second dispatch only deepens the queue`
             : 'neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id'
     return { state, claimed, queued, note }
 }
@@ -451,16 +552,11 @@ function instructionOwnerKey(root, sessionId) {
     return `${path.resolve(root)} ${sessionId}`
 }
 
-const deliveredReplyHashByOwner = new Map()
-
 function withAssertedInstructionHash(verb, body, root, sessionId) {
     if (verb !== 'instruction') return body
-    const owner = instructionOwnerKey(root, sessionId)
-    const knownReply = deliveredReplyHashByOwner.get(owner)
-    const withReply = knownReply && typeof body.known_reply_hash !== 'string' ? { ...body, known_reply_hash: knownReply } : body
-    if (typeof body.instruction_hash === 'string' || typeof body.known_instruction_hash === 'string') return withReply
-    const known = deliveredInstructionHashByOwner.get(owner)
-    return known ? { ...withReply, instruction_hash: known } : withReply
+    if (typeof body.instruction_hash === 'string' || typeof body.known_instruction_hash === 'string') return body
+    const known = deliveredInstructionHashByOwner.get(instructionOwnerKey(root, sessionId))
+    return known ? { ...body, instruction_hash: known } : body
 }
 
 function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
@@ -472,9 +568,6 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
     if (prose || data.instruction_unchanged === true) {
         deliveredInstructionHashByOwner.set(instructionOwnerKey(root, sessionId), hash)
     }
-    if (typeof data.reply_hash === 'string' && data.reply_hash) {
-        deliveredReplyHashByOwner.set(instructionOwnerKey(root, sessionId), data.reply_hash)
-    }
 }
 
 export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task }, signal) {
@@ -484,18 +577,29 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
     const spoolDir = path.join(root, '.gm', 'exec-spool')
     const inDir = path.join(spoolDir, 'in', verb)
     const outDir = path.join(spoolDir, 'out')
-    fs.mkdirSync(outDir, { recursive: true })
+    try {
+        fs.mkdirSync(outDir, { recursive: true })
+    } catch (error) {
+        return inaccessibleSpoolRootError(root, spoolDir, error)
+    }
     const n = resume_task || nextN(session_id)
     const callStartedAtMs = Date.now()
     let lastWakeSource = 'initial_check'
     const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })
 
+    const hasStructuredBashBody = verb === 'bash' && body !== undefined && body !== null
+    if (!resume_task && hasStructuredBashBody && typeof raw_body === 'string') {
+        return 'error: bash accepts either raw_body or body.command, not both.'
+    }
+    let plainTextBody = raw_body
+    if (!resume_task && hasStructuredBashBody) {
+        const normalized = normalizedBashCommand(body)
+        if (normalized.error) return `error: ${normalized.error}`
+        plainTextBody = normalized.value
+    }
     const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === 'string'
-    if (!resume_task && isPlainText && typeof raw_body !== 'string') {
-        raw_body = plainTextFromBody(body)
-        if (typeof raw_body !== 'string') {
-            return `error: ${verb} takes a plain-text body -- pass the text as the top-level raw_body argument (a string), e.g. raw_body: "return 1". body is for JSON verbs; here it is accepted only as a string or as an object with exactly one string field among ${PLAIN_TEXT_BODY_FIELDS.join(', ')}`
-        }
+    if (!resume_task && isPlainText && typeof plainTextBody !== 'string') {
+        return `error: ${verb} takes a plain-text body -- pass raw_body (a string), not body (a JSON object)`
     }
 
     let normalizedBody
@@ -504,7 +608,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         if (normalized.error) return `error: ${normalized.error}`
         const diagnostic = objectBodyDiagnostic(verb, normalized.value)
         if (diagnostic) return `error: ${diagnostic}`
-        normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, normalized.value), root, session_id)
+        normalizedBody = withAssertedInstructionHash(verb, normalized.value, root, session_id)
     }
 
     const inPath = path.join(inDir, `${n}.txt`)
@@ -526,18 +630,16 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
     }
 
     if (!resume_task) {
-        const unavailable = runnerUnavailable(root, spoolDir)
-        if (unavailable) return toYaml(unavailable)
         ensureSpoolRunnerRunning(root)
         if (isPlainText) {
-            publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds))
+            publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, plainTextBody, timeout_seconds))
         } else {
             const fullBody = { ...normalizedBody, session_id }
             publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody))
         }
     }
 
-    const timeoutMs = resume_task ? Math.max(0, (Number(timeout_seconds) || DEFAULT_TIMEOUT_SECONDS) * 1000) : pollTimeoutMs(verb, raw_body, timeout_seconds)
+    const timeoutMs = Math.max(0, (Number(timeout_seconds) || 120) * 1000)
     const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1000)
     const deadline = Date.now() + timeoutMs
 
@@ -551,10 +653,9 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
             landedAtMs = null
         }
         try {
-            const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, 'utf8')))
+            const parsed = JSON.parse(fs.readFileSync(outPath, 'utf8'))
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
-            const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
-            const cleaned = cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody))
+            const cleaned = cleanResponse(parsed, undefined, outPath)
             let out = cleaned
             if (cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
                 const { data, ...rest } = cleaned
@@ -565,7 +666,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
             if (out && typeof out === 'object' && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
                 out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
             }
-            if (include_timing === true || include_timing === 'true') {
+            if (include_timing) {
                 const timingKey = out && typeof out === 'object' && !Array.isArray(out) && 'mcp_timing' in out ? 'mcp_client_timing' : 'mcp_timing'
                 const timing = {
                     submitted_at_ms: callStartedAtMs,
@@ -583,25 +684,8 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         }
     }
 
-    const withdrawUnclaimedRequest = () => {
-        if (resume_task) return false
-        try {
-            fs.unlinkSync(inPath)
-            return true
-        } catch {
-            return false
-        }
-    }
-    const abortedReply = () => toYaml({
-        error: 'aborted',
-        task: n,
-        in_path: inPath,
-        out_path: outPath,
-        request_withdrawn_before_claim: withdrawUnclaimedRequest(),
-    })
-
     while (true) {
-        if (signal?.aborted) return abortedReply()
+        if (signal?.aborted) return toYaml({ error: 'aborted', task: n, in_path: inPath, out_path: outPath })
         const landed = readLandedOutFile()
         if (landed !== undefined) return landed
         if (Date.now() >= deadline) {
@@ -630,7 +714,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         try {
             lastWakeSource = await waitForSpoolChange(outDir, outPath, deadline - Date.now(), pollMs, signal)
         } catch {
-            return abortedReply()
+            return toYaml({ error: 'aborted', task: n, in_path: inPath, out_path: outPath })
         }
     }
 }
