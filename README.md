@@ -11,7 +11,7 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
 - Returns the response as flat YAML text, auto-cleaned for readability:
   - opaque internal ids (`dispatch_id`, `request_fingerprint`) stripped
   - the redundant `response`/`data` nesting levels flattened to the top (unless a field name would collide)
-  - long text fields (e.g. `instruction`'s full phase prose) truncated with a pointer naming the on-disk file to read for the full text
+  - long text fields (e.g. `instruction`'s full phase prose) truncated with a pointer naming the on-disk file to read for the full text -- the plain-text-body verbs get a far larger budget so their `stdout` comes back inline (see "Long text inline limits")
   - hit-array ranking internals (`cos`/`recency` in `recall_hits`/`bm25_hits`/`vector_hits`/`commits`) dropped, `score` retained as ranked evidence
   - byte-identical object rows repeated inside one array collapsed to the first copy
   - empty/null/empty-string fields removed at every level, except an empty result list (`edges`, `reachable`, `reached`, `callees`, `functions`, `matches`, `definitions`, `references`), which stays as `[]` so "nothing found" reads as an answer rather than a missing field; and a `false` on a flag whose only meaning is the absence of a problem (`session_mismatch`, `instruction_unchanged`, `instruction_suppressible_by_asserting_hash`, `recall_embed_failed`, `should_residual_scan`, `fsm_graph_rejected`)
@@ -115,7 +115,8 @@ at launch time.
 | `poll_interval_seconds` | number | no | Fallback response check interval when filesystem events are unavailable (default 0.25) |
 | `include_timing` | boolean | no | Include MCP submission-to-response timing and the last response wakeup source |
 | `resume_task` | string | no | The `task` field from a previous `timed_out`/aborted response -- keep polling that SAME dispatch instead of writing a new one |
-| `full_response` | boolean | no | Skip wire compaction and return every field verbatim (default: compacted) |
+| `full_response` | boolean | no | Skip wire compaction and return every field verbatim, with no text field truncated (default: compacted) |
+| `max_chars` | number | no | Per-dispatch cap on how many characters of any one text field come back inline, overriding the defaults below (ceiling `1048576`) |
 
 ## Wire compaction
 
@@ -138,6 +139,44 @@ Long prose is cut to a 160-char excerpt ending in `...+<n>`, so an abbreviated
 field always says how much is missing. `full_response: true` returns the
 pre-compaction payload byte for byte.
 
+### Long text inline limits
+
+Two env vars set how much of a long text field comes back inline before it is
+replaced by the `... [N chars total, full text at <out-file> field '<key>']`
+pointer. They are read once at server start, so a host must restart its
+`gm-mcp-server.mjs` for a change to take effect.
+
+| Env var | Applies to | Default | Ceiling |
+|---|---|---|---|
+| `GM_MCP_LONG_TEXT_INLINE_MAX` | every long text field, including `instruction`'s phase prose | `400` | `1048576` |
+| `GM_MCP_STDOUT_INLINE_MAX` | the whole response of a plain-text-body verb (`exec_js` and every language stem it backs, `serp`, `browser`, `cdp`) | `32768` | `1048576` |
+| `GM_MCP_FILE_READ_INLINE_MAX` | the file body `fs_read` returns | `65536` | `1048576` |
+
+The `fs_read` budget exists because that response *is* the file the caller
+asked for: at the 400-char prose cap every whole-file read came back as a
+pointer and the caller had to fall back to a host file-read tool. `fs_read`'s
+own `max_bytes`/`offset`/`limit` are daemon-side and were never the problem --
+they were being cut down again on the way out.
+
+The plain-text-body budget exists because that response *is* the script's
+output: truncating it at 400 chars meant nearly every `exec_js` call needed a
+second round trip (a file read) to see its own `stdout`. Raise or lower either
+knob in the `mcpServers.gm` entry:
+
+```json
+{ "mcpServers": { "gm": {
+  "command": "node",
+  "args": ["/home/you/.gm-tools/gm-mcp-server.mjs"],
+  "env": { "GM_MCP_STDOUT_INLINE_MAX": "65536" }
+} } }
+```
+
+Non-numeric, zero or negative values fall back to the default. `max_chars` is
+the per-dispatch override of all three: it is an MCP argument, so it never
+reaches the verb's own body. `full_response: true` lifts the text cap to the
+ceiling as well as skipping wire compaction, so it really does return every
+field verbatim.
+
 Measure it against any real dispatch:
 
 ```bash
@@ -151,8 +190,7 @@ it defaults to 300000 when the line is absent, is clamped to a hard ceiling of
 900000 (the reply then carries `limit_clamped_from_ms`), and at expiry the whole
 process tree is killed and the reply is `{ok:false, timed_out:true, killed:true,
 error_code:"exec_timeout", limit_ms, ...}` with whatever stdout/stderr had been
-produced. The exec family is `exec_js` (aliases `nodejs`, `javascript`, `node`, `js`,
-`typescript`) and every language stem: `bash`, `sh`, `shell`, `zsh`,
+produced. The exec family is `exec_js` (aliases `nodejs`, `javascript`, `node`, `js`) and every language stem: `bash`, `sh`, `shell`, `zsh`,
 `python`, `py`, `powershell`, `ps1`, `ssh`, `go`, `rust`, `c`, `cpp`,
 `java`, `deno`.
 
@@ -182,6 +220,37 @@ text `<verb>-<task>.txt` next to the out-file (sections `## result`, `## stdout`
 `## stderr`, un-escaped) that the daemon writes whenever a field exceeds 2000
 characters; older daemons name the JSON out-file and its `data` field instead. Other long text fields stay capped at 400 characters with the same
 kind of pointer.
+
+### `raw_body` is byte-for-byte -- mind the backslash escapes
+
+The server writes `raw_body` to the spool input file with no escaping at all
+(`fs.writeFileSync(temp, body, 'utf8')`). The shell therefore sees exactly the
+bytes of the argument. Two escapes still apply before that point, and both
+remove one backslash:
+
+1. The MCP client encodes the tool argument as JSON. A backslash in a JSON
+   string is an escape, so `\` in your text reaches gm as `\`. Write `\\`
+   to make the shell receive `\`.
+2. `bash` removes one more backslash inside double quotes, and `\$` is a
+   literal dollar sign. So `\"C:\dir\${V}\"` never expands `${V}` -- it is a
+   quoted dollar, not an expansion.
+
+A Windows path inside a bash double-quoted string therefore needs four
+backslashes per separator in the tool argument:
+
+```
+cmd /c "C:\\dev\\proj\\${B}.bat"
+```
+
+Forward slashes avoid the problem entirely, and `cmd.exe` accepts them:
+
+```
+cmd /c "C:/dev/proj/${B}.bat"
+```
+
+If a variable arrives at the shell literally (for example `cmd /c` reports
+`'C:\dev\proj${B}.bat' is not recognized`), the cause is one of these two
+escapes, not gm. Check the byte count of the backslashes before `$`.
 
 ### Resuming a dispatch
 

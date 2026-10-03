@@ -1,6 +1,19 @@
 const NOISE_KEYS = new Set(['dispatch_id', 'request_fingerprint'])
 
-const LONG_TEXT_FIELD_TRUNCATE_AT = 400
+function envPositiveInt(name, fallback) {
+    const raw = Number(process.env[name])
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback
+}
+
+const LONG_TEXT_INLINE_MAX_CEILING = 1048576
+
+const LONG_TEXT_FIELD_TRUNCATE_AT = Math.min(envPositiveInt('GM_MCP_LONG_TEXT_INLINE_MAX', 400), LONG_TEXT_INLINE_MAX_CEILING)
+
+const PLAIN_TEXT_OUTPUT_INLINE_MAX = Math.min(envPositiveInt('GM_MCP_STDOUT_INLINE_MAX', 32768), LONG_TEXT_INLINE_MAX_CEILING)
+
+const FILE_READ_INLINE_MAX = Math.min(envPositiveInt('GM_MCP_FILE_READ_INLINE_MAX', 65536), LONG_TEXT_INLINE_MAX_CEILING)
+
+export { PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING }
 
 const NEVER_TRUNCATE_KEYS = new Set(['error', 'reason', 'residuals'])
 
@@ -41,18 +54,24 @@ export function untruncatedKeysFor(verb, body) {
     return expandsRecall ? EXPANDED_RECALL_KEYS : NO_KEYS
 }
 
-export function truncateLongText(value, key, outPath, plainTextFile, untruncatedKeys = NO_KEYS) {
+function resolvedInlineMax(inlineMax, key) {
+    if (Number.isFinite(inlineMax) && inlineMax > 0) return Math.floor(inlineMax)
+    return EXEC_OUTPUT_KEYS.has(key) ? EXEC_OUTPUT_FIELD_TRUNCATE_AT : LONG_TEXT_FIELD_TRUNCATE_AT
+}
+
+export function truncateLongText(value, key, outPath, plainTextFile, untruncatedKeys = NO_KEYS, inlineMax) {
     if (typeof value !== 'string') return value
+    const budget = resolvedInlineMax(inlineMax, key)
     if (EXEC_OUTPUT_KEYS.has(key)) {
-        if (value.length <= EXEC_OUTPUT_FIELD_TRUNCATE_AT) return value
+        if (value.length <= budget) return value
         const where = plainTextFile
             ? `the full text is in ${plainTextFile}, plain text with a '## ${key}' section, readable directly`
             : `the full output is in ${outPath}, in the JSON string field 'data' (parse it, then read '${key}')`
-        return `${value.slice(0, EXEC_OUTPUT_FIELD_TRUNCATE_AT)}... [OUTPUT TRUNCATED: showing ${EXEC_OUTPUT_FIELD_TRUNCATE_AT} of ${value.length} chars of '${key}' -- ${where}]`
+        return `${value.slice(0, budget)}... [OUTPUT TRUNCATED: showing ${budget} of ${value.length} chars of '${key}' -- ${where}]`
     }
-    if (value.length <= LONG_TEXT_FIELD_TRUNCATE_AT) return value
+    if (value.length <= budget) return value
     if (NEVER_TRUNCATE_KEYS.has(key) || untruncatedKeys.has(key)) return value
-    return `${value.slice(0, LONG_TEXT_FIELD_TRUNCATE_AT)}... [${value.length} chars total, full text at ${outPath} field '${key}']`
+    return `${value.slice(0, budget)}... [${value.length} chars total, full text at ${outPath} field '${key}']`
 }
 
 function dropDuplicateRows(rows) {
@@ -66,23 +85,23 @@ function dropDuplicateRows(rows) {
     })
 }
 
-function cleanHit(hit, outPath, plainTextFile, untruncatedKeys) {
+function cleanHit(hit, outPath, plainTextFile, untruncatedKeys, inlineMax) {
     if (!hit || typeof hit !== 'object') return hit
     const out = {}
     for (const [k, v] of Object.entries(hit)) {
         if (HIT_NOISE_KEYS.has(k)) continue
         if (v === '' || v === null || v === undefined) continue
-        out[k] = typeof v === 'string' ? truncateLongText(v, k, outPath, plainTextFile, untruncatedKeys)
-            : (v && typeof v === 'object' && !Array.isArray(v)) ? cleanHit(v, outPath, plainTextFile, untruncatedKeys)
+        out[k] = typeof v === 'string' ? truncateLongText(v, k, outPath, plainTextFile, untruncatedKeys, inlineMax)
+            : (v && typeof v === 'object' && !Array.isArray(v)) ? cleanHit(v, outPath, plainTextFile, untruncatedKeys, inlineMax)
             : v
     }
     return out
 }
 
-export function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys = NO_KEYS) {
+export function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys = NO_KEYS, inlineMax) {
     if (Array.isArray(value)) {
-        if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map(h => cleanHit(h, outPath, plainTextFile, untruncatedKeys)))
-        const cleaned = value.map(v => cleanResponse(v, undefined, outPath, plainTextFile, untruncatedKeys)).filter(v => v !== undefined)
+        if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map(h => cleanHit(h, outPath, plainTextFile, untruncatedKeys, inlineMax)))
+        const cleaned = value.map(v => cleanResponse(v, undefined, outPath, plainTextFile, untruncatedKeys, inlineMax)).filter(v => v !== undefined)
         return dropDuplicateRows(cleaned)
     }
     if (value && typeof value === 'object') {
@@ -93,19 +112,19 @@ export function cleanResponse(value, keyHint, outPath, plainTextFile, untruncate
             if (v === false && FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS.has(k)) continue
             if (plainTextFile && k === 'result' && v && typeof v === 'object') {
                 const serialized = JSON.stringify(v)
-                if (serialized.length > EXEC_OUTPUT_FIELD_TRUNCATE_AT) {
-                    out[k] = truncateLongText(serialized, k, outPath, plainTextFile)
+                if (serialized.length > resolvedInlineMax(inlineMax, k)) {
+                    out[k] = truncateLongText(serialized, k, outPath, plainTextFile, NO_KEYS, inlineMax)
                     continue
                 }
             }
-            const cleanedV = cleanResponse(v, k, outPath, plainTextFile, untruncatedKeys)
+            const cleanedV = cleanResponse(v, k, outPath, plainTextFile, untruncatedKeys, inlineMax)
             if (Array.isArray(cleanedV) && cleanedV.length === 0 && !EMPTY_LIST_IS_THE_ANSWER_KEYS.has(k)) continue
             if (cleanedV && typeof cleanedV === 'object' && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue
             out[k] = cleanedV
         }
         return out
     }
-    if (typeof value === 'string' && keyHint) return truncateLongText(value, keyHint, outPath, plainTextFile, untruncatedKeys)
+    if (typeof value === 'string' && keyHint) return truncateLongText(value, keyHint, outPath, plainTextFile, untruncatedKeys, inlineMax)
     return value
 }
 
@@ -201,11 +220,20 @@ function compactConfigChanged(rows) {
     })
 }
 
+const WIRE_SCAN_WARNINGS_INLINE_MAX = 8
+
 function compactSupplyChainScan(scan) {
     if (!scan || typeof scan !== 'object') return scan
     const hasFindings = ['blocked', 'failing', 'warnings', 'symlinkEscapes']
         .some(k => Array.isArray(scan[k]) && scan[k].length > 0)
-    return hasFindings ? scan : omitFromWire
+    if (!hasFindings) return omitFromWire
+    const warnings = Array.isArray(scan.warnings) ? scan.warnings : []
+    if (warnings.length <= WIRE_SCAN_WARNINGS_INLINE_MAX) return scan
+    return {
+        ...scan,
+        warnings: warnings.slice(0, WIRE_SCAN_WARNINGS_INLINE_MAX),
+        warningsOmitted: warnings.length - WIRE_SCAN_WARNINGS_INLINE_MAX,
+    }
 }
 
 function compactDreamRsiStrategy(strategy) {

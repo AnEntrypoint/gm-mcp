@@ -35,8 +35,25 @@ what README does not.
   capped by its compact JSON length only when `result_file` is present.
 - `src/self-update.js` only replaces the file it is itself running from, and only when that file is the deployed `gm-mcp-server.mjs` under `GM_TOOLS_DIR`/`~/.gm-tools` -- a dev checkout or `src/` run reports `not-deployed-copy` and is never overwritten. The fetch runs after `server.connect` so it can never delay the 30s connect window; the new bundle is served from the next connect, not the current process. `bin/gm-mcp-server.js` on `main` is therefore the live release channel: pushing a drifted bundle publishes it to every deployed copy within an hour.
 - `src/response-compact.js` splits the response in two stages. `cleanResponse`
-  is lossless housekeeping (strip opaque ids, drop empties, truncate prose at
-  400 chars with a pointer, keep the exec-family envelope behavior above).
+  is lossless housekeeping (strip opaque ids, drop empties, truncate prose with
+  a pointer). The pointer's threshold is `LONG_TEXT_FIELD_TRUNCATE_AT`, 400
+  chars by default, except for a plain-text-body verb (`isPlainText` in
+  `dispatch.js`, already computed for the `raw_body` contract) whose whole
+  response gets `PLAIN_TEXT_OUTPUT_INLINE_MAX` -- 32768, read once from the
+  env at server start. That verb's response *is* the script's output, so the
+  generic cap forced a file read on nearly every `exec_js` call; raising the
+  generic cap instead would have un-truncated `instruction`'s prose too, which
+  the wire-size measurements below are tuned against. `fs_read` is the third
+  case (`FILE_READ_INLINE_MAX`, 65536): at 400 chars every whole-file read came
+  back as a pointer and callers gave up on the verb and reached for a host
+  file-read tool instead, and `fs_read`'s own daemon-side `offset`/`limit`/
+  `max_bytes` were never the cause -- they were being cut down again on the way
+  out. `max_chars` is the per-dispatch override of all three and `full_response:
+  true` lifts the cap to `LONG_TEXT_INLINE_MAX_CEILING` (1048576), so "every
+  field verbatim" in the tool description stays true. An exec-family field
+  (`stdout`/`stderr`/`result`) otherwise keeps its own
+  `EXEC_OUTPUT_FIELD_TRUNCATE_AT` budget and its `result_file` pointer, so a
+  plain dispatch still reads as it did before any of these budgets existed.
   `compactWireResponse` is the lossy stage and is
   the one callers can opt out of with `full_response: true`, which must stay
   byte-identical to the `cleanResponse` output alone -- that identity is the
@@ -48,7 +65,8 @@ what README does not.
 - Which fields compact, and why, is a judgment the code cannot restate:
   dropped outright are `route_hint`, `reply_hash`, `orient_nouns` (pure
   routing/telemetry nobody dispatches on), `supply_chain_scan` when it reports
-  no findings (kept whole when it has any), and
+  no findings (kept whole when it has any, and then its `warnings` list is
+  capped at 8 with a `warningsOmitted` count beside `warnCount`), and
   `session_owner_before_this_dispatch` unless `session_mismatch` is true.
   Collapsed to counts are `codeinsight_overview` (the `by_kind`/`by_language`/
   `largest_files` breakdowns), `codeinsight_start` (to `{ready: true}` -- kept
