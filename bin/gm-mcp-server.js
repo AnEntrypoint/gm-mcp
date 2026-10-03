@@ -37621,6 +37621,7 @@ var WIRE_EXCERPT_CHARS = 160;
 var WIRE_EXCERPT_IMMUNE_KEYS = /* @__PURE__ */ new Set(["id", "key", "status", "session_id", "verb"]);
 var WIRE_OMITTED_KEYS = /* @__PURE__ */ new Set(["route_hint", "reply_hash", "orient_nouns"]);
 var WIRE_OMITTED_UNLESS_SIBLING_TRUE = /* @__PURE__ */ new Map([["session_owner_before_this_dispatch", "session_mismatch"]]);
+var WIRE_OMITTED_WHEN_EVERY_ROW_IS_ALREADY_IN = /* @__PURE__ */ new Map([["vector_hits", "hits"]]);
 var WIRE_OMITTED_SUBKEYS = /* @__PURE__ */ new Map([
   ["prd_items_truncated", ["inlined_rows_are"]],
   ["mutables_pending_truncated", ["inlined_rows_are"]]
@@ -37648,6 +37649,21 @@ function omitKeys(obj, keys) {
     out[k] = v;
   }
   return out;
+}
+function rowKeys(rows) {
+  if (!Array.isArray(rows)) return null;
+  const keys = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || typeof row.key !== "string") return null;
+    keys.push(row.key);
+  }
+  return keys;
+}
+function repeatsRowsOf(response, key, fusedKey) {
+  const keys = rowKeys(response[key]);
+  const fused = rowKeys(response[fusedKey]);
+  if (!keys || !fused) return false;
+  return keys.every((k) => fused.includes(k));
 }
 function wireExcerpt(value) {
   if (typeof value !== "string" || value.length <= WIRE_EXCERPT_CHARS) return value;
@@ -37748,6 +37764,11 @@ function compactWireResponse(response, outPath) {
     }
     const siblingGate = WIRE_OMITTED_UNLESS_SIBLING_TRUE.get(key);
     if (siblingGate && response[siblingGate] !== true) {
+      omitted.push(key);
+      continue;
+    }
+    const fusedInKey = WIRE_OMITTED_WHEN_EVERY_ROW_IS_ALREADY_IN.get(key);
+    if (fusedInKey && repeatsRowsOf(response, key, fusedInKey)) {
       omitted.push(key);
       continue;
     }
@@ -37859,20 +37880,59 @@ function objectBodyDiagnostic(verb, body) {
 }
 var RUNNER_DIR = path.join(os.homedir(), ".gm-tools");
 var RUNNER_PATH = path.join(RUNNER_DIR, process.platform === "win32" ? "agentplug-runner.exe" : "agentplug-runner");
-var ENSURE_INTERVAL_MS = 15e3;
-var ENSURE_LEASE_MS = 5e3;
+var AGENTPLUG_DIR = path.join(os.homedir(), ".agentplug");
+var GLOBAL_DAEMON_STATUS_PATH = path.join(AGENTPLUG_DIR, "daemon-status.json");
+var GLOBAL_DAEMON_OWNER_LOCK_PATH = path.join(AGENTPLUG_DIR, "daemon-owner.lock");
+var GLOBAL_DAEMON_LOG_PATH = path.join(AGENTPLUG_DIR, "daemon.log");
+var ENSURE_INTERVAL_MS = 2e3;
+var ENSURE_LEASE_MS = 3e3;
+var ENSURE_BOOT_GRACE_MS = 3e4;
+var WATCHDOG_INTERVAL_MS = 5e3;
 var lastEnsuredAtByRoot = /* @__PURE__ */ new Map();
+var watchdogTimersByRoot = /* @__PURE__ */ new Map();
 function runnerBinaryMissing() {
   return !fs.existsSync(RUNNER_PATH);
 }
-var SWEEPER_HEARTBEAT_TRUSTED_MS = 12e4;
-function spoolAlreadySweptBySomeone(root) {
+function readJsonFile(filePath) {
   try {
-    const status = JSON.parse(fs.readFileSync(path.join(root, ".gm", "exec-spool", ".status.json"), "utf8"));
-    return Date.now() - (status.ts || 0) < SWEEPER_HEARTBEAT_TRUSTED_MS;
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch {
-    return false;
+    return null;
   }
+}
+function pidAlive(pid) {
+  const value = Number(pid);
+  if (!Number.isInteger(value) || value <= 0) return null;
+  try {
+    process.kill(value, 0);
+    return true;
+  } catch (error61) {
+    return error61?.code === "EPERM" ? true : false;
+  }
+}
+function globalDaemonPid() {
+  const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH);
+  if (pidAlive(status?.pid) === true) return status.pid;
+  try {
+    const owner = Number.parseInt(fs.readFileSync(GLOBAL_DAEMON_OWNER_LOCK_PATH, "utf8").trim(), 10);
+    if (pidAlive(owner) === true) return owner;
+  } catch {
+  }
+  return null;
+}
+function daemonBootGraceActive() {
+  const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH);
+  const bootTs = status?.daemon_boot_ts;
+  if (typeof bootTs !== "number") return false;
+  if (Date.now() - bootTs >= ENSURE_BOOT_GRACE_MS) return false;
+  return globalDaemonPid() !== null || Date.now() - (status.ts || 0) < 1e4;
+}
+function liveDaemonSweepsProject(spoolDir) {
+  const status = readJsonFile(path.join(spoolDir, ".status.json"));
+  if (!status) return false;
+  if (!(Date.now() - (status.ts || 0) < DAEMON_HEARTBEAT_STALE_MS)) return false;
+  const alive = pidAlive(status.pid);
+  return alive !== false;
 }
 function claimRunnerEnsure(root) {
   const lockPath = path.join(root, ".gm", "exec-spool", ".runner-ensure.lock");
@@ -37906,11 +37966,14 @@ function claimRunnerEnsure(root) {
 }
 function ensureSpoolRunnerRunning(root) {
   if (runnerBinaryMissing()) return;
+  if (liveDaemonSweepsProject(path.join(root, ".gm", "exec-spool"))) return;
   const now = Date.now();
-  const last = lastEnsuredAtByRoot.get(root) || 0;
-  if (now - last < ENSURE_INTERVAL_MS) return;
+  if (now - (lastEnsuredAtByRoot.get(root) || 0) < ENSURE_INTERVAL_MS) return;
+  if (daemonBootGraceActive()) {
+    lastEnsuredAtByRoot.set(root, now);
+    return;
+  }
   lastEnsuredAtByRoot.set(root, now);
-  if (spoolAlreadySweptBySomeone(root)) return;
   if (!claimRunnerEnsure(root)) return;
   try {
     const child = spawn(RUNNER_PATH, ["spool"], {
@@ -37925,6 +37988,18 @@ function ensureSpoolRunnerRunning(root) {
     child.unref();
   } catch {
   }
+}
+function startRunnerWatchdog(root) {
+  if (process.env.GM_MCP_RUNNER_WATCHDOG === "0") return;
+  if (watchdogTimersByRoot.has(root)) return;
+  const timer = setInterval(() => {
+    try {
+      ensureSpoolRunnerRunning(root);
+    } catch {
+    }
+  }, WATCHDOG_INTERVAL_MS);
+  timer.unref?.();
+  watchdogTimersByRoot.set(root, timer);
 }
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -38011,6 +38086,16 @@ function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
 ${raw_body}`;
 }
 var DAEMON_HEARTBEAT_STALE_MS = 2e4;
+function projectRootOfSpool(spoolDir) {
+  return path.resolve(spoolDir, "..", "..");
+}
+function heartbeatAgeMs(spoolDir) {
+  const status = readJsonFile(path.join(spoolDir, ".status.json"));
+  return status && typeof status.ts === "number" ? Date.now() - status.ts : null;
+}
+function daemonRestartCommand(root) {
+  return `"${RUNNER_PATH}" spool   (run with cwd ${path.resolve(root)}; the launcher detaches agentplug-runner daemon for this project)`;
+}
 function readDaemonLiveness(spoolDir) {
   let status;
   try {
@@ -38019,12 +38104,16 @@ function readDaemonLiveness(spoolDir) {
     return { alive: null, note: "no .status.json heartbeat found for this project yet -- the daemon may not have picked up this project at all" };
   }
   const now = Date.now();
-  const heartbeatAgeMs = typeof status.ts === "number" ? now - status.ts : null;
-  const alive = heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS;
+  const heartbeatAgeMs2 = typeof status.ts === "number" ? now - status.ts : null;
+  const pid = typeof status.pid === "number" ? status.pid : Number(status.pid) || null;
+  const pidAliveFlag = pidAlive(pid);
+  const alive = pidAliveFlag === false ? false : heartbeatAgeMs2 !== null && heartbeatAgeMs2 < DAEMON_HEARTBEAT_STALE_MS;
   const busyForMs = typeof status.busy_until === "number" ? status.busy_until - now : null;
   const busy = busyForMs !== null && busyForMs > 0;
-  const note = !alive ? runnerBinaryMissing() ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed` : "daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch's fault" : busy ? "daemon is alive and still actively working on this project" : "daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that";
-  const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note };
+  const note = !alive ? runnerBinaryMissing() ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed` : pidAliveFlag === false ? `the daemon process that last swept this project (pid ${pid}) is gone -- the daemon recycles itself on idle/memory pressure and on a runner version handoff, and is restarted on demand; this call already asked for a replacement, so a dispatch submitted now waits for its cold start (wasm compile, tens of seconds) instead of for a queue` : `daemon heartbeat is ${heartbeatAgeMs2} ms stale (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) -- it is down, hung, or has not registered this project; its own log is ${GLOBAL_DAEMON_LOG_PATH} (this project's spool log is ${path.join(spoolDir, ".watcher.log")}) and it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}; this is not necessarily this dispatch's fault` : busy ? "daemon is alive and still actively working on this project" : "daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that";
+  const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs2, busy, busy_for_ms: busy ? busyForMs : null, note };
+  if (pid !== null) liveness.pid = pid;
+  if (pidAliveFlag !== null) liveness.pid_alive = pidAliveFlag;
   if (status.runtime) liveness.runtime = status.runtime;
   if (typeof status.shared_process === "boolean") liveness.shared_process = status.shared_process;
   if (typeof status.queue_wait_ms === "number") liveness.queue_wait_ms = status.queue_wait_ms;
@@ -38044,6 +38133,44 @@ function runnerUnavailable(root, spoolDir) {
     runner_binary_missing: true,
     runner_path: RUNNER_PATH,
     note: `the agentplug-runner binary is not installed at ${RUNNER_PATH} and no live daemon heartbeat was found for ${path.resolve(root)}, so this dispatch could never be claimed. Install it once, then dispatch again: npx github:AnEntrypoint/gm -g   (or, in this project: curl -fsSL https://raw.githubusercontent.com/AnEntrypoint/gm/main/install.sh | sh -s -- spool)`
+  };
+}
+var DAEMON_START_GRACE_MS = Number(process.env.GM_MCP_DAEMON_START_GRACE_MS) > 0 ? Number(process.env.GM_MCP_DAEMON_START_GRACE_MS) : 15e3;
+var DAEMON_START_POLL_MS = 250;
+async function awaitDaemonHeartbeat(spoolDir, signal) {
+  const deadline = Date.now() + DAEMON_START_GRACE_MS;
+  while (true) {
+    const age = heartbeatAgeMs(spoolDir);
+    if (age !== null && age < DAEMON_HEARTBEAT_STALE_MS) return "recovered";
+    if (Date.now() >= deadline) return "still_dead";
+    try {
+      await sleep(DAEMON_START_POLL_MS, signal);
+    } catch {
+      return "aborted";
+    }
+  }
+}
+async function daemonNotRunning(root, spoolDir, signal) {
+  if (process.env.GM_MCP_DAEMON_PREFLIGHT === "0") return void 0;
+  if (readDaemonLiveness(spoolDir).alive) return void 0;
+  const age = heartbeatAgeMs(spoolDir);
+  if (age === null) return void 0;
+  if (daemonBootGraceActive()) return void 0;
+  if (readJsonFile(path.join(spoolDir, ".status.json"))?.runner_update_in_progress) return void 0;
+  ensureSpoolRunnerRunning(root);
+  startRunnerWatchdog(root);
+  if (await awaitDaemonHeartbeat(spoolDir, signal) !== "still_dead") return void 0;
+  const staleFor = heartbeatAgeMs(spoolDir);
+  return {
+    error: "daemon-not-running",
+    daemon_not_running: true,
+    heartbeat_age_ms: staleFor,
+    stale_after_ms: DAEMON_HEARTBEAT_STALE_MS,
+    waited_for_start_ms: DAEMON_START_GRACE_MS,
+    note: `this project's daemon heartbeat is ${staleFor} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) and did not come back within ${DAEMON_START_GRACE_MS} ms of asking for a runner, so no dispatch was written -- it would sit queued_not_yet_claimed and only fail at the poll timeout. Restart it and dispatch again: ${daemonRestartCommand(root)}`,
+    checked_status_file: path.join(spoolDir, ".status.json"),
+    daemon_log: GLOBAL_DAEMON_LOG_PATH,
+    spool_log: path.join(spoolDir, ".watcher.log")
   };
 }
 function readSpoolDispatchState(spoolDir, verb, task) {
@@ -38148,7 +38275,10 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
   if (!resume_task) {
     const unavailable = runnerUnavailable(root, spoolDir);
     if (unavailable) return toYaml(unavailable);
+    const notRunning = await daemonNotRunning(root, spoolDir, signal);
+    if (notRunning) return toYaml(notRunning);
     ensureSpoolRunnerRunning(root);
+    startRunnerWatchdog(root);
     if (isPlainText) {
       publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds));
     } else {

@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased - a dispatch to a dead daemon fails fast instead of hanging
+
+The daemon self-recycles every few minutes (see AGENTS.md "Runner recovery"),
+and a dispatch sent into a recycle used to discover that only at the poll
+timeout: the ticket was written, sat `queued_not_yet_claimed`, and the caller
+waited out its whole `timeout_seconds` -- 120 s by default -- for an answer
+that was never coming. The `daemon` liveness block already said `alive: false`
+with a heartbeat 157 s stale; nothing acted on it.
+
+`gmDispatch` now checks liveness before writing. A project whose heartbeat is
+stale and whose `pid` is gone gets a runner restart and `DAEMON_START_GRACE_MS`
+(15 s) to come back, and only then answers `error: daemon-not-running`,
+carrying the heartbeat age, `~/.agentplug/daemon.log`, the spool log, the
+`.status.json` it read and the one-line restart command -- and no ticket is
+written, so nothing is left queued behind a daemon that will never claim it.
+A project with no `.status.json` is the registration path rather than a dead
+daemon and still dispatches, as does one inside `daemonBootGraceActive` or a
+`runner_update_in_progress` handoff, where a stale heartbeat is expected and
+transient. Opt out with `GM_MCP_DAEMON_PREFLIGHT=0`.
+
+The stale-heartbeat note no longer points at a `daemon.log` that does not exist
+in a project: it names `~/.agentplug/daemon.log` and the project's
+`.watcher.log`, and both now carry the restart command.
+
+## Unreleased - a recall reply stops repeating every hit twice
+
+A `recall` reply returned the ranked rows twice: once in `hits`, once in
+`vector_hits`, with the same `key` and the same truncated `text`. The two
+lists float-differ in `score` and `cos`, so the existing byte-identical row
+collapse could not merge them, and every hit's prose crossed the wire twice.
+
+`compactWireResponse` now drops `vector_hits` when every row in it is already
+in `hits` -- the case where the fused list is exactly the vector candidates --
+and names it in `wire_compacted.omitted`. It keeps `vector_hits` whenever it
+carries a row `hits` does not, so the degraded paths that report an error
+there and the `codesearch` replies whose `vector_hits` and `bm25_hits` are
+independent retrieval channels are untouched. `full_response: true` still
+returns both lists byte for byte.
+
 ## Unreleased - fs_read reads whole files, and the verb name is honest
 
 `fs_read` came back truncated at 400 chars with a pointer to the out-file, so

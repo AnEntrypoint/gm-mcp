@@ -221,6 +221,20 @@ test('compaction does not mutate the payload it was given', () => {
     assert.equal(JSON.stringify(cleaned), before)
 })
 
+test('a vector_hits list whose rows are all in hits is dropped and disclosed', () => {
+    const hit = { key: 'mem-aaaa-1529', namespace: 'default', score: 0.663, text: longProse(900) }
+    const out = compactWireResponse({ ok: true, verb: 'recall', hits: [hit], vector_hits: [{ ...hit, distance: 0.337 }] }, OUT_PATH)
+    assert.equal('vector_hits' in out, false)
+    assert.match(out.wire_compacted.omitted, /vector_hits/)
+    assert.equal(out.hits.length, 1)
+})
+
+test('a vector_hits list carrying rows that hits does not is kept whole', () => {
+    const vectorHits = [{ key: 'mem-zzzz-9000', namespace: 'default', score: 0.2, text: 'unfused' }]
+    const out = compactWireResponse({ ok: true, verb: 'recall', hits: [{ key: 'mem-aaaa-1529', score: 0.663 }], vector_hits: vectorHits }, OUT_PATH)
+    assert.deepEqual(out.vector_hits, vectorHits)
+})
+
 test('a payload with nothing to compact is returned untouched', () => {
     const bare = { ok: true, verb: 'git_status', output: 'clean' }
     assert.equal(compactWireResponse(bare, OUT_PATH), bare)
