@@ -8,7 +8,7 @@ import { cleanResponse, compactWireResponse, untruncatedKeysFor, PLAIN_TEXT_OUTP
 function projectRootFor(dir) {
     const resolved = path.resolve(dir)
     try {
-        const top = execFileSync('git', ['-C', resolved, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+        const top = execFileSync('git', ['-C', resolved, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim()
         return top ? path.resolve(top) : resolved
     } catch {
         return resolved

@@ -29,7 +29,7 @@ const project = (name) => {
 }
 const writeStatus = (dir, status) => writeFileSync(path.join(dir, '.status.json'), JSON.stringify(status))
 const rootOf = (spoolDir) => path.resolve(spoolDir, '..', '..')
-const exitedPid = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid
+const exitedPid = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8', windowsHide: true }).pid
 
 await test('a live daemon is not reported as down', async () => {
     const dir = project('live')

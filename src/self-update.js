@@ -51,7 +51,7 @@ async function fetchBundleBytes(url) {
 function assertLoadableBundle(bytes, candidatePath) {
     if (bytes.length < MIN_PLAUSIBLE_BUNDLE_BYTES) throw new Error(`candidate bundle is only ${bytes.length} bytes`)
     if (!bytes.subarray(0, BUNDLE_SHEBANG.length).toString('utf8').startsWith(BUNDLE_SHEBANG)) throw new Error('candidate bundle has no node shebang')
-    const syntaxCheck = spawnSync(process.execPath, ['--check', candidatePath], { encoding: 'utf8' })
+    const syntaxCheck = spawnSync(process.execPath, ['--check', candidatePath], { encoding: 'utf8', windowsHide: true })
     if (syntaxCheck.status !== 0) throw new Error(`candidate bundle fails node --check: ${syntaxCheck.stderr.trim().split('\n')[0]}`)
 }
 
