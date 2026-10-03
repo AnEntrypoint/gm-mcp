@@ -37850,20 +37850,58 @@ function objectBodyDiagnostic(verb, body) {
 }
 var RUNNER_DIR = path.join(os.homedir(), ".gm-tools");
 var RUNNER_PATH = path.join(RUNNER_DIR, process.platform === "win32" ? "agentplug-runner.exe" : "agentplug-runner");
-var ENSURE_INTERVAL_MS = 15e3;
-var ENSURE_LEASE_MS = 5e3;
+var AGENTPLUG_DIR = path.join(os.homedir(), ".agentplug");
+var GLOBAL_DAEMON_STATUS_PATH = path.join(AGENTPLUG_DIR, "daemon-status.json");
+var GLOBAL_DAEMON_OWNER_LOCK_PATH = path.join(AGENTPLUG_DIR, "daemon-owner.lock");
+var ENSURE_INTERVAL_MS = 2e3;
+var ENSURE_LEASE_MS = 3e3;
+var ENSURE_BOOT_GRACE_MS = 3e4;
+var WATCHDOG_INTERVAL_MS = 5e3;
 var lastEnsuredAtByRoot = /* @__PURE__ */ new Map();
+var watchdogTimersByRoot = /* @__PURE__ */ new Map();
 function runnerBinaryMissing() {
   return !fs.existsSync(RUNNER_PATH);
 }
-var SWEEPER_HEARTBEAT_TRUSTED_MS = 12e4;
-function spoolAlreadySweptBySomeone(root) {
+function readJsonFile(filePath) {
   try {
-    const status = JSON.parse(fs.readFileSync(path.join(root, ".gm", "exec-spool", ".status.json"), "utf8"));
-    return Date.now() - (status.ts || 0) < SWEEPER_HEARTBEAT_TRUSTED_MS;
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch {
-    return false;
+    return null;
   }
+}
+function pidAlive(pid) {
+  const value = Number(pid);
+  if (!Number.isInteger(value) || value <= 0) return null;
+  try {
+    process.kill(value, 0);
+    return true;
+  } catch (error61) {
+    return error61?.code === "EPERM" ? true : false;
+  }
+}
+function globalDaemonPid() {
+  const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH);
+  if (pidAlive(status?.pid) === true) return status.pid;
+  try {
+    const owner = Number.parseInt(fs.readFileSync(GLOBAL_DAEMON_OWNER_LOCK_PATH, "utf8").trim(), 10);
+    if (pidAlive(owner) === true) return owner;
+  } catch {
+  }
+  return null;
+}
+function daemonBootGraceActive() {
+  const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH);
+  const bootTs = status?.daemon_boot_ts;
+  if (typeof bootTs !== "number") return false;
+  if (Date.now() - bootTs >= ENSURE_BOOT_GRACE_MS) return false;
+  return globalDaemonPid() !== null || Date.now() - (status.ts || 0) < 1e4;
+}
+function liveDaemonSweepsProject(spoolDir) {
+  const status = readJsonFile(path.join(spoolDir, ".status.json"));
+  if (!status) return false;
+  if (!(Date.now() - (status.ts || 0) < DAEMON_HEARTBEAT_STALE_MS)) return false;
+  const alive = pidAlive(status.pid);
+  return alive !== false;
 }
 function claimRunnerEnsure(root) {
   const lockPath = path.join(root, ".gm", "exec-spool", ".runner-ensure.lock");
@@ -37897,11 +37935,14 @@ function claimRunnerEnsure(root) {
 }
 function ensureSpoolRunnerRunning(root) {
   if (runnerBinaryMissing()) return;
+  if (liveDaemonSweepsProject(path.join(root, ".gm", "exec-spool"))) return;
   const now = Date.now();
-  const last = lastEnsuredAtByRoot.get(root) || 0;
-  if (now - last < ENSURE_INTERVAL_MS) return;
+  if (now - (lastEnsuredAtByRoot.get(root) || 0) < ENSURE_INTERVAL_MS) return;
+  if (daemonBootGraceActive()) {
+    lastEnsuredAtByRoot.set(root, now);
+    return;
+  }
   lastEnsuredAtByRoot.set(root, now);
-  if (spoolAlreadySweptBySomeone(root)) return;
   if (!claimRunnerEnsure(root)) return;
   try {
     const child = spawn(RUNNER_PATH, ["spool"], {
@@ -37916,6 +37957,18 @@ function ensureSpoolRunnerRunning(root) {
     child.unref();
   } catch {
   }
+}
+function startRunnerWatchdog(root) {
+  if (process.env.GM_MCP_RUNNER_WATCHDOG === "0") return;
+  if (watchdogTimersByRoot.has(root)) return;
+  const timer = setInterval(() => {
+    try {
+      ensureSpoolRunnerRunning(root);
+    } catch {
+    }
+  }, WATCHDOG_INTERVAL_MS);
+  timer.unref?.();
+  watchdogTimersByRoot.set(root, timer);
 }
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -38011,11 +38064,15 @@ function readDaemonLiveness(spoolDir) {
   }
   const now = Date.now();
   const heartbeatAgeMs = typeof status.ts === "number" ? now - status.ts : null;
-  const alive = heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS;
+  const pid = typeof status.pid === "number" ? status.pid : Number(status.pid) || null;
+  const pidAliveFlag = pidAlive(pid);
+  const alive = pidAliveFlag === false ? false : heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS;
   const busyForMs = typeof status.busy_until === "number" ? status.busy_until - now : null;
   const busy = busyForMs !== null && busyForMs > 0;
-  const note = !alive ? runnerBinaryMissing() ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed` : "daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch's fault" : busy ? "daemon is alive and still actively working on this project" : "daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that";
+  const note = !alive ? runnerBinaryMissing() ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed` : pidAliveFlag === false ? `the daemon process that last swept this project (pid ${pid}) is gone -- the daemon recycles itself on idle/memory pressure and on a runner version handoff, and is restarted on demand; this call already asked for a replacement, so a dispatch submitted now waits for its cold start (wasm compile, tens of seconds) instead of for a queue` : "daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch's fault" : busy ? "daemon is alive and still actively working on this project" : "daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that";
   const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note };
+  if (pid !== null) liveness.pid = pid;
+  if (pidAliveFlag !== null) liveness.pid_alive = pidAliveFlag;
   if (status.runtime) liveness.runtime = status.runtime;
   if (typeof status.shared_process === "boolean") liveness.shared_process = status.shared_process;
   if (typeof status.queue_wait_ms === "number") liveness.queue_wait_ms = status.queue_wait_ms;
@@ -38140,6 +38197,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
     const unavailable = runnerUnavailable(root, spoolDir);
     if (unavailable) return toYaml(unavailable);
     ensureSpoolRunnerRunning(root);
+    startRunnerWatchdog(root);
     if (isPlainText) {
       publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds));
     } else {
