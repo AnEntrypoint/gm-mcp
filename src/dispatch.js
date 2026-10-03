@@ -1,9 +1,19 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import * as yaml from 'js-yaml'
 import { cleanResponse, compactWireResponse, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+
+function projectRootFor(dir) {
+    const resolved = path.resolve(dir)
+    try {
+        const top = execFileSync('git', ['-C', resolved, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+        return top ? path.resolve(top) : resolved
+    } catch {
+        return resolved
+    }
+}
 
 function inlineMaxForVerb({ verb, isPlainText, fullResponse, maxChars }) {
     const requested = Number(maxChars)
@@ -385,7 +395,7 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
 export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal) {
     if (!verb) return 'error: verb required'
     if (!session_id) return 'error: session_id required'
-    const root = cwd || process.cwd()
+    const root = projectRootFor(cwd || process.cwd())
     const spoolDir = path.join(root, '.gm', 'exec-spool')
     const inDir = path.join(spoolDir, 'in', verb)
     const outDir = path.join(spoolDir, 'out')
