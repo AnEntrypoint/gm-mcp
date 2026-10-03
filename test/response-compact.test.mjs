@@ -151,6 +151,22 @@ test('a codeinsight_start that is not ready is kept whole', () => {
     assert.equal(notReady.codeinsight_start.fresh, false)
 })
 
+test('a supply_chain_scan with many warnings is capped, keeping its full count', () => {
+    const noisy = compactWireResponse({
+        ...cleaned,
+        supply_chain_scan: {
+            ok: true,
+            filesScanned: 575,
+            warnCount: 283,
+            warnings: Array.from({ length: 283 }, (_, i) => ({ path: `./runs/chrome-profile-${i}/background.js`, ratio: 800, note: null })),
+        },
+    }, OUT_PATH)
+    assert.equal(noisy.supply_chain_scan.warnings.length, 8)
+    assert.equal(noisy.supply_chain_scan.warnCount, 283)
+    assert.equal(noisy.supply_chain_scan.warningsOmitted, 275)
+    assert.equal(noisy.supply_chain_scan.filesScanned, 575)
+})
+
 test('a supply_chain_scan with findings is kept whole', () => {
     const withFindings = compactWireResponse({ ...cleaned, supply_chain_scan: { ok: false, blocked: ['evil-pkg'], blockedCount: 1, filesScanned: 27 } }, OUT_PATH)
     assert.deepEqual(withFindings.supply_chain_scan.blocked, ['evil-pkg'])

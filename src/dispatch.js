@@ -3,7 +3,16 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import * as yaml from 'js-yaml'
-import { cleanResponse, compactWireResponse, untruncatedKeysFor } from './response-compact.js'
+import { cleanResponse, compactWireResponse, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+
+function inlineMaxForVerb({ verb, isPlainText, fullResponse, maxChars }) {
+    const requested = Number(maxChars)
+    if (Number.isFinite(requested) && requested > 0) return Math.min(Math.floor(requested), LONG_TEXT_INLINE_MAX_CEILING)
+    if (fullResponse) return LONG_TEXT_INLINE_MAX_CEILING
+    if (isPlainText) return PLAIN_TEXT_OUTPUT_INLINE_MAX
+    if (verb === 'fs_read') return FILE_READ_INLINE_MAX
+    return undefined
+}
 
 let counter = 0
 function nextN(sessionId) {
@@ -205,7 +214,7 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
 
 const BROWSER_PLAIN_TEXT_VERBS = ['serp', 'browser', 'cdp']
 
-const EXEC_FAMILY_VERBS = ['exec_js', 'nodejs', 'javascript', 'node', 'js', 'typescript', 'bash', 'sh', 'shell', 'zsh', 'python', 'py', 'powershell', 'ps1', 'ssh', 'go', 'rust', 'c', 'cpp', 'java', 'deno']
+const EXEC_FAMILY_VERBS = ['exec_js', 'nodejs', 'javascript', 'node', 'js', 'bash', 'sh', 'shell', 'zsh', 'python', 'py', 'powershell', 'ps1', 'ssh', 'go', 'rust', 'c', 'cpp', 'java', 'deno']
 
 const PLAIN_TEXT_BODY_VERBS = new Set([...EXEC_FAMILY_VERBS, ...BROWSER_PLAIN_TEXT_VERBS])
 
@@ -373,7 +382,7 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
     }
 }
 
-export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response }, signal) {
+export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal) {
     if (!verb) return 'error: verb required'
     if (!session_id) return 'error: session_id required'
     const root = cwd || process.cwd()
@@ -450,7 +459,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
             const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, 'utf8')))
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
-            const cleaned = cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody))
+            const cleaned = cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
             let out = cleaned
             if (cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
                 const { data, ...rest } = cleaned
