@@ -37868,6 +37868,51 @@ function plainTextFromBody(body) {
   const present2 = PLAIN_TEXT_BODY_FIELDS.filter((field) => typeof body[field] === "string");
   return present2.length === 1 ? body[present2[0]] : void 0;
 }
+var GLOB_FILTER_FIELDS = ["glob", "path_glob", "include"];
+var GLOB_ALTERNATION_UNSAFE = /[,{}]/;
+function withGlobFiltersCoerced(verb, body) {
+  if (!body || typeof body !== "object") return { value: body };
+  const coerced = { ...body };
+  const applied = [];
+  for (const field of GLOB_FILTER_FIELDS) {
+    const value = coerced[field];
+    if (value === null || value === void 0) continue;
+    const single = `${verb} body.${field}`;
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return { error: `${single} is an empty string -- a blank glob is dropped before the scan runs, so it silently searched everything; omit the field to search unscoped` };
+      if (trimmed.startsWith("!")) return { error: `${single} is the negated pattern "${trimmed}" -- there is no exclude filter in this build ("!" is a literal path character, so this matches nothing); scope with a positive glob like {"${field}":"src/**/*.rs"} or send one dispatch per subtree` };
+      coerced[field] = trimmed;
+      applied.push(trimmed);
+      continue;
+    }
+    if (!Array.isArray(value)) {
+      return { error: `${single} must be a string or an array of strings; received ${Array.isArray(value) ? "an array" : typeof value}. This filter takes one glob, e.g. {"${field}":"**/*.rs"} or {"${field}":["**/*.rs","**/*.toml"]}` };
+    }
+    const patterns = [];
+    for (const element of value) {
+      if (typeof element !== "string" || !element.trim()) {
+        return { error: `${single} is an array whose entries must all be non-empty glob strings; received ${JSON.stringify(element)}. Pass one glob per subtree, or join them yourself: {"${field}":"{src/**/*.rs,tests/**/*.rs}"}` };
+      }
+      const trimmed = element.trim();
+      if (trimmed.startsWith("!")) {
+        return { error: `${single} contains the negated pattern "${trimmed}" -- there is no exclude filter in this build; drop it and scope positively, or send one dispatch per subtree` };
+      }
+      if (GLOB_ALTERNATION_UNSAFE.test(trimmed)) {
+        return { error: `${single} contains "${trimmed}", which cannot be joined into one brace-alternation glob ("," "{" "}" are alternation syntax); send one dispatch per pattern, e.g. {"${field}":"${trimmed}"}` };
+      }
+      patterns.push(trimmed);
+    }
+    if (patterns.length === 0) return { error: `${single} is an empty array -- a blank glob is dropped before the scan runs; omit the field to search unscoped` };
+    const joined = patterns.length === 1 ? patterns[0] : `{${patterns.join(",")}}`;
+    coerced[field] = joined;
+    applied.push(joined);
+  }
+  if (applied.length > 1 && new Set(applied).size > 1) {
+    return { error: `${verb} body carries ${applied.length} different glob filters (${GLOB_FILTER_FIELDS.join(", ")}) -- they are aliases of ONE filter, so all but one is silently dropped; pass a single field: {"glob":${JSON.stringify(applied[0])}}` };
+  }
+  return { value: coerced };
+}
 function objectBodyDiagnostic(verb, body) {
   if (verb === "prd-add" && (typeof body.id !== "string" || !body.id.trim())) {
     return "prd-add requires a non-empty body.id. A blank id would create an unaddressable PRD row; provide a stable identifier before dispatching.";
@@ -38252,9 +38297,11 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
   if (!resume_task && !isPlainText) {
     const normalized = normalizedObjectBody(verb, body);
     if (normalized.error) return `error: ${normalized.error}`;
-    const diagnostic = objectBodyDiagnostic(verb, normalized.value);
+    const globCoerced = withGlobFiltersCoerced(verb, normalized.value);
+    if (globCoerced.error) return `error: ${globCoerced.error}`;
+    const diagnostic = objectBodyDiagnostic(verb, globCoerced.value);
     if (diagnostic) return `error: ${diagnostic}`;
-    normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, normalized.value), root, session_id);
+    normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, globCoerced.value), root, session_id);
   }
   const inPath = path.join(inDir, `${n}.txt`);
   const outPath = path.join(outDir, `${verb}-${n}.json`);
