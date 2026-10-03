@@ -37515,7 +37515,14 @@ var CHOMPING_KEEP = CHOMPING_MODE.KEEP;
 
 // src/response-compact.js
 var NOISE_KEYS = /* @__PURE__ */ new Set(["dispatch_id", "request_fingerprint"]);
-var LONG_TEXT_FIELD_TRUNCATE_AT = 400;
+function envPositiveInt(name, fallback) {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+var LONG_TEXT_INLINE_MAX_CEILING = 1048576;
+var LONG_TEXT_FIELD_TRUNCATE_AT = Math.min(envPositiveInt("GM_MCP_LONG_TEXT_INLINE_MAX", 400), LONG_TEXT_INLINE_MAX_CEILING);
+var PLAIN_TEXT_OUTPUT_INLINE_MAX = Math.min(envPositiveInt("GM_MCP_STDOUT_INLINE_MAX", 32768), LONG_TEXT_INLINE_MAX_CEILING);
+var FILE_READ_INLINE_MAX = Math.min(envPositiveInt("GM_MCP_FILE_READ_INLINE_MAX", 65536), LONG_TEXT_INLINE_MAX_CEILING);
 var NEVER_TRUNCATE_KEYS = /* @__PURE__ */ new Set(["error", "reason", "residuals"]);
 var NO_KEYS = /* @__PURE__ */ new Set();
 var EXPANDED_RECALL_KEYS = /* @__PURE__ */ new Set(["text"]);
@@ -37545,16 +37552,21 @@ function untruncatedKeysFor(verb, body) {
   const expandsRecall = verb === "recall" && body && typeof body === "object" && (body.full === true || typeof body.key === "string");
   return expandsRecall ? EXPANDED_RECALL_KEYS : NO_KEYS;
 }
-function truncateLongText(value, key, outPath, plainTextFile, untruncatedKeys = NO_KEYS) {
+function resolvedInlineMax(inlineMax, key) {
+  if (Number.isFinite(inlineMax) && inlineMax > 0) return Math.floor(inlineMax);
+  return EXEC_OUTPUT_KEYS.has(key) ? EXEC_OUTPUT_FIELD_TRUNCATE_AT : LONG_TEXT_FIELD_TRUNCATE_AT;
+}
+function truncateLongText(value, key, outPath, plainTextFile, untruncatedKeys = NO_KEYS, inlineMax) {
   if (typeof value !== "string") return value;
+  const budget = resolvedInlineMax(inlineMax, key);
   if (EXEC_OUTPUT_KEYS.has(key)) {
-    if (value.length <= EXEC_OUTPUT_FIELD_TRUNCATE_AT) return value;
+    if (value.length <= budget) return value;
     const where = plainTextFile ? `the full text is in ${plainTextFile}, plain text with a '## ${key}' section, readable directly` : `the full output is in ${outPath}, in the JSON string field 'data' (parse it, then read '${key}')`;
-    return `${value.slice(0, EXEC_OUTPUT_FIELD_TRUNCATE_AT)}... [OUTPUT TRUNCATED: showing ${EXEC_OUTPUT_FIELD_TRUNCATE_AT} of ${value.length} chars of '${key}' -- ${where}]`;
+    return `${value.slice(0, budget)}... [OUTPUT TRUNCATED: showing ${budget} of ${value.length} chars of '${key}' -- ${where}]`;
   }
-  if (value.length <= LONG_TEXT_FIELD_TRUNCATE_AT) return value;
+  if (value.length <= budget) return value;
   if (NEVER_TRUNCATE_KEYS.has(key) || untruncatedKeys.has(key)) return value;
-  return `${value.slice(0, LONG_TEXT_FIELD_TRUNCATE_AT)}... [${value.length} chars total, full text at ${outPath} field '${key}']`;
+  return `${value.slice(0, budget)}... [${value.length} chars total, full text at ${outPath} field '${key}']`;
 }
 function dropDuplicateRows(rows) {
   const seen = /* @__PURE__ */ new Set();
@@ -37566,20 +37578,20 @@ function dropDuplicateRows(rows) {
     return true;
   });
 }
-function cleanHit(hit, outPath, plainTextFile, untruncatedKeys) {
+function cleanHit(hit, outPath, plainTextFile, untruncatedKeys, inlineMax) {
   if (!hit || typeof hit !== "object") return hit;
   const out = {};
   for (const [k, v] of Object.entries(hit)) {
     if (HIT_NOISE_KEYS.has(k)) continue;
     if (v === "" || v === null || v === void 0) continue;
-    out[k] = typeof v === "string" ? truncateLongText(v, k, outPath, plainTextFile, untruncatedKeys) : v && typeof v === "object" && !Array.isArray(v) ? cleanHit(v, outPath, plainTextFile, untruncatedKeys) : v;
+    out[k] = typeof v === "string" ? truncateLongText(v, k, outPath, plainTextFile, untruncatedKeys, inlineMax) : v && typeof v === "object" && !Array.isArray(v) ? cleanHit(v, outPath, plainTextFile, untruncatedKeys, inlineMax) : v;
   }
   return out;
 }
-function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys = NO_KEYS) {
+function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys = NO_KEYS, inlineMax) {
   if (Array.isArray(value)) {
-    if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map((h) => cleanHit(h, outPath, plainTextFile, untruncatedKeys)));
-    const cleaned = value.map((v) => cleanResponse(v, void 0, outPath, plainTextFile, untruncatedKeys)).filter((v) => v !== void 0);
+    if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map((h) => cleanHit(h, outPath, plainTextFile, untruncatedKeys, inlineMax)));
+    const cleaned = value.map((v) => cleanResponse(v, void 0, outPath, plainTextFile, untruncatedKeys, inlineMax)).filter((v) => v !== void 0);
     return dropDuplicateRows(cleaned);
   }
   if (value && typeof value === "object") {
@@ -37590,19 +37602,19 @@ function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys =
       if (v === false && FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS.has(k)) continue;
       if (plainTextFile && k === "result" && v && typeof v === "object") {
         const serialized = JSON.stringify(v);
-        if (serialized.length > EXEC_OUTPUT_FIELD_TRUNCATE_AT) {
-          out[k] = truncateLongText(serialized, k, outPath, plainTextFile);
+        if (serialized.length > resolvedInlineMax(inlineMax, k)) {
+          out[k] = truncateLongText(serialized, k, outPath, plainTextFile, NO_KEYS, inlineMax);
           continue;
         }
       }
-      const cleanedV = cleanResponse(v, k, outPath, plainTextFile, untruncatedKeys);
+      const cleanedV = cleanResponse(v, k, outPath, plainTextFile, untruncatedKeys, inlineMax);
       if (Array.isArray(cleanedV) && cleanedV.length === 0 && !EMPTY_LIST_IS_THE_ANSWER_KEYS.has(k)) continue;
       if (cleanedV && typeof cleanedV === "object" && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue;
       out[k] = cleanedV;
     }
     return out;
   }
-  if (typeof value === "string" && keyHint) return truncateLongText(value, keyHint, outPath, plainTextFile, untruncatedKeys);
+  if (typeof value === "string" && keyHint) return truncateLongText(value, keyHint, outPath, plainTextFile, untruncatedKeys, inlineMax);
   return value;
 }
 var WIRE_EXCERPT_CHARS = 160;
@@ -37678,10 +37690,18 @@ function compactConfigChanged(rows) {
     });
   });
 }
+var WIRE_SCAN_WARNINGS_INLINE_MAX = 8;
 function compactSupplyChainScan(scan) {
   if (!scan || typeof scan !== "object") return scan;
   const hasFindings = ["blocked", "failing", "warnings", "symlinkEscapes"].some((k) => Array.isArray(scan[k]) && scan[k].length > 0);
-  return hasFindings ? scan : omitFromWire;
+  if (!hasFindings) return omitFromWire;
+  const warnings = Array.isArray(scan.warnings) ? scan.warnings : [];
+  if (warnings.length <= WIRE_SCAN_WARNINGS_INLINE_MAX) return scan;
+  return {
+    ...scan,
+    warnings: warnings.slice(0, WIRE_SCAN_WARNINGS_INLINE_MAX),
+    warningsOmitted: warnings.length - WIRE_SCAN_WARNINGS_INLINE_MAX
+  };
 }
 function compactDreamRsiStrategy(strategy) {
   if (!strategy || typeof strategy !== "object") return strategy;
@@ -37756,6 +37776,14 @@ function compactWireResponse(response, outPath) {
 }
 
 // src/dispatch.js
+function inlineMaxForVerb({ verb, isPlainText, fullResponse, maxChars }) {
+  const requested = Number(maxChars);
+  if (Number.isFinite(requested) && requested > 0) return Math.min(Math.floor(requested), LONG_TEXT_INLINE_MAX_CEILING);
+  if (fullResponse) return LONG_TEXT_INLINE_MAX_CEILING;
+  if (isPlainText) return PLAIN_TEXT_OUTPUT_INLINE_MAX;
+  if (verb === "fs_read") return FILE_READ_INLINE_MAX;
+  return void 0;
+}
 var counter = 0;
 function nextN(sessionId) {
   counter += 1;
@@ -37939,7 +37967,7 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
   });
 }
 var BROWSER_PLAIN_TEXT_VERBS = ["serp", "browser", "cdp"];
-var EXEC_FAMILY_VERBS = ["exec_js", "nodejs", "javascript", "node", "js", "typescript", "bash", "sh", "shell", "zsh", "python", "py", "powershell", "ps1", "ssh", "go", "rust", "c", "cpp", "java", "deno"];
+var EXEC_FAMILY_VERBS = ["exec_js", "nodejs", "javascript", "node", "js", "bash", "sh", "shell", "zsh", "python", "py", "powershell", "ps1", "ssh", "go", "rust", "c", "cpp", "java", "deno"];
 var PLAIN_TEXT_BODY_VERBS = /* @__PURE__ */ new Set([...EXEC_FAMILY_VERBS, ...BROWSER_PLAIN_TEXT_VERBS]);
 var TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS);
 var TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/;
@@ -38065,7 +38093,7 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
     deliveredReplyHashByOwner.set(instructionOwnerKey(root, sessionId), data.reply_hash);
   }
 }
-async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response }, signal) {
+async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal) {
   if (!verb) return "error: verb required";
   if (!session_id) return "error: session_id required";
   const root = cwd || process.cwd();
@@ -38134,7 +38162,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
       const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, "utf8")));
       rememberDeliveredInstructionHash(verb, parsed, root, session_id);
       const plainTextFile = typeof parsed?.result_file === "string" ? parsed.result_file : void 0;
-      const cleaned = cleanResponse(parsed, void 0, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody));
+      const cleaned = cleanResponse(parsed, void 0, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }));
       let out = cleaned;
       if (cleaned && typeof cleaned === "object" && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === "object" && !Array.isArray(cleaned.data)) {
         const { data, ...rest } = cleaned;
@@ -38322,7 +38350,7 @@ function createServer() {
         resume_task: external_exports.string().optional().describe("Resume a previous instruction dispatch without writing a new request."),
         mode: external_exports.string().optional().describe('Pass "investigate_readonly" for a read-only/investigate-only ask (scan/grep/report, no code changes). Skips the SPECIFY->PROVE->EMIT->...->COMPLETE phase/PRD orchestration entirely and returns a short direct-execution instruction instead -- no phase is read or changed, no PRD/mutables state is touched. It serves no phase prose, so it never satisfies the long-gap gate mid-chain; a plain re-dispatch is the cheap re-check, since fields unchanged since the last delivered reply come back elided and listed in unchanged_since_last_reply. Omit for the normal phase-managed flow.'),
         git_root_override: external_exports.string().optional().describe("Pin the project root explicitly when cwd is not itself a git repo and is not inside one (e.g. a directory holding many unrelated repos for a cross-repo audit), or when the git subprocess is otherwise unavailable/contended. Skips `git rev-parse --show-toplevel` for this cwd; every .gm/ state file for this dispatch is then read/written under <git_root_override>/.gm. Prefer dispatching with cwd set to one of the actual repos under the directory when that is an option -- this is for the genuinely repo-less or multi-repo case."),
-        full_response: external_exports.boolean().optional().describe("Return the uncompacted dispatch payload. By default the response is compacted for the wire: low-signal telemetry blocks (route_hint, orient_nouns, reply_hash, clean supply_chain_scan, codeinsight detail, dream_rsi evidence rows) are dropped, long row prose is cut to a 160-char excerpt, and a `wire_compacted` block names every field dropped or shortened plus the on-disk file holding the full payload. Set true to get every field verbatim.")
+        full_response: external_exports.boolean().optional().describe("Return the uncompacted dispatch payload. By default the response is compacted for the wire: low-signal telemetry blocks (route_hint, orient_nouns, reply_hash, clean supply_chain_scan, codeinsight detail, dream_rsi evidence rows) are dropped, long row prose is cut to a 160-char excerpt, and a `wire_compacted` block names every field dropped or shortened plus the on-disk file holding the full payload. Set true to get every field verbatim: no field dropped or excerpted, and no text field truncated (up to 1048576 characters per field; longer still carries a pointer to the out-file).")
       }
     },
     async (args = {}, extra) => {
@@ -38349,16 +38377,17 @@ function createServer() {
     {
       description: "Run the whole gm spool write-then-poll-for-response cycle for one verb dispatch in a single call, instead of writing the input file, polling for the output file, and reading it as three separate steps. Writes .gm/exec-spool/in/<verb>/<N>.txt, polls .gm/exec-spool/out/<verb>-<N>.json until it appears (or the timeout elapses), and returns its contents as flat YAML text, auto-cleaned for readability: opaque internal ids (dispatch_id, request_fingerprint) stripped, the redundant response/data nesting levels flattened up to the top (unless a field name would collide), long text fields (e.g. instruction phase prose) truncated with a pointer naming the on-disk file to read for the full text, hit-array ranking internals (cos/recency in recall_hits/bm25_hits/vector_hits/commits) dropped, score retained as ranked evidence, byte-identical object rows repeated inside one array collapsed to the first copy, and empty/null/empty-string fields removed at every level (an empty result list such as edges/reachable/matches/definitions stays as [] so nothing-found reads as an answer) along with a false on a flag that only ever means the absence of a problem (session_mismatch, instruction_unchanged, instruction_suppressible_by_asserting_hash, recall_embed_failed, should_residual_scan, fsm_graph_rejected). On top of that cleaning the response is compacted for the wire by default: low-signal telemetry (route_hint, orient_nouns, reply_hash, an all-clear supply_chain_scan, codeinsight detail, dream_rsi evidence rows) is dropped, config_changed keeps only the newest transition, recall_hits keep key/title/score plus a 160-char excerpt, and a `wire_compacted` block names every field dropped or shortened plus the on-disk file holding the full payload; pass full_response=true for every field verbatim. A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look. For plain-text-body verbs (exec_js and every language stem it backs, serp, browser, cdp), pass raw_body instead of body -- these verbs reject a JSON object outright.",
       inputSchema: {
-        verb: external_exports.string().describe("gm spool verb name, e.g. instruction, prd-add, git_status, exec_js"),
+        verb: external_exports.string().describe(`gm spool verb name, e.g. instruction, prd-add, git_status, exec_js, fs_read. Only verbs the running build registers are dispatchable; anything else answers error_code: unknown_verb. There is no fs_list (use fs_readdir), no fs_glob and no glob (use grep or codesearch with a body "glob" filter), and no exec_bash (use bash or exec_js with raw_body). Dispatch health for the build's own verb inventory.`),
         body: external_exports.union([external_exports.record(external_exports.string(), external_exports.unknown()), external_exports.string()]).optional().describe("JSON body for the dispatch (an object, or a string holding a JSON object). session_id is added automatically if not present. Not valid for plain-text-body verbs (exec_js and its language stems, serp, browser, cdp) -- use raw_body for those instead."),
-        raw_body: external_exports.string().optional().describe("Literal text body for a plain-text-body verb (exec_js/bash/python/etc, serp, browser, cdp) -- sent exactly as given, no JSON wrapping. Mutually exclusive with body."),
+        raw_body: external_exports.string().optional().describe('Literal text body for a plain-text-body verb (exec_js/bash/python/etc, serp, browser, cdp) -- sent exactly as given, no JSON wrapping. Mutually exclusive with body. The server writes these bytes to the spool input file with no escaping, so the shell sees them verbatim -- but this argument is itself a JSON string, so a backslash you write as \\ reaches the shell as ; write \\\\ to make bash receive \\. Inside bash double quotes one backslash is then removed again, and \\$ is a literal dollar sign, so "C:\\dir\\${V}" never expands ${V} -- prefer forward slashes ("C:/dir/${V}.bat") for Windows paths.'),
         session_id: external_exports.string().describe("gm SESSION_ID for this dispatch (required by gm on every body)"),
         cwd: external_exports.string().optional().describe("Project root containing .gm/exec-spool -- defaults to process.cwd()"),
         timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120)"),
         poll_interval_seconds: numberLike.optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)"),
         include_timing: booleanLike.optional().describe("Include MCP submission-to-response timing and the last response wakeup source"),
         resume_task: external_exports.string().optional().describe("Pass the `task` field from a previous timed_out/aborted response to keep polling that SAME dispatch instead of writing a new one -- a first-time cold index/embed pass on a large repo can legitimately outrun a short timeout_seconds, and re-dispatching from scratch discards a result that may already be in flight or done. A resume sends NO body: omit body/raw_body entirely (they are ignored if passed), since the dispatch being resumed already carries its own. It still needs `verb` and `cwd` to match the original call exactly -- those two plus the task name are how the dispatch is addressed on disk -- and `session_id` remains required by this tool for every call, though a resume never writes a new spool file with it. If that triple matches no dispatch in the project spool, the call returns an immediate error naming the three paths it checked instead of polling a task that cannot arrive. A resumed result carries a `resumed` block stating that this call sent no body and whether the result predates it, so a stored error from the ORIGINAL dispatch is never misread as a verdict on the resume call. Before any timeout is reported the out-file is re-checked past the deadline, so a result that lands moments late comes back as the ordinary success it is. A genuine timed_out response carries `resume_task_supported: true` (absent on older server builds, which silently drop this argument), a `dispatch_state` block read from the spool itself (claimed_still_in_flight / queued_not_yet_claimed / no_input_file_left) plus a `daemon` liveness block (alive/heartbeat age/runtime/queue wait) -- dispatch_state is the per-dispatch authority, daemon.busy is project-scoped and says nothing about your own request."),
-        full_response: external_exports.boolean().optional().describe("Return the uncompacted dispatch payload. By default the response is compacted for the wire: low-signal telemetry blocks (route_hint, orient_nouns, reply_hash, clean supply_chain_scan, codeinsight detail, dream_rsi evidence rows) are dropped, long row prose is cut to a 160-char excerpt, and a `wire_compacted` block names every field dropped or shortened plus the on-disk file holding the full payload. Set true to get every field verbatim.")
+        max_chars: external_exports.number().optional().describe("Cap, in characters, on how much of any single text field this dispatch returns inline: default 400, 32768 for a plain-text-body verb, 65536 for fs_read, hard ceiling 1048576. Past the cap the field is truncated with a pointer naming the on-disk out-file that holds the full text. Raise it to pull a large file back whole in one call."),
+        full_response: external_exports.boolean().optional().describe("Return the uncompacted dispatch payload. By default the response is compacted for the wire: low-signal telemetry blocks (route_hint, orient_nouns, reply_hash, clean supply_chain_scan, codeinsight detail, dream_rsi evidence rows) are dropped, long row prose is cut to a 160-char excerpt, and a `wire_compacted` block names every field dropped or shortened plus the on-disk file holding the full payload. Set true to get every field verbatim: no field dropped or excerpted, and no text field truncated (up to 1048576 characters per field; longer still carries a pointer to the out-file).")
       }
     },
     async (args = {}, extra) => {

@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased - fs_read reads whole files, and the verb name is honest
+
+`fs_read` came back truncated at 400 chars with a pointer to the out-file, so
+reading a whole file through the tool was impossible and callers fell back to
+a host file-read tool. The daemon-side `fs_read` was never the cause: its own
+`offset`/`limit`/`max_bytes` were being cut down again by the generic
+long-prose cap in `cleanResponse`. `fs_read` now gets its own budget
+(`FILE_READ_INLINE_MAX`, 65536, env `GM_MCP_FILE_READ_INLINE_MAX`), and a new
+`max_chars` MCP argument overrides every text budget for one dispatch
+(ceiling 1048576). `full_response: true` now lifts the text cap too, so its
+"every field verbatim" description is true.
+
+The `verb` argument's description now says the verb set belongs to the running
+build and names the real replacement for the four names callers keep guessing:
+`fs_readdir` for `fs_list`, `grep`/`codesearch` with a body `glob` filter for
+`fs_glob`/`glob`, and `bash`/`exec_js` with `raw_body` for `exec_bash`.
+
+`typescript` is gone from the plain-text verb list. The running build has no
+`typescript` verb: dispatching it answered `unknown_verb`, and because the
+list routed it down the `raw_body` path the daemon could not even parse the
+body (`body_parse_error: true`). Naming it there sent callers to a verb that
+cannot work.
+
 ## 0.2.2 - a missing runner binary fails fast instead of timing out
 
 When `agentplug-runner` was not installed at `~/.gm-tools/agentplug-runner`,
