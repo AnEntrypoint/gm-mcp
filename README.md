@@ -65,6 +65,45 @@ the process (`gm-mcp: stdin ended (client disconnected or platform pipe quirk)
 half-close stdin without ending the session. `gm-mcp: connected, serving on
 stdio` on stderr confirms the server started.
 
+### When the daemon is down
+
+The daemon exits on purpose -- it self-recycles when idle or over its wasm
+memory ceiling, and it hands off to a freshly downloaded runner build -- so a
+dead daemon is normal, not a crash. This server restarts it on demand
+(`ensureSpoolRunnerRunning`) and then on a timer per project root
+(`startRunnerWatchdog`, every 5 s). Nothing else supervises it: there is no
+systemd unit and no long-lived launcher to check.
+
+Restart it by hand for one project with the same command the server uses --
+the `spool` launcher detaches `agentplug-runner daemon` for that root:
+
+```bash
+cd C:/dev/mc-420 && "$HOME/.gm-tools/agentplug-runner.exe" spool   # Windows
+cd ~/my/project && ~/.gm-tools/agentplug-runner spool               # Unix
+```
+
+A cold start compiles wasm for tens of seconds before it claims its first
+ticket. To reinstall the runner entirely: `npx github:AnEntrypoint/gm -g`.
+
+Logs, in the order worth reading:
+
+- `~/.agentplug/daemon.log` -- the daemon's own log (recycles, wasm compiles,
+  plugin warnings). This is what the liveness notes mean by "daemon log".
+- `<project>/.gm/exec-spool/.watcher.log` -- per-project spool events.
+- `<project>/.gm/exec-spool/.status.json` -- the heartbeat: `ts`, `pid`,
+  `busy_until`. Older than 20 s and its `pid` gone means no one is sweeping.
+- `<project>/.gm/exec-spool/in/<verb>/*.txt` -- tickets nobody claimed.
+
+A dispatch to a project whose daemon is gone does **not** wait out the poll
+timeout: `gmDispatch` asks for a runner, waits `DAEMON_START_GRACE_MS` (15 s)
+for the heartbeat to come back, and only then answers
+`error: daemon-not-running` with the heartbeat age, both log paths and the
+restart command -- and writes no ticket, so nothing is left queued behind a
+daemon that will never claim it. A project with no `.status.json` at all is
+the registration path rather than a dead daemon and still dispatches, as does
+one mid-handoff (`daemonBootGraceActive`, `runner_update_in_progress`). Opt
+out with `GM_MCP_DAEMON_PREFLIGHT=0`.
+
 ## Development
 
 `bin/gm-mcp-server.js` is a committed build artifact, not hand-edited source --

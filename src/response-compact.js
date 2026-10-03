@@ -136,6 +136,8 @@ const WIRE_OMITTED_KEYS = new Set(['route_hint', 'reply_hash', 'orient_nouns'])
 
 const WIRE_OMITTED_UNLESS_SIBLING_TRUE = new Map([['session_owner_before_this_dispatch', 'session_mismatch']])
 
+const WIRE_OMITTED_WHEN_EVERY_ROW_IS_ALREADY_IN = new Map([['vector_hits', 'hits']])
+
 const WIRE_OMITTED_SUBKEYS = new Map([
     ['prd_items_truncated', ['inlined_rows_are']],
     ['mutables_pending_truncated', ['inlined_rows_are']],
@@ -172,6 +174,23 @@ function omitKeys(obj, keys) {
         out[k] = v
     }
     return out
+}
+
+function rowKeys(rows) {
+    if (!Array.isArray(rows)) return null
+    const keys = []
+    for (const row of rows) {
+        if (!row || typeof row !== 'object' || typeof row.key !== 'string') return null
+        keys.push(row.key)
+    }
+    return keys
+}
+
+function repeatsRowsOf(response, key, fusedKey) {
+    const keys = rowKeys(response[key])
+    const fused = rowKeys(response[fusedKey])
+    if (!keys || !fused) return false
+    return keys.every(k => fused.includes(k))
 }
 
 function wireExcerpt(value) {
@@ -285,6 +304,11 @@ export function compactWireResponse(response, outPath) {
         }
         const siblingGate = WIRE_OMITTED_UNLESS_SIBLING_TRUE.get(key)
         if (siblingGate && response[siblingGate] !== true) {
+            omitted.push(key)
+            continue
+        }
+        const fusedInKey = WIRE_OMITTED_WHEN_EVERY_ROW_IS_ALREADY_IN.get(key)
+        if (fusedInKey && repeatsRowsOf(response, key, fusedInKey)) {
             omitted.push(key)
             continue
         }
