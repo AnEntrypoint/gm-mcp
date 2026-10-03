@@ -98,24 +98,68 @@ function objectBodyDiagnostic(verb, body) {
 
 const RUNNER_DIR = path.join(os.homedir(), '.gm-tools')
 const RUNNER_PATH = path.join(RUNNER_DIR, process.platform === 'win32' ? 'agentplug-runner.exe' : 'agentplug-runner')
+const AGENTPLUG_DIR = path.join(os.homedir(), '.agentplug')
+const GLOBAL_DAEMON_STATUS_PATH = path.join(AGENTPLUG_DIR, 'daemon-status.json')
+const GLOBAL_DAEMON_OWNER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'daemon-owner.lock')
+const GLOBAL_DAEMON_LOG_PATH = path.join(AGENTPLUG_DIR, 'daemon.log')
 
-const ENSURE_INTERVAL_MS = 15_000
-const ENSURE_LEASE_MS = 5_000
+// Recovery windows for a daemon that exits on purpose and is restarted from
+// here -- see AGENTS.md ("Runner recovery").
+const ENSURE_INTERVAL_MS = 2_000
+const ENSURE_LEASE_MS = 3_000
+const ENSURE_BOOT_GRACE_MS = 30_000
+const WATCHDOG_INTERVAL_MS = 5_000
 const lastEnsuredAtByRoot = new Map()
+const watchdogTimersByRoot = new Map()
 
 function runnerBinaryMissing() {
     return !fs.existsSync(RUNNER_PATH)
 }
 
-const SWEEPER_HEARTBEAT_TRUSTED_MS = 120_000
-
-function spoolAlreadySweptBySomeone(root) {
+function readJsonFile(filePath) {
     try {
-        const status = JSON.parse(fs.readFileSync(path.join(root, '.gm', 'exec-spool', '.status.json'), 'utf8'))
-        return Date.now() - (status.ts || 0) < SWEEPER_HEARTBEAT_TRUSTED_MS
+        return JSON.parse(fs.readFileSync(filePath, 'utf8'))
     } catch {
-        return false
+        return null
     }
+}
+
+export function pidAlive(pid) {
+    const value = Number(pid)
+    if (!Number.isInteger(value) || value <= 0) return null
+    try {
+        process.kill(value, 0)
+        return true
+    } catch (error) {
+        return error?.code === 'EPERM' ? true : false
+    }
+}
+
+function globalDaemonPid() {
+    const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    if (pidAlive(status?.pid) === true) return status.pid
+    try {
+        const owner = Number.parseInt(fs.readFileSync(GLOBAL_DAEMON_OWNER_LOCK_PATH, 'utf8').trim(), 10)
+        if (pidAlive(owner) === true) return owner
+    } catch {
+    }
+    return null
+}
+
+export function daemonBootGraceActive() {
+    const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    const bootTs = status?.daemon_boot_ts
+    if (typeof bootTs !== 'number') return false
+    if (Date.now() - bootTs >= ENSURE_BOOT_GRACE_MS) return false
+    return globalDaemonPid() !== null || Date.now() - (status.ts || 0) < 10_000
+}
+
+export function liveDaemonSweepsProject(spoolDir) {
+    const status = readJsonFile(path.join(spoolDir, '.status.json'))
+    if (!status) return false
+    if (!(Date.now() - (status.ts || 0) < DAEMON_HEARTBEAT_STALE_MS)) return false
+    const alive = pidAlive(status.pid)
+    return alive !== false
 }
 
 function claimRunnerEnsure(root) {
@@ -151,11 +195,14 @@ function claimRunnerEnsure(root) {
 
 function ensureSpoolRunnerRunning(root) {
     if (runnerBinaryMissing()) return
+    if (liveDaemonSweepsProject(path.join(root, '.gm', 'exec-spool'))) return
     const now = Date.now()
-    const last = lastEnsuredAtByRoot.get(root) || 0
-    if (now - last < ENSURE_INTERVAL_MS) return
+    if (now - (lastEnsuredAtByRoot.get(root) || 0) < ENSURE_INTERVAL_MS) return
+    if (daemonBootGraceActive()) {
+        lastEnsuredAtByRoot.set(root, now)
+        return
+    }
     lastEnsuredAtByRoot.set(root, now)
-    if (spoolAlreadySweptBySomeone(root)) return
     if (!claimRunnerEnsure(root)) return
     try {
         const child = spawn(RUNNER_PATH, ['spool'], {
@@ -169,6 +216,21 @@ function ensureSpoolRunnerRunning(root) {
         child.unref()
     } catch {
     }
+}
+
+// A timer per root keeps the daemon up between dispatches, so the next dispatch
+// lands on a live sweeper instead of reviving one inside its own poll budget.
+function startRunnerWatchdog(root) {
+    if (process.env.GM_MCP_RUNNER_WATCHDOG === '0') return
+    if (watchdogTimersByRoot.has(root)) return
+    const timer = setInterval(() => {
+        try {
+            ensureSpoolRunnerRunning(root)
+        } catch {
+        }
+    }, WATCHDOG_INTERVAL_MS)
+    timer.unref?.()
+    watchdogTimersByRoot.set(root, timer)
 }
 
 function sleep(ms, signal) {
@@ -271,6 +333,19 @@ export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
 
 const DAEMON_HEARTBEAT_STALE_MS = 20000
 
+function projectRootOfSpool(spoolDir) {
+    return path.resolve(spoolDir, '..', '..')
+}
+
+function heartbeatAgeMs(spoolDir) {
+    const status = readJsonFile(path.join(spoolDir, '.status.json'))
+    return status && typeof status.ts === 'number' ? Date.now() - status.ts : null
+}
+
+function daemonRestartCommand(root) {
+    return `"${RUNNER_PATH}" spool   (run with cwd ${path.resolve(root)}; the launcher detaches agentplug-runner daemon for this project)`
+}
+
 function readDaemonLiveness(spoolDir) {
     let status
     try {
@@ -280,17 +355,25 @@ function readDaemonLiveness(spoolDir) {
     }
     const now = Date.now()
     const heartbeatAgeMs = typeof status.ts === 'number' ? now - status.ts : null
-    const alive = heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS
+    const pid = typeof status.pid === 'number' ? status.pid : Number(status.pid) || null
+    const pidAliveFlag = pidAlive(pid)
+    const alive = pidAliveFlag === false
+        ? false
+        : heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS
     const busyForMs = typeof status.busy_until === 'number' ? status.busy_until - now : null
     const busy = busyForMs !== null && busyForMs > 0
     const note = !alive
         ? runnerBinaryMissing()
             ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed`
-            : 'daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch\'s fault'
+            : pidAliveFlag === false
+                ? `the daemon process that last swept this project (pid ${pid}) is gone -- the daemon recycles itself on idle/memory pressure and on a runner version handoff, and is restarted on demand; this call already asked for a replacement, so a dispatch submitted now waits for its cold start (wasm compile, tens of seconds) instead of for a queue`
+                : `daemon heartbeat is ${heartbeatAgeMs} ms stale (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) -- it is down, hung, or has not registered this project; its own log is ${GLOBAL_DAEMON_LOG_PATH} (this project's spool log is ${path.join(spoolDir, '.watcher.log')}) and it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}; this is not necessarily this dispatch's fault`
         : busy
             ? 'daemon is alive and still actively working on this project'
             : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that'
     const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note }
+    if (pid !== null) liveness.pid = pid
+    if (pidAliveFlag !== null) liveness.pid_alive = pidAliveFlag
     if (status.runtime) liveness.runtime = status.runtime
     if (typeof status.shared_process === 'boolean') liveness.shared_process = status.shared_process
     if (typeof status.queue_wait_ms === 'number') liveness.queue_wait_ms = status.queue_wait_ms
@@ -316,6 +399,57 @@ function runnerUnavailable(root, spoolDir) {
         runner_binary_missing: true,
         runner_path: RUNNER_PATH,
         note: `the agentplug-runner binary is not installed at ${RUNNER_PATH} and no live daemon heartbeat was found for ${path.resolve(root)}, so this dispatch could never be claimed. Install it once, then dispatch again: npx github:AnEntrypoint/gm -g   (or, in this project: curl -fsSL https://raw.githubusercontent.com/AnEntrypoint/gm/main/install.sh | sh -s -- spool)`,
+    }
+}
+
+// A dispatch written to a project whose daemon is gone sits
+// queued_not_yet_claimed and costs the caller its whole poll budget -- the
+// spool has no way to answer "nobody is listening". This asks for a runner,
+// waits out the cold start, and only then reports, so a dead daemon answers in
+// DAEMON_START_GRACE_MS instead of after a silent 120 s. A project with no
+// heartbeat at all is a first run, not a dead daemon: it still dispatches,
+// because the runner registers the project on its next tick and
+// startRunnerWatchdog keeps it up from then on.
+const DAEMON_START_GRACE_MS = Number(process.env.GM_MCP_DAEMON_START_GRACE_MS) > 0
+    ? Number(process.env.GM_MCP_DAEMON_START_GRACE_MS)
+    : 15_000
+const DAEMON_START_POLL_MS = 250
+
+export async function awaitDaemonHeartbeat(spoolDir, signal) {
+    const deadline = Date.now() + DAEMON_START_GRACE_MS
+    while (true) {
+        const age = heartbeatAgeMs(spoolDir)
+        if (age !== null && age < DAEMON_HEARTBEAT_STALE_MS) return 'recovered'
+        if (Date.now() >= deadline) return 'still_dead'
+        try {
+            await sleep(DAEMON_START_POLL_MS, signal)
+        } catch {
+            return 'aborted'
+        }
+    }
+}
+
+export async function daemonNotRunning(root, spoolDir, signal) {
+    if (process.env.GM_MCP_DAEMON_PREFLIGHT === '0') return undefined
+    if (readDaemonLiveness(spoolDir).alive) return undefined
+    const age = heartbeatAgeMs(spoolDir)
+    if (age === null) return undefined
+    if (daemonBootGraceActive()) return undefined
+    if (readJsonFile(path.join(spoolDir, '.status.json'))?.runner_update_in_progress) return undefined
+    ensureSpoolRunnerRunning(root)
+    startRunnerWatchdog(root)
+    if (await awaitDaemonHeartbeat(spoolDir, signal) !== 'still_dead') return undefined
+    const staleFor = heartbeatAgeMs(spoolDir)
+    return {
+        error: 'daemon-not-running',
+        daemon_not_running: true,
+        heartbeat_age_ms: staleFor,
+        stale_after_ms: DAEMON_HEARTBEAT_STALE_MS,
+        waited_for_start_ms: DAEMON_START_GRACE_MS,
+        note: `this project's daemon heartbeat is ${staleFor} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) and did not come back within ${DAEMON_START_GRACE_MS} ms of asking for a runner, so no dispatch was written -- it would sit queued_not_yet_claimed and only fail at the poll timeout. Restart it and dispatch again: ${daemonRestartCommand(root)}`,
+        checked_status_file: path.join(spoolDir, '.status.json'),
+        daemon_log: GLOBAL_DAEMON_LOG_PATH,
+        spool_log: path.join(spoolDir, '.watcher.log'),
     }
 }
 
@@ -443,7 +577,10 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
     if (!resume_task) {
         const unavailable = runnerUnavailable(root, spoolDir)
         if (unavailable) return toYaml(unavailable)
+        const notRunning = await daemonNotRunning(root, spoolDir, signal)
+        if (notRunning) return toYaml(notRunning)
         ensureSpoolRunnerRunning(root)
+        startRunnerWatchdog(root)
         if (isPlainText) {
             publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds))
         } else {
