@@ -26,7 +26,7 @@ const spool = (name) => {
 }
 const writeStatus = (dir, status) => writeFileSync(path.join(dir, '.status.json'), JSON.stringify(status))
 
-const exitedPid = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid
+const exitedPid = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8', windowsHide: true }).pid
 
 test('a live pid is alive and an exited one is not', () => {
     assert.equal(pidAlive(process.pid), true)
