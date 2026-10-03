@@ -5,6 +5,28 @@ The exec-family `timeoutMs` prefix and the `raw_body`/plain-text-verb contract
 are documented in README.md ("Exec-family timeout prefix"); this file covers
 what README does not.
 
+- **Runner recovery.** The daemon exits on purpose and depends on this file to
+  bring it back: it self-recycles when idle or over its wasm memory ceiling
+  (`self-recycling after 3600000ms fully idle ... next real dispatch spawns a
+  fresh process` in `~/.agentplug/daemon.log`), and it hands off to a freshly
+  downloaded runner build. A recycle under load therefore happens every few
+  minutes, and a cold start costs tens of seconds of wasm compile before the
+  first ticket is claimed. Every dead daemon is recovered by
+  `ensureSpoolRunnerRunning`, so the only thing between a recycle and a working
+  dispatch is how fast this process notices the daemon is gone -- judging that
+  from the heartbeat age alone is what let a dead daemon sit undetected for
+  `SWEEPER_HEARTBEAT_TRUSTED_MS` (120 s, now gone): `liveDaemonSweepsProject`
+  probes `status.json`'s `pid` with `process.kill(pid, 0)` and
+  `daemonBootGraceActive` covers the window where a fresh `daemon_boot_ts` in
+  `~/.agentplug/daemon-status.json` has not swept any project yet. The ensure
+  spawn is idempotent -- a runner started against a live daemon only registers
+  the project and exits -- so keep `ENSURE_INTERVAL_MS`/`ENSURE_LEASE_MS` small;
+  making them large re-creates the 2-minute dead window in which every dispatch
+  writes its ticket, sits `queued_not_yet_claimed` and times out. Recovery used
+  to wait for the next dispatch, which cost that one caller its whole poll
+  budget, so `startRunnerWatchdog` re-checks every root on a timer (opt out
+  with `GM_MCP_RUNNER_WATCHDOG=0`). A project with no `status.json` is never
+  "already swept": that is the registration path, not a liveness verdict.
 - `TIMEOUT_MS_PREFIX_LINE` mirrors gm/rs-plugkit's own
   `strip_timeout_ms_prefix_directive`: skip leading whitespace, then the first
   line must start with `timeoutMs=` or `timeout_ms=`. Keep the two in sync if
