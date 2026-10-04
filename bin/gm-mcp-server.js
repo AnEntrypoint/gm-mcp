@@ -37621,7 +37621,11 @@ var WIRE_EXCERPT_CHARS = 160;
 var WIRE_EXCERPT_IMMUNE_KEYS = /* @__PURE__ */ new Set(["id", "key", "status", "session_id", "verb"]);
 var WIRE_OMITTED_KEYS = /* @__PURE__ */ new Set(["route_hint", "reply_hash", "orient_nouns"]);
 var WIRE_OMITTED_UNLESS_SIBLING_TRUE = /* @__PURE__ */ new Map([["session_owner_before_this_dispatch", "session_mismatch"]]);
-var WIRE_OMITTED_WHEN_EVERY_ROW_IS_ALREADY_IN = /* @__PURE__ */ new Map([["vector_hits", "hits"]]);
+var WIRE_OMITTED_WHEN_EVERY_ROW_IS_ALREADY_IN = /* @__PURE__ */ new Map([
+  ["vector_hits", "hits"],
+  ["recall_hits", "hits"],
+  ["bm25_hits", "hits"]
+]);
 var WIRE_OMITTED_SUBKEYS = /* @__PURE__ */ new Map([
   ["prd_items_truncated", ["inlined_rows_are"]],
   ["mutables_pending_truncated", ["inlined_rows_are"]]
@@ -37778,6 +37782,15 @@ function compactWireResponse(response, outPath) {
     if (fieldCompactor) next = fieldCompactor(next);
     else if (WIRE_HIT_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_HITS_INLINE_MAX).map(excerptRow);
     else if (WIRE_ROW_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.map(excerptRow);
+    if (key === "data" && next && typeof next === "object" && !Array.isArray(next)) {
+      const inner = compactWireResponse(next, outPath);
+      if (inner !== next) {
+        const { wire_compacted: innerWire, ...innerRest } = inner;
+        if (innerWire?.omitted) omitted.push(`data.${innerWire.omitted}`);
+        if (innerWire?.shortened) shortened.push(String(innerWire.shortened).split(" ").map((s) => `data.${s}`).join(" "));
+        next = innerRest;
+      }
+    }
     if (next === omitFromWire) {
       omitted.push(key);
       continue;
@@ -37819,7 +37832,19 @@ function nextN(sessionId) {
   counter += 1;
   return `${sessionId}-${process.pid}-${Date.now()}-${counter}`;
 }
+var UNEXPANDED_INTERPOLATION = /\$\{[^}]*\}|\$\(|\$env:|\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%|`/i;
+function unsafeSpoolName(role, value) {
+  if (typeof value !== "string" || !value) return null;
+  if (value.includes("\0") || value === "." || value === ".." || value.includes("/") || value.includes("\\")) {
+    return `${role} ${JSON.stringify(value)} is not a single spool name component: it carries a NUL byte, a path separator, or is a dot component`;
+  }
+  const found = UNEXPANDED_INTERPOLATION.exec(value);
+  if (!found) return null;
+  return `${role} ${JSON.stringify(value)} still carries the unexpanded interpolation ${JSON.stringify(found[0])} -- the spool ABI is in/<verb>/<session_id>-<N>.txt, so this would land as a literal path component that no daemon ever claims; pass the expanded value`;
+}
 function publishSpoolRequest(inDir, inPath, task, body) {
+  const unsafe = unsafeSpoolName("task", task);
+  if (unsafe) throw new Error(unsafe);
   fs.mkdirSync(inDir, { recursive: true });
   const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.tmp`);
   try {
@@ -38277,12 +38302,14 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
 async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal) {
   if (!verb) return "error: verb required";
   if (!session_id) return "error: session_id required";
+  const n = resume_task || nextN(session_id);
+  const unsafeName = unsafeSpoolName("verb", verb) || unsafeSpoolName("session_id", session_id) || unsafeSpoolName("task", n);
+  if (unsafeName) return `error: ${unsafeName} -- nothing was written to the spool, so no dispatch was queued`;
   const root = projectRootFor(cwd || process.cwd());
   const spoolDir = path.join(root, ".gm", "exec-spool");
   const inDir = path.join(spoolDir, "in", verb);
   const outDir = path.join(spoolDir, "out");
   fs.mkdirSync(outDir, { recursive: true });
-  const n = resume_task || nextN(session_id);
   const callStartedAtMs = Date.now();
   let lastWakeSource = "initial_check";
   const toYaml = (obj) => dump(obj, { lineWidth: 100 });
