@@ -30,7 +30,21 @@ function nextN(sessionId) {
     return `${sessionId}-${process.pid}-${Date.now()}-${counter}`
 }
 
+const UNEXPANDED_INTERPOLATION = /\$\{[^}]*\}|\$\(|\$env:|\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%|`/i
+
+function unsafeSpoolName(role, value) {
+    if (typeof value !== 'string' || !value) return null
+    if (value.includes('\0') || value === '.' || value === '..' || value.includes('/') || value.includes('\\')) {
+        return `${role} ${JSON.stringify(value)} is not a single spool name component: it carries a NUL byte, a path separator, or is a dot component`
+    }
+    const found = UNEXPANDED_INTERPOLATION.exec(value)
+    if (!found) return null
+    return `${role} ${JSON.stringify(value)} still carries the unexpanded interpolation ${JSON.stringify(found[0])} -- the spool ABI is in/<verb>/<session_id>-<N>.txt, so this would land as a literal path component that no daemon ever claims; pass the expanded value`
+}
+
 function publishSpoolRequest(inDir, inPath, task, body) {
+    const unsafe = unsafeSpoolName('task', task)
+    if (unsafe) throw new Error(unsafe)
     fs.mkdirSync(inDir, { recursive: true })
     const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.tmp`)
     try {
@@ -576,12 +590,14 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
 export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal) {
     if (!verb) return 'error: verb required'
     if (!session_id) return 'error: session_id required'
+    const n = resume_task || nextN(session_id)
+    const unsafeName = unsafeSpoolName('verb', verb) || unsafeSpoolName('session_id', session_id) || unsafeSpoolName('task', n)
+    if (unsafeName) return `error: ${unsafeName} -- nothing was written to the spool, so no dispatch was queued`
     const root = projectRootFor(cwd || process.cwd())
     const spoolDir = path.join(root, '.gm', 'exec-spool')
     const inDir = path.join(spoolDir, 'in', verb)
     const outDir = path.join(spoolDir, 'out')
     fs.mkdirSync(outDir, { recursive: true })
-    const n = resume_task || nextN(session_id)
     const callStartedAtMs = Date.now()
     let lastWakeSource = 'initial_check'
     const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })

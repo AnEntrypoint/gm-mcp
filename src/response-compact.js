@@ -136,7 +136,11 @@ const WIRE_OMITTED_KEYS = new Set(['route_hint', 'reply_hash', 'orient_nouns'])
 
 const WIRE_OMITTED_UNLESS_SIBLING_TRUE = new Map([['session_owner_before_this_dispatch', 'session_mismatch']])
 
-const WIRE_OMITTED_WHEN_EVERY_ROW_IS_ALREADY_IN = new Map([['vector_hits', 'hits']])
+const WIRE_OMITTED_WHEN_EVERY_ROW_IS_ALREADY_IN = new Map([
+    ['vector_hits', 'hits'],
+    ['recall_hits', 'hits'],
+    ['bm25_hits', 'hits'],
+])
 
 const WIRE_OMITTED_SUBKEYS = new Map([
     ['prd_items_truncated', ['inlined_rows_are']],
@@ -320,6 +324,15 @@ export function compactWireResponse(response, outPath) {
         if (fieldCompactor) next = fieldCompactor(next)
         else if (WIRE_HIT_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_HITS_INLINE_MAX).map(excerptRow)
         else if (WIRE_ROW_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.map(excerptRow)
+        if (key === 'data' && next && typeof next === 'object' && !Array.isArray(next)) {
+            const inner = compactWireResponse(next, outPath)
+            if (inner !== next) {
+                const { wire_compacted: innerWire, ...innerRest } = inner
+                if (innerWire?.omitted) omitted.push(`data.${innerWire.omitted}`)
+                if (innerWire?.shortened) shortened.push(String(innerWire.shortened).split(' ').map(s => `data.${s}`).join(' '))
+                next = innerRest
+            }
+        }
         if (next === omitFromWire) {
             omitted.push(key)
             continue
