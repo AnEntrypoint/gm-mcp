@@ -38458,20 +38458,146 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
 // src/self-update.js
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path2 from "node:path";
 import { fileURLToPath } from "node:url";
+
+// src/bundle-version.js
+var BUNDLE_VERSION = "0.2.3";
+
+// src/self-update.js
 var DEPLOYED_BUNDLE_FILE_NAME = "gm-mcp-server.mjs";
 var DEFAULT_BUNDLE_URL = "https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js";
 var DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1e3;
 var FETCH_TIMEOUT_MS = 2e4;
 var MIN_PLAUSIBLE_BUNDLE_BYTES = 1e5;
 var BUNDLE_SHEBANG = "#!/usr/bin/env node";
+var NO_SELF_UPDATE_ENV = "GM_MCP_NO_SELF_UPDATE";
+var NO_SELF_UPDATE_FILE = "gm-mcp-server.no-self-update";
+var LOCAL_BUILD_PIN_FILE = "gm-mcp-server.local-build.json";
+var SELF_UPDATE_OFF_VALUES = /* @__PURE__ */ new Set(["0", "false", "no", "off"]);
+var BUNDLE_VERSION_ASSIGNMENT = /BUNDLE_VERSION\s*=\s*["']([^"']+)["']/;
 var sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 var shortHash = (hex3) => hex3.slice(0, 12);
 function toolsDir() {
   return process.env.GM_TOOLS_DIR || path2.join(homedir(), ".gm-tools");
+}
+function defaultDeployedPath() {
+  return path2.join(toolsDir(), DEPLOYED_BUNDLE_FILE_NAME);
+}
+function agentplugDir() {
+  const override = (process.env.AGENTPLUG_HOME || "").trim();
+  return override ? path2.resolve(override) : path2.join(homedir(), ".agentplug");
+}
+function noSelfUpdateFilePath() {
+  return path2.join(agentplugDir(), NO_SELF_UPDATE_FILE);
+}
+function localBuildPinPath() {
+  return path2.join(agentplugDir(), LOCAL_BUILD_PIN_FILE);
+}
+function selfUpdateFreezeReason() {
+  const envValue = process.env[NO_SELF_UPDATE_ENV];
+  if (envValue !== void 0 && !SELF_UPDATE_OFF_VALUES.has(envValue.trim().toLowerCase())) {
+    return `${NO_SELF_UPDATE_ENV}=${JSON.stringify(envValue)} freezes the deployed bundle (set it to 0 to allow updates again)`;
+  }
+  const marker = noSelfUpdateFilePath();
+  if (existsSync(marker)) return `${marker} exists, which freezes the deployed bundle (delete that file to allow updates again)`;
+  return null;
+}
+function readLocalBuildPin() {
+  try {
+    const pin = JSON.parse(readFileSync(localBuildPinPath(), "utf8"));
+    return pin && typeof pin.sha256 === "string" && pin.sha256 ? pin : null;
+  } catch {
+    return null;
+  }
+}
+function pinLocalBuild(deployedPath = defaultDeployedPath()) {
+  const bytes = readFileSync(deployedPath);
+  const pinPath = localBuildPinPath();
+  const pin = {
+    sha256: sha256(bytes),
+    path: path2.resolve(deployedPath),
+    version: parseBundleVersion(bytes) || BUNDLE_VERSION,
+    ts: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  mkdirSync(path2.dirname(pinPath), { recursive: true });
+  writeFileSync(pinPath, `${JSON.stringify(pin, null, 2)}
+`, "utf8");
+  return pin;
+}
+function clearLocalBuildPin() {
+  const pinPath = localBuildPinPath();
+  rmSync(pinPath, { force: true });
+  return pinPath;
+}
+function parseBundleVersion(bytes) {
+  const text = Buffer.isBuffer(bytes) ? bytes.toString("utf8") : String(bytes);
+  const found = BUNDLE_VERSION_ASSIGNMENT.exec(text);
+  return found ? found[1] : null;
+}
+function compareVersions(left, right) {
+  const parts = (value) => String(value).split(/[.+-]/).map((part) => {
+    const parsed = Number.parseInt(part, 10);
+    return Number.isFinite(parsed) ? parsed : 0;
+  });
+  const a = parts(left);
+  const b = parts(right);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const leftPart = a[i] ?? 0;
+    const rightPart = b[i] ?? 0;
+    if (leftPart > rightPart) return 1;
+    if (leftPart < rightPart) return -1;
+  }
+  return 0;
+}
+function versionGuardReason(candidateBytes) {
+  const candidateVersion = parseBundleVersion(candidateBytes);
+  if (!candidateVersion) {
+    return {
+      code: "candidate-version-unknown",
+      reason: `the candidate bundle carries no ${BUNDLE_VERSION_ASSIGNMENT} assignment, so it cannot be proven newer than the installed ${BUNDLE_VERSION}`
+    };
+  }
+  if (compareVersions(candidateVersion, BUNDLE_VERSION) <= 0) {
+    return {
+      code: "no-downgrade",
+      reason: `the candidate bundle is version ${candidateVersion} and the installed one is ${BUNDLE_VERSION} -- a self-update may only move strictly forward`
+    };
+  }
+  return { code: null, reason: null, candidateVersion };
+}
+function localBuildPinReason(deployedHash) {
+  const pin = readLocalBuildPin();
+  if (!pin || pin.sha256 !== deployedHash) return null;
+  const pinPath = localBuildPinPath();
+  return {
+    code: "local-build-pinned",
+    reason: `the installed bundle is pinned as a local build by ${pinPath} (sha256 ${shortHash(pin.sha256)}${pin.ts ? `, pinned at ${pin.ts}` : ""}) -- clear it with "gm-mcp unpin-local-build" or delete that file to hand it back to the release channel`
+  };
+}
+function selfUpdateStatus() {
+  const deployedPath = defaultDeployedPath();
+  let bytes = null;
+  try {
+    bytes = readFileSync(deployedPath);
+  } catch {
+    bytes = null;
+  }
+  const pin = readLocalBuildPin();
+  return {
+    installed_version: BUNDLE_VERSION,
+    deployed_bundle: deployedPath,
+    running_from_deployed_bundle: isRunningFromDeployedBundle(deployedPath),
+    deployed_sha256: bytes ? sha256(bytes) : null,
+    deployed_pinned_as_local_build: Boolean(bytes && pin && pin.sha256 === sha256(bytes)),
+    frozen_by: selfUpdateFreezeReason(),
+    no_self_update_file: noSelfUpdateFilePath(),
+    no_self_update_file_present: existsSync(noSelfUpdateFilePath()),
+    local_build_pin_path: localBuildPinPath(),
+    local_build_pin: pin
+  };
 }
 function canonicalPath(file2) {
   const resolved = realpathSync(file2);
@@ -38517,26 +38643,36 @@ function replaceDeployedBundle(deployedPath, bytes) {
 }
 async function refreshStaleDeployedBundle() {
   if (process.env.GM_MCP_SELF_UPDATE === "0") return { outcome: "disabled" };
-  const deployedPath = path2.join(toolsDir(), DEPLOYED_BUNDLE_FILE_NAME);
+  const deployedPath = defaultDeployedPath();
   if (!isRunningFromDeployedBundle(deployedPath)) return { outcome: "not-deployed-copy" };
+  const refuse = (code, reason) => {
+    console.error(`gm-mcp: refusing deployed bundle self-update (${code}) -- ${reason}`);
+    return { outcome: "refused", code, reason, deployed_bundle: deployedPath };
+  };
+  const frozen = selfUpdateFreezeReason();
+  if (frozen) return refuse("frozen", frozen);
   const stampPath = `${deployedPath}.checked`;
   if (checkedRecently(stampPath)) return { outcome: "checked-recently" };
+  const deployedHash = sha256(readFileSync(deployedPath));
+  const pinned = localBuildPinReason(deployedHash);
+  if (pinned) return refuse(pinned.code, pinned.reason);
   const url2 = process.env.GM_MCP_BUNDLE_URL || DEFAULT_BUNDLE_URL;
   const freshBytes = await fetchBundleBytes(url2);
   const freshHash = sha256(freshBytes);
-  const deployedHash = sha256(readFileSync(deployedPath));
   if (freshHash === deployedHash) {
     touch(stampPath);
     return { outcome: "current", hash: freshHash };
   }
+  const version2 = versionGuardReason(freshBytes);
+  if (version2.code) return refuse(version2.code, version2.reason);
   replaceDeployedBundle(deployedPath, freshBytes);
   touch(stampPath);
-  return { outcome: "refreshed", from: deployedHash, to: freshHash, url: url2 };
+  return { outcome: "refreshed", from: deployedHash, to: freshHash, url: url2, version: `${BUNDLE_VERSION} -> ${version2.candidateVersion}` };
 }
 function refreshStaleDeployedBundleInBackground() {
   refreshStaleDeployedBundle().then((result) => {
     if (result.outcome === "refreshed") {
-      console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} from ${result.url}; takes effect on next connect (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`);
+      console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} (${result.version}) from ${result.url}; takes effect on next connect (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`);
     }
   }).catch((error61) => {
     console.error(`gm-mcp: bundle staleness check failed (${error61.message}); keeping the deployed copy`);
@@ -38547,7 +38683,7 @@ function refreshStaleDeployedBundleInBackground() {
 var numberLike = external_exports.union([external_exports.number(), external_exports.string()]);
 var booleanLike = external_exports.union([external_exports.boolean(), external_exports.string()]);
 function createServer() {
-  const server = new McpServer({ name: "gm-mcp", version: "0.2.1" });
+  const server = new McpServer({ name: "gm-mcp", version: BUNDLE_VERSION });
   const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`;
   server.registerTool(
     "gm_instruction",
@@ -38632,6 +38768,44 @@ async function main() {
 }
 
 // src/cli.js
+var COMMANDS = {
+  "pin-local-build": () => {
+    const deployedPath = process.argv[3];
+    const pin = deployedPath ? pinLocalBuild(deployedPath) : pinLocalBuild();
+    console.log(`gm-mcp ${BUNDLE_VERSION}: pinned ${pin.path} (sha256 ${pin.sha256}) as a local build in ${localBuildPinPath()} -- the release channel can no longer overwrite it`);
+    return 0;
+  },
+  "unpin-local-build": () => {
+    const pinPath = clearLocalBuildPin();
+    console.log(`gm-mcp ${BUNDLE_VERSION}: cleared the local-build pin at ${pinPath} -- the release channel may update the deployed bundle again`);
+    return 0;
+  },
+  "self-update-status": () => {
+    console.log(JSON.stringify(selfUpdateStatus(), null, 2));
+    return 0;
+  }
+};
+var command = process.argv[2];
+if (command === "--help" || command === "-h") {
+  console.log(`gm-mcp ${BUNDLE_VERSION}
+
+usage:
+  gm-mcp-server.js                 start the MCP stdio server
+  gm-mcp-server.js pin-local-build [path]   pin the deployed bundle (default ~/.gm-tools/gm-mcp-server.mjs) so a self-update cannot overwrite it
+  gm-mcp-server.js unpin-local-build        clear that pin
+  gm-mcp-server.js self-update-status       print freeze state, local-build pin and deployed bundle sha256
+
+freeze a self-update without a pin by setting ${"GM_MCP_NO_SELF_UPDATE"}=1 or creating ${noSelfUpdateFilePath()}`);
+  process.exit(0);
+}
+if (command && COMMANDS[command]) {
+  try {
+    process.exit(COMMANDS[command]());
+  } catch (error61) {
+    console.error(`gm-mcp: ${command} failed: ${error61.message}`);
+    process.exit(1);
+  }
+}
 main().catch((e) => {
   console.error(e);
   process.exit(1);
