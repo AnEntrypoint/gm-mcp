@@ -3,12 +3,13 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { gmDispatch } from './dispatch.js'
 import { refreshStaleDeployedBundleInBackground } from './self-update.js'
+import { BUNDLE_VERSION } from './bundle-version.js'
 
 const numberLike = z.union([z.number(), z.string()])
 const booleanLike = z.union([z.boolean(), z.string()])
 
 export function createServer() {
-    const server = new McpServer({ name: 'gm-mcp', version: '0.2.1' })
+    const server = new McpServer({ name: 'gm-mcp', version: BUNDLE_VERSION })
     const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`
 
     server.registerTool(
