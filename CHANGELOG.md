@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased - the fields that aim a search at another project are documented on the tools that call them
+
+`codesearch` (and `grep`, and `codeinsight_index`) read the directory to search
+from body `"root"`, aliased `"projectPath"` and now `"cwd"` -- but no MCP
+client could discover that. The `gm` tool's schema described `body` generically
+for every verb and described `cwd` only as "project root containing
+.gm/exec-spool", so a caller searching a project other than the server's own
+had no documented way to say so, and read the out-of-root refusal as "cwd is
+ignored and gm can only search one project".
+
+The `gm` tool's `body` description now names the fields, and both tools' `cwd`
+descriptions say what `cwd` actually does: it selects the project whose daemon
+handles the dispatch (the daemon is spawned with `cwd: root`, so it is also the
+project a verb like codesearch searches), and it is not forwarded into the verb
+body -- `root` inside `body` is how a single dispatch is aimed elsewhere
+without moving the daemon.
+
 ## Unreleased - a self-update can no longer quietly revert a fix
 
 `bin/gm-mcp-server.js` on `main` is the live release channel: every deployed
