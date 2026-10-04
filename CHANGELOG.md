@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased - a self-update can no longer quietly revert a fix
+
+`bin/gm-mcp-server.js` on `main` is the live release channel: every deployed
+`~/.gm-tools/gm-mcp-server.mjs` swaps itself for it within the hour. That swap
+is a bare file overwrite, so a release that loses a fix silently undoes it on
+the machine -- which is exactly what happened to `windowsHide: true` on two
+child spawns (`execFileSync("git", ...)` and `spawnSync(process.execPath,
+["--check", ...])`), present in `src/` and in the committed bundle and missing
+from the 2026-10-04 08:57 release build.
+
+Three guards now gate `replaceDeployedBundle`:
+
+- **Freeze**: `GM_MCP_NO_SELF_UPDATE` set to anything but `0`/`false`/`no`/
+  `off`, or a `gm-mcp-server.no-self-update` file in `$AGENTPLUG_HOME` (else
+  `~/.agentplug`), refuses every self-update before any network call.
+- **Local-build pin**: `gm-mcp pin-local-build [path]` records the installed
+  bundle's sha256, path, version and ts in `gm-mcp-server.local-build.json`;
+  while the installed bundle's sha256 matches, the channel may not overwrite
+  it. `unpin-local-build` clears it and `self-update-status` reports the whole
+  state. Pinning a bundle you built by hand is what keeps a local fix local.
+- **No downgrade**: the candidate's version must be strictly greater than the
+  installed `BUNDLE_VERSION` (`src/bundle-version.js`, compared numerically
+  component by component). Equal, older, or unreadable versions are refused.
+
+Every refusal logs `refusing deployed bundle self-update (<code>) -- <reason>`
+to stderr, so it reaches the daemon log instead of vanishing into the
+background check. The `.prev` backup and the `node --check` validation of a
+candidate are unchanged. `BUNDLE_VERSION` is 0.2.3 and must be bumped with
+every release: a release that keeps the installed version is refused.
+
 ## Unreleased - a dispatch to a dead daemon fails fast instead of hanging
 
 The daemon self-recycles every few minutes (see AGENTS.md "Runner recovery"),
