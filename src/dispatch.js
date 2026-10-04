@@ -254,10 +254,39 @@ function claimRunnerEnsure(root) {
     }
 }
 
+// A cold `agentplug-runner spool` takes tens of seconds (it registers the
+// project, then waits out the shared daemon's wasm compile). The watchdog wakes
+// every WATCHDOG_INTERVAL_MS, so without this guard one cold start spawns a new
+// runner every ENSURE_INTERVAL_MS -- a pile of processes that all contend for
+// daemon.lock and none of which finish faster. ENSURE_CHILD_MAX_AGE_MS caps it:
+// a `spool` that outlives the cap is treated as wedged and re-issued, so a hung
+// child can never block supervision forever.
+const ENSURE_CHILD_MAX_AGE_MS = 120_000
+const inflightEnsuresByRoot = new Map()
+
+export function runnerEnsureInFlight(root, now = Date.now()) {
+    const entry = inflightEnsuresByRoot.get(root)
+    if (!entry) return false
+    if (entry.exitCode !== null && entry.exitCode !== undefined) {
+        inflightEnsuresByRoot.delete(root)
+        return false
+    }
+    if (pidAlive(entry.pid) === false) {
+        inflightEnsuresByRoot.delete(root)
+        return false
+    }
+    if (now - entry.spawnedAtMs >= ENSURE_CHILD_MAX_AGE_MS) {
+        inflightEnsuresByRoot.delete(root)
+        return false
+    }
+    return true
+}
+
 function ensureSpoolRunnerRunning(root) {
     if (runnerBinaryMissing()) return
     if (liveDaemonSweepsProject(path.join(root, '.gm', 'exec-spool'))) return
     const now = Date.now()
+    if (runnerEnsureInFlight(root, now)) return
     if (now - (lastEnsuredAtByRoot.get(root) || 0) < ENSURE_INTERVAL_MS) return
     if (daemonBootGraceActive()) {
         lastEnsuredAtByRoot.set(root, now)
@@ -265,18 +294,33 @@ function ensureSpoolRunnerRunning(root) {
     }
     lastEnsuredAtByRoot.set(root, now)
     if (!claimRunnerEnsure(root)) return
+    let child
     try {
-        const child = spawn(RUNNER_PATH, ['spool'], {
+        child = spawn(RUNNER_PATH, ['spool'], {
             cwd: root,
             env: { ...process.env, CLAUDE_PROJECT_DIR: root },
             detached: true,
             stdio: 'ignore',
             windowsHide: true,
         })
-        child.on('error', () => {})
-        child.unref()
     } catch {
+        return
     }
+    const entry = { pid: child.pid, spawnedAtMs: now, exitCode: null }
+    const settle = (code) => {
+        entry.exitCode = code ?? 0
+        if (inflightEnsuresByRoot.get(root) === entry) inflightEnsuresByRoot.delete(root)
+    }
+    child.on('error', () => settle(-1))
+    child.on('exit', (code) => settle(code))
+    recordRunnerEnsureInflight(root, entry)
+    child.unref()
+}
+
+// Seam for the recovery tests: seeds the in-flight map so runnerEnsureInFlight
+// can be asserted without spawning a real runner.
+export function recordRunnerEnsureInflight(root, entry) {
+    inflightEnsuresByRoot.set(root, entry)
 }
 
 // A timer per root keeps the daemon up between dispatches, so the next dispatch
@@ -720,6 +764,12 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
 
     while (true) {
         if (signal?.aborted) return abortedReply()
+        // A daemon that dies between the preflight and the claim leaves this
+        // dispatch queued_not_yet_claimed for its whole poll budget. Re-ask for
+        // a runner on every wake instead of only once up front: the throttle
+        // inside ensureSpoolRunnerRunning keeps it to one attempt every
+        // ENSURE_INTERVAL_MS, and it is a no-op while the daemon is live.
+        ensureSpoolRunnerRunning(root)
         const landed = readLandedOutFile()
         if (landed !== undefined) return landed
         if (Date.now() >= deadline) {

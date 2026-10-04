@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { liveDaemonSweepsProject, pidAlive } from '../src/dispatch.js'
+import { liveDaemonSweepsProject, pidAlive, recordRunnerEnsureInflight, runnerEnsureInFlight } from '../src/dispatch.js'
 
 let passed = 0
 function test(name, fn) {
@@ -63,6 +63,31 @@ test('a status.json without a pid falls back to the heartbeat', () => {
     assert.equal(liveDaemonSweepsProject(dir), true)
     writeStatus(dir, { ts: Date.now() - 60_000 })
     assert.equal(liveDaemonSweepsProject(dir), false)
+})
+
+test('no runner ensure recorded is not in flight', () => {
+    assert.equal(runnerEnsureInFlight('never-ensured'), false)
+})
+
+test('a running spool child is in flight, so the watchdog does not stack another on it', () => {
+    const root = 'inflight-live'
+    recordRunnerEnsureInflight(root, { pid: process.pid, spawnedAtMs: Date.now(), exitCode: null })
+    assert.equal(runnerEnsureInFlight(root), true)
+    assert.equal(runnerEnsureInFlight(root), true, 're-checking must not consume the entry')
+})
+
+test('an exited spool child is not in flight and is forgotten', () => {
+    const root = 'inflight-exited'
+    recordRunnerEnsureInflight(root, { pid: exitedPid, spawnedAtMs: Date.now(), exitCode: 0 })
+    assert.equal(runnerEnsureInFlight(root), false)
+    assert.equal(runnerEnsureInFlight(root), false)
+})
+
+test('a spool child older than the cap is re-issued instead of blocking supervision forever', () => {
+    const root = 'inflight-wedged'
+    recordRunnerEnsureInflight(root, { pid: process.pid, spawnedAtMs: Date.now() - 121_000, exitCode: null })
+    assert.equal(runnerEnsureInFlight(root), false)
+    assert.equal(runnerEnsureInFlight(root), false, 'the wedged entry must not come back')
 })
 
 rmSync(scratch, { recursive: true, force: true })

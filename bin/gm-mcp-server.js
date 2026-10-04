@@ -38034,10 +38034,30 @@ function claimRunnerEnsure(root) {
     return false;
   }
 }
+var ENSURE_CHILD_MAX_AGE_MS = 12e4;
+var inflightEnsuresByRoot = /* @__PURE__ */ new Map();
+function runnerEnsureInFlight(root, now = Date.now()) {
+  const entry = inflightEnsuresByRoot.get(root);
+  if (!entry) return false;
+  if (entry.exitCode !== null && entry.exitCode !== void 0) {
+    inflightEnsuresByRoot.delete(root);
+    return false;
+  }
+  if (pidAlive(entry.pid) === false) {
+    inflightEnsuresByRoot.delete(root);
+    return false;
+  }
+  if (now - entry.spawnedAtMs >= ENSURE_CHILD_MAX_AGE_MS) {
+    inflightEnsuresByRoot.delete(root);
+    return false;
+  }
+  return true;
+}
 function ensureSpoolRunnerRunning(root) {
   if (runnerBinaryMissing()) return;
   if (liveDaemonSweepsProject(path.join(root, ".gm", "exec-spool"))) return;
   const now = Date.now();
+  if (runnerEnsureInFlight(root, now)) return;
   if (now - (lastEnsuredAtByRoot.get(root) || 0) < ENSURE_INTERVAL_MS) return;
   if (daemonBootGraceActive()) {
     lastEnsuredAtByRoot.set(root, now);
@@ -38045,19 +38065,30 @@ function ensureSpoolRunnerRunning(root) {
   }
   lastEnsuredAtByRoot.set(root, now);
   if (!claimRunnerEnsure(root)) return;
+  let child;
   try {
-    const child = spawn(RUNNER_PATH, ["spool"], {
+    child = spawn(RUNNER_PATH, ["spool"], {
       cwd: root,
       env: { ...process.env, CLAUDE_PROJECT_DIR: root },
       detached: true,
       stdio: "ignore",
       windowsHide: true
     });
-    child.on("error", () => {
-    });
-    child.unref();
   } catch {
+    return;
   }
+  const entry = { pid: child.pid, spawnedAtMs: now, exitCode: null };
+  const settle = (code) => {
+    entry.exitCode = code ?? 0;
+    if (inflightEnsuresByRoot.get(root) === entry) inflightEnsuresByRoot.delete(root);
+  };
+  child.on("error", () => settle(-1));
+  child.on("exit", (code) => settle(code));
+  recordRunnerEnsureInflight(root, entry);
+  child.unref();
+}
+function recordRunnerEnsureInflight(root, entry) {
+  inflightEnsuresByRoot.set(root, entry);
 }
 function startRunnerWatchdog(root) {
   if (process.env.GM_MCP_RUNNER_WATCHDOG === "0") return;
@@ -38422,6 +38453,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
   });
   while (true) {
     if (signal?.aborted) return abortedReply();
+    ensureSpoolRunnerRunning(root);
     const landed = readLandedOutFile();
     if (landed !== void 0) return landed;
     if (Date.now() >= deadline) {
