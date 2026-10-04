@@ -58,6 +58,29 @@ deployed copy and prints one line. Env: `GM_MCP_SELF_UPDATE=0` disables,
 this feature cannot update itself: run `npx github:AnEntrypoint/gm --mcp-only`
 once.
 
+The release channel is a plain file swap, so a release that loses a fix would
+silently undo it on the next check (exactly what happened to the
+`windowsHide: true` on two child spawns in the 2026-10-04 08:57 build). Three
+guards stand between the channel and the deployed file:
+
+- **Freeze.** `GM_MCP_NO_SELF_UPDATE` set to anything other than `0`/`false`/
+  `no`/`off`, or a `gm-mcp-server.no-self-update` file in the install dir
+  (`$AGENTPLUG_HOME`, else `~/.agentplug`), stops every self-update before any
+  network call.
+- **Local-build pin.** `gm-mcp-server.local-build.json` in the same dir holds
+  the sha256, path, version and ts of a bundle you want to keep: while the
+  installed bundle's sha256 matches it, the channel may not overwrite it.
+  `gm-mcp pin-local-build [path]` writes it, `gm-mcp unpin-local-build` clears
+  it, and `gm-mcp self-update-status` prints the whole picture.
+- **No downgrade.** The candidate's version (its `BUNDLE_VERSION` assignment)
+  must be strictly greater than the installed one; equal or older is refused,
+  and so is a candidate whose version cannot be read at all.
+
+Every refusal goes to stderr with its reason (`refusing deployed bundle
+self-update (<code>) -- <reason>`), so it lands in the daemon log instead of
+being swallowed by the background check. The `.prev` backup and the `node
+--check` validation of a candidate are unchanged.
+
 Run bare in a terminal with no MCP client attached the server stays running
 until stdin closes or the process is killed; a stdin close alone does not exit
 the process (`gm-mcp: stdin ended (client disconnected or platform pipe quirk)
@@ -190,6 +213,7 @@ pointer. They are read once at server start, so a host must restart its
 | `GM_MCP_LONG_TEXT_INLINE_MAX` | every long text field, including `instruction`'s phase prose | `400` | `1048576` |
 | `GM_MCP_STDOUT_INLINE_MAX` | the whole response of a plain-text-body verb (`exec_js` and every language stem it backs, `serp`, `browser`, `cdp`) | `32768` | `1048576` |
 | `GM_MCP_FILE_READ_INLINE_MAX` | the file body `fs_read` returns | `65536` | `1048576` |
+| `GM_MCP_NO_SELF_UPDATE` | any value but `0`/`false`/`no`/`off` freezes the deployed bundle against every self-update | unset | -- |
 
 The `fs_read` budget exists because that response *is* the file the caller
 asked for: at the 400-char prose cap every whole-file read came back as a
