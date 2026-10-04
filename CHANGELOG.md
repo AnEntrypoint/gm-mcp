@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased - a daemon that dies mid-dispatch is re-asked for, and one cold start no longer stacks runners
+
+A dispatch whose daemon exits after the preflight sat `queued_not_yet_claimed`
+for its whole poll budget: `ensureSpoolRunnerRunning` ran once before the file
+was written and never again, so nothing revived the daemon while the caller
+waited. That is what a 2026-10-02 MCP server did to a `codesearch` on
+2026-10-04 -- the shared daemon had self-recycled after an idle hour (by
+design), the server's bundle predated the runner watchdog, and the dispatch was
+written straight into a dead spool.
+
+The poll loop now re-asks for a runner on every wake. The call is self-throttled
+to one attempt every `ENSURE_INTERVAL_MS` and is a no-op while the daemon is
+live, so a dispatch that outlives its daemon is picked up by a fresh sweeper
+instead of expiring.
+
+The matching hazard on the other side: `agentplug-runner spool` costs ~11 s warm
+and ~100 s cold (registering the project, then waiting out the shared daemon's
+wasm compile), while the watchdog wakes every 5 s and used to spawn a fresh
+`spool` every 2 s regardless. A cold start therefore stacked ~50 runners, all
+contending for `daemon.lock`. `runnerEnsureInFlight` now suppresses a spawn
+while the previous one for that root is still running, and a child older than
+`ENSURE_CHILD_MAX_AGE_MS` (120 s) is treated as wedged and re-issued, so a hung
+`spool` cannot block supervision forever.
+
 ## Unreleased - the fields that aim a search at another project are documented on the tools that call them
 
 `codesearch` (and `grep`, and `codeinsight_index`) read the directory to search
