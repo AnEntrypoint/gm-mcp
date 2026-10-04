@@ -6,6 +6,8 @@ import path from 'node:path'
 // Set before importing: dispatch.js reads the grace once at module load, and
 // the assertion below is about the verdict, not about waiting 15 s for it.
 process.env.GM_MCP_DAEMON_START_GRACE_MS = '400'
+// The watchdog re-ensures every 5 s, which outlives the lease that holds the runner spawn off.
+process.env.GM_MCP_RUNNER_WATCHDOG = '0'
 const { daemonBootGraceActive, daemonNotRunning } = await import('../src/dispatch.js')
 
 let passed = 0
@@ -21,10 +23,16 @@ async function test(name, fn) {
     }
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
 const scratch = mkdtempSync(path.join(tmpdir(), 'gm-daemon-preflight-'))
 const project = (name) => {
     const dir = path.join(scratch, name, '.gm', 'exec-spool')
     mkdirSync(dir, { recursive: true })
+    // A fresh runner-ensure lease keeps the pre-flight from spawning a runner for this throwaway
+    // project: a spawned one adopts it into the live daemon, whose handles on the tree outlive the
+    // suite and leave the cleanup below failing with ENOTEMPTY or EPERM.
+    writeFileSync(path.join(dir, '.runner-ensure.lock'), String(process.pid))
     return dir
 }
 const writeStatus = (dir, status) => writeFileSync(path.join(dir, '.status.json'), JSON.stringify(status))
@@ -47,7 +55,7 @@ await test('a project that never swept is the registration path, not a dead daem
 // dead-project assertions below do not flake on the daemon's recycle schedule.
 async function waitOutOfBootGrace() {
     for (let i = 0; i < 45 && daemonBootGraceActive(); i += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 1000))
+        await sleep(1000)
     }
 }
 
@@ -83,5 +91,20 @@ await test('GM_MCP_DAEMON_PREFLIGHT=0 bypasses the check', async () => {
     }
 })
 
-rmSync(scratch, { recursive: true, force: true })
+// A handle on the tree can outlive the process that opened it, so one rmSync is not enough: retry
+// for a bounded time, then fail loudly rather than leave a temp tree behind.
+async function removeScratchTree(dir) {
+    for (let attempt = 1; attempt <= 20; attempt += 1) {
+        try {
+            rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+            return
+        } catch (error) {
+            if (!existsSync(dir)) return
+            if (attempt === 20) throw new Error(`could not remove ${dir} after ${attempt} attempts: ${error.message}`)
+            await sleep(250)
+        }
+    }
+}
+
+await removeScratchTree(scratch)
 console.log(`\n${passed} passed, ${process.exitCode ? 'FAILED' : '0 failed'}`)
