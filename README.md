@@ -127,6 +127,44 @@ the registration path rather than a dead daemon and still dispatches, as does
 one mid-handoff (`daemonBootGraceActive`, `runner_update_in_progress`). Opt
 out with `GM_MCP_DAEMON_PREFLIGHT=0`.
 
+## Transport: stdio (default) and streamable HTTP
+
+`gm` is registered in `~/.claude.json` as a user-scope MCP server:
+
+```json
+{ "mcpServers": { "gm": { "command": "node", "args": ["C:\\Users\\user\\.gm-tools\\gm-mcp-server.mjs"] } } }
+```
+
+That is a **stdio** server: the client owns the child process on a pipe. When
+that one connection drops, the tool is gone for the rest of the session and
+nothing can re-attach it -- the server cannot reconnect itself and the client
+will not re-spawn it. It surfaces as `No such tool available: mcp__gm__gm. Its
+MCP server 'gm' has disconnected`, and the only cure is `/mcp` -> gm ->
+Reconnect, or restarting the session.
+
+Both transports ship in the same bundle, so the durable one is a one-line
+registration change:
+
+```
+claude mcp remove gm -s user && claude mcp add --transport http gm http://127.0.0.1:8787/mcp -s user
+```
+
+The HTTP side is **stateless** (no session id, one request per call), so a
+client that disappears and comes back is just another request, and it binds
+`127.0.0.1` only. Manage it with:
+
+```
+node C:\Users\user\.gm-tools\gm-mcp-server.mjs ensure-http          # start if nothing answers, print the url
+node C:\Users\user\.gm-tools\gm-mcp-server.mjs http-status          # is it answering
+node C:\Users\user\.gm-tools\gm-mcp-server.mjs --http --port 8787   # run it in the foreground
+```
+
+A stdio server seeds it too: on start it health-probes the port and spawns the
+shared HTTP server detached if nothing answers, so the durable transport is up
+before any client asks for it. `GM_MCP_HTTP_SINGLETON=0` opts out,
+`GM_MCP_HTTP_PORT` moves the port. Because no state is carried between requests,
+a restart of the HTTP server never loses an in-flight dispatch.
+
 ## Development
 
 `bin/gm-mcp-server.js` is a committed build artifact, not hand-edited source --
