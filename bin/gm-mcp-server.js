@@ -36480,7 +36480,7 @@ var StdioServerTransport = class {
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 
 // node_modules/js-yaml/dist/js-yaml.mjs
 var NOT_RESOLVED = /* @__PURE__ */ Symbol("NOT_RESOLVED");
@@ -38316,13 +38316,338 @@ var CHOMPING_CLIP = CHOMPING_MODE.CLIP;
 var CHOMPING_STRIP = CHOMPING_MODE.STRIP;
 var CHOMPING_KEEP = CHOMPING_MODE.KEEP;
 
+// src/response-compact.js
+var NOISE_KEYS = /* @__PURE__ */ new Set(["dispatch_id", "request_fingerprint"]);
+function envPositiveInt(name, fallback) {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+var LONG_TEXT_INLINE_MAX_CEILING = 1048576;
+var LONG_TEXT_FIELD_TRUNCATE_AT = Math.min(envPositiveInt("GM_MCP_LONG_TEXT_INLINE_MAX", 400), LONG_TEXT_INLINE_MAX_CEILING);
+var PLAIN_TEXT_OUTPUT_INLINE_MAX = Math.min(envPositiveInt("GM_MCP_STDOUT_INLINE_MAX", 32768), LONG_TEXT_INLINE_MAX_CEILING);
+var FILE_READ_INLINE_MAX = Math.min(envPositiveInt("GM_MCP_FILE_READ_INLINE_MAX", 65536), LONG_TEXT_INLINE_MAX_CEILING);
+var NEVER_TRUNCATE_KEYS = /* @__PURE__ */ new Set(["error", "reason", "residuals"]);
+var NO_KEYS = /* @__PURE__ */ new Set();
+var EXPANDED_RECALL_KEYS = /* @__PURE__ */ new Set(["text"]);
+var EXEC_OUTPUT_KEYS = /* @__PURE__ */ new Set(["stdout", "stderr", "result"]);
+var EXEC_OUTPUT_FIELD_TRUNCATE_AT = 16e3;
+var HIT_ARRAY_KEYS = /* @__PURE__ */ new Set(["recall_hits", "bm25_hits", "vector_hits", "commits"]);
+var HIT_NOISE_KEYS = /* @__PURE__ */ new Set(["cos", "recency"]);
+var FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS = /* @__PURE__ */ new Set([
+  "session_mismatch",
+  "instruction_unchanged",
+  "instruction_suppressible_by_asserting_hash",
+  "recall_embed_failed",
+  "should_residual_scan",
+  "fsm_graph_rejected"
+]);
+var EMPTY_LIST_IS_THE_ANSWER_KEYS = /* @__PURE__ */ new Set([
+  "edges",
+  "reachable",
+  "reached",
+  "callees",
+  "functions",
+  "matches",
+  "definitions",
+  "references"
+]);
+function untruncatedKeysFor(verb, body) {
+  const expandsRecall = verb === "recall" && body && typeof body === "object" && (body.full === true || typeof body.key === "string");
+  return expandsRecall ? EXPANDED_RECALL_KEYS : NO_KEYS;
+}
+function resolvedInlineMax(inlineMax, key) {
+  if (Number.isFinite(inlineMax) && inlineMax > 0) return Math.floor(inlineMax);
+  return EXEC_OUTPUT_KEYS.has(key) ? EXEC_OUTPUT_FIELD_TRUNCATE_AT : LONG_TEXT_FIELD_TRUNCATE_AT;
+}
+function truncateLongText(value, key, outPath, plainTextFile, untruncatedKeys = NO_KEYS, inlineMax) {
+  if (typeof value !== "string") return value;
+  const budget = resolvedInlineMax(inlineMax, key);
+  if (EXEC_OUTPUT_KEYS.has(key)) {
+    if (value.length <= budget) return value;
+    const where = plainTextFile ? `the full text is in ${plainTextFile}, plain text with a '## ${key}' section, readable directly` : `the full output is in ${outPath}, in the JSON string field 'data' (parse it, then read '${key}')`;
+    return `${value.slice(0, budget)}... [OUTPUT TRUNCATED: showing ${budget} of ${value.length} chars of '${key}' -- ${where}]`;
+  }
+  if (value.length <= budget) return value;
+  if (NEVER_TRUNCATE_KEYS.has(key) || untruncatedKeys.has(key)) return value;
+  return `${value.slice(0, budget)}... [${value.length} chars total, full text at ${outPath} field '${key}']`;
+}
+function dropDuplicateRows(rows) {
+  const seen = /* @__PURE__ */ new Set();
+  return rows.filter((row) => {
+    if (!row || typeof row !== "object") return true;
+    const fingerprint = JSON.stringify(row);
+    if (seen.has(fingerprint)) return false;
+    seen.add(fingerprint);
+    return true;
+  });
+}
+function cleanHit(hit, outPath, plainTextFile, untruncatedKeys, inlineMax) {
+  if (!hit || typeof hit !== "object") return hit;
+  const out = {};
+  for (const [k, v] of Object.entries(hit)) {
+    if (HIT_NOISE_KEYS.has(k)) continue;
+    if (v === "" || v === null || v === void 0) continue;
+    out[k] = typeof v === "string" ? truncateLongText(v, k, outPath, plainTextFile, untruncatedKeys, inlineMax) : v && typeof v === "object" && !Array.isArray(v) ? cleanHit(v, outPath, plainTextFile, untruncatedKeys, inlineMax) : v;
+  }
+  return out;
+}
+function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys = NO_KEYS, inlineMax) {
+  if (Array.isArray(value)) {
+    if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map((h) => cleanHit(h, outPath, plainTextFile, untruncatedKeys, inlineMax)));
+    const cleaned = value.map((v) => cleanResponse(v, void 0, outPath, plainTextFile, untruncatedKeys, inlineMax)).filter((v) => v !== void 0);
+    return dropDuplicateRows(cleaned);
+  }
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (NOISE_KEYS.has(k)) continue;
+      if (v === null || v === void 0 || v === "") continue;
+      if (v === false && FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS.has(k)) continue;
+      if (plainTextFile && k === "result" && v && typeof v === "object") {
+        const serialized = JSON.stringify(v);
+        if (serialized.length > resolvedInlineMax(inlineMax, k)) {
+          out[k] = truncateLongText(serialized, k, outPath, plainTextFile, NO_KEYS, inlineMax);
+          continue;
+        }
+      }
+      const cleanedV = cleanResponse(v, k, outPath, plainTextFile, untruncatedKeys, inlineMax);
+      if (Array.isArray(cleanedV) && cleanedV.length === 0 && !EMPTY_LIST_IS_THE_ANSWER_KEYS.has(k)) continue;
+      if (cleanedV && typeof cleanedV === "object" && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue;
+      out[k] = cleanedV;
+    }
+    return out;
+  }
+  if (typeof value === "string" && keyHint) return truncateLongText(value, keyHint, outPath, plainTextFile, untruncatedKeys, inlineMax);
+  return value;
+}
+var WIRE_EXCERPT_CHARS = 160;
+var WIRE_EXCERPT_IMMUNE_KEYS = /* @__PURE__ */ new Set(["id", "key", "status", "session_id", "verb"]);
+var WIRE_OMITTED_KEYS = /* @__PURE__ */ new Set(["route_hint", "reply_hash", "orient_nouns"]);
+var WIRE_OMITTED_UNLESS_SIBLING_TRUE = /* @__PURE__ */ new Map([["session_owner_before_this_dispatch", "session_mismatch"]]);
+var WIRE_OMITTED_WHEN_EVERY_ROW_IS_ALREADY_IN = /* @__PURE__ */ new Map([
+  ["vector_hits", "hits"],
+  ["recall_hits", "hits"],
+  ["bm25_hits", "hits"]
+]);
+var WIRE_OMITTED_SUBKEYS = /* @__PURE__ */ new Map([
+  ["prd_items_truncated", ["inlined_rows_are"]],
+  ["mutables_pending_truncated", ["inlined_rows_are"]]
+]);
+var WIRE_HIT_ARRAY_KEYS = /* @__PURE__ */ new Set(["recall_hits", "bm25_hits", "vector_hits"]);
+var WIRE_ROW_ARRAY_KEYS = /* @__PURE__ */ new Set(["ready_wave", "prd_items", "mutables_pending", "commits"]);
+var WIRE_HITS_INLINE_MAX = 4;
+var WIRE_CONFIG_CHANGED_INLINE_MAX = 1;
+var WIRE_CONFIG_CHANGED_KEYS_INLINE_MAX = 3;
+var WIRE_FULL_PAYLOAD_VIA = 'dispatch with {"full_response": true}';
+var omitFromWire = /* @__PURE__ */ Symbol("omitFromWire");
+function withoutBlankValues(obj) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === null || v === void 0 || v === "") continue;
+    if (Array.isArray(v) && v.length === 0) continue;
+    out[k] = v;
+  }
+  return out;
+}
+function omitKeys(obj, keys) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (keys.includes(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+function rowKeys(rows) {
+  if (!Array.isArray(rows)) return null;
+  const keys = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || typeof row.key !== "string") return null;
+    keys.push(row.key);
+  }
+  return keys;
+}
+function repeatsRowsOf(response, key, fusedKey) {
+  const keys = rowKeys(response[key]);
+  const fused = rowKeys(response[fusedKey]);
+  if (!keys || !fused) return false;
+  return keys.every((k) => fused.includes(k));
+}
+function wireExcerpt(value) {
+  if (typeof value !== "string" || value.length <= WIRE_EXCERPT_CHARS) return value;
+  return `${value.slice(0, WIRE_EXCERPT_CHARS)}...+${value.length - WIRE_EXCERPT_CHARS}`;
+}
+function excerptRow(row) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return row;
+  const out = {};
+  for (const [k, v] of Object.entries(row)) out[k] = WIRE_EXCERPT_IMMUNE_KEYS.has(k) ? v : wireExcerpt(v);
+  return out;
+}
+function compactCodeinsightOverview(overview) {
+  if (!overview || typeof overview !== "object") return overview;
+  const coverage = overview.coverage && typeof overview.coverage === "object" ? overview.coverage : {};
+  return withoutBlankValues({
+    files: overview.file_count,
+    symbols: overview.symbol_count,
+    semantic_coverage: coverage.semantic_search_covers_files_fraction,
+    available: overview.codeinsight_available
+  });
+}
+function compactCodeinsightStart(start) {
+  if (!start || typeof start !== "object" || start.ready !== true) return start;
+  return { ready: true };
+}
+function compactConfigChanged(rows) {
+  if (!Array.isArray(rows)) return rows;
+  const oldestFirst = [...rows].sort((a, b) => (a?.ts || 0) - (b?.ts || 0));
+  return oldestFirst.slice(-WIRE_CONFIG_CHANGED_INLINE_MAX).map((row) => {
+    const changed = Array.isArray(row?.changed) ? row.changed : [];
+    const kept = changed.slice(0, WIRE_CONFIG_CHANGED_KEYS_INLINE_MAX);
+    return withoutBlankValues({
+      tier: row?.tier,
+      old_sha: row?.old_sha,
+      new_sha: row?.new_sha,
+      ts: row?.ts,
+      changed_count: row?.changed_count,
+      changed: kept.length ? kept : null,
+      changed_omitted: changed.length - kept.length
+    });
+  });
+}
+var WIRE_SCAN_WARNINGS_INLINE_MAX = 8;
+function compactSupplyChainScan(scan) {
+  if (!scan || typeof scan !== "object") return scan;
+  const hasFindings = ["blocked", "failing", "warnings", "symlinkEscapes"].some((k) => Array.isArray(scan[k]) && scan[k].length > 0);
+  if (!hasFindings) return omitFromWire;
+  const warnings = Array.isArray(scan.warnings) ? scan.warnings : [];
+  if (warnings.length <= WIRE_SCAN_WARNINGS_INLINE_MAX) return scan;
+  return {
+    ...scan,
+    warnings: warnings.slice(0, WIRE_SCAN_WARNINGS_INLINE_MAX),
+    warningsOmitted: warnings.length - WIRE_SCAN_WARNINGS_INLINE_MAX
+  };
+}
+function compactDreamRsiStrategy(strategy) {
+  if (!strategy || typeof strategy !== "object") return strategy;
+  const evidence = Array.isArray(strategy.evidence) ? strategy.evidence : [];
+  return withoutBlankValues({
+    selection: strategy.selection,
+    observations: strategy.observation_count,
+    succeeded: strategy.successful_dispatch_count,
+    failed: strategy.failed_dispatch_count,
+    gate_drift_failures: strategy.gate_drift_failure_count,
+    evidence_rows: evidence.length
+  });
+}
+function compactDreamRsiReplay(replay) {
+  if (!replay || typeof replay !== "object") return replay;
+  const replays = Array.isArray(replay.replays) ? replay.replays : [];
+  return withoutBlankValues({
+    ok: replay.ok,
+    selection: replay.selection,
+    score: replay.score,
+    replay_rows: replays.length
+  });
+}
+var WIRE_FIELD_COMPACTORS = /* @__PURE__ */ new Map([
+  ["codeinsight_overview", compactCodeinsightOverview],
+  ["codeinsight_start", compactCodeinsightStart],
+  ["config_changed", compactConfigChanged],
+  ["supply_chain_scan", compactSupplyChainScan],
+  ["dream_rsi_strategy", compactDreamRsiStrategy],
+  ["dream_rsi_replay", compactDreamRsiReplay]
+]);
+function unchangedByCompaction(before, after) {
+  return JSON.stringify(before) === JSON.stringify(after);
+}
+function compactWireResponse(response, outPath) {
+  if (!response || typeof response !== "object" || Array.isArray(response)) return response;
+  const omitted = [];
+  const shortened = [];
+  const out = {};
+  for (const [key, value] of Object.entries(response)) {
+    if (WIRE_OMITTED_KEYS.has(key)) {
+      omitted.push(key);
+      continue;
+    }
+    const siblingGate = WIRE_OMITTED_UNLESS_SIBLING_TRUE.get(key);
+    if (siblingGate && response[siblingGate] !== true) {
+      omitted.push(key);
+      continue;
+    }
+    const fusedInKey = WIRE_OMITTED_WHEN_EVERY_ROW_IS_ALREADY_IN.get(key);
+    if (fusedInKey && repeatsRowsOf(response, key, fusedInKey)) {
+      omitted.push(key);
+      continue;
+    }
+    const omittedSubkeys = WIRE_OMITTED_SUBKEYS.get(key);
+    let next = omittedSubkeys && value && typeof value === "object" && !Array.isArray(value) ? omitKeys(value, omittedSubkeys) : value;
+    const fieldCompactor = WIRE_FIELD_COMPACTORS.get(key);
+    if (fieldCompactor) next = fieldCompactor(next);
+    else if (WIRE_HIT_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_HITS_INLINE_MAX).map(excerptRow);
+    else if (WIRE_ROW_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.map(excerptRow);
+    if (key === "data" && next && typeof next === "object" && !Array.isArray(next)) {
+      const inner = compactWireResponse(next, outPath);
+      if (inner !== next) {
+        const { wire_compacted: innerWire, ...innerRest } = inner;
+        if (innerWire?.omitted) omitted.push(`data.${innerWire.omitted}`);
+        if (innerWire?.shortened) shortened.push(String(innerWire.shortened).split(" ").map((s) => `data.${s}`).join(" "));
+        next = innerRest;
+      }
+    }
+    if (next === omitFromWire) {
+      omitted.push(key);
+      continue;
+    }
+    out[key] = next;
+    if (unchangedByCompaction(value, next)) continue;
+    shortened.push(Array.isArray(value) && Array.isArray(next) ? `${key}(${next.length}/${value.length})` : key);
+  }
+  if (!omitted.length && !shortened.length) return response;
+  out.wire_compacted = withoutBlankValues({
+    omitted: omitted.join(" "),
+    shortened: shortened.join(" "),
+    full_payload_at: outPath,
+    full_payload_via: WIRE_FULL_PAYLOAD_VIA
+  });
+  return out;
+}
+
 // src/dispatch.js
+function projectRootFor(dir) {
+  const resolved = path.resolve(dir);
+  try {
+    const top = execFileSync("git", ["-C", resolved, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }).trim();
+    return top ? path.resolve(top) : resolved;
+  } catch {
+    return resolved;
+  }
+}
+function inlineMaxForVerb({ verb, isPlainText, fullResponse, maxChars }) {
+  const requested = Number(maxChars);
+  if (Number.isFinite(requested) && requested > 0) return Math.min(Math.floor(requested), LONG_TEXT_INLINE_MAX_CEILING);
+  if (fullResponse) return LONG_TEXT_INLINE_MAX_CEILING;
+  if (isPlainText) return PLAIN_TEXT_OUTPUT_INLINE_MAX;
+  if (verb === "fs_read") return FILE_READ_INLINE_MAX;
+  return void 0;
+}
 var counter = 0;
 function nextN(sessionId) {
   counter += 1;
   return `${sessionId}-${process.pid}-${Date.now()}-${counter}`;
 }
+var UNEXPANDED_INTERPOLATION = /\$\{[^}]*\}|\$\(|\$env:|\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%|`/i;
+function unsafeSpoolName(role, value) {
+  if (typeof value !== "string" || !value) return null;
+  if (value.includes("\0") || value === "." || value === ".." || value.includes("/") || value.includes("\\")) {
+    return `${role} ${JSON.stringify(value)} is not a single spool name component: it carries a NUL byte, a path separator, or is a dot component`;
+  }
+  const found = UNEXPANDED_INTERPOLATION.exec(value);
+  if (!found) return null;
+  return `${role} ${JSON.stringify(value)} still carries the unexpanded interpolation ${JSON.stringify(found[0])} -- the spool ABI is in/<verb>/<session_id>-<N>.txt, so this would land as a literal path component that no daemon ever claims; pass the expanded value`;
+}
 function publishSpoolRequest(inDir, inPath, task, body) {
+  const unsafe = unsafeSpoolName("task", task);
+  if (unsafe) throw new Error(unsafe);
   fs.mkdirSync(inDir, { recursive: true });
   const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.tmp`);
   try {
@@ -38331,16 +38656,6 @@ function publishSpoolRequest(inDir, inPath, task, body) {
   } finally {
     if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
   }
-}
-function inaccessibleSpoolRootError(root, spoolDir, error62) {
-  const code = error62 && typeof error62 === "object" && "code" in error62 ? error62.code : void 0;
-  return dump({
-    error: `GM cannot create its project-local spool at ${spoolDir}: ${error62.message}`,
-    error_code: code === "EACCES" || code === "EPERM" ? "spool_root_not_writable" : "spool_root_unavailable",
-    cwd: root,
-    spool_dir: spoolDir,
-    remediation: "Use a readable and writable project root for cwd and git_root_override. GM stores dispatch state under <root>/.gm and does not redirect it to another directory."
-  }, { lineWidth: 100 });
 }
 function normalizedObjectBody(verb, body) {
   if (body === void 0 || body === null) return { value: {} };
@@ -38361,234 +38676,23 @@ function normalizedObjectBody(verb, body) {
   }
   return { value: body };
 }
-function normalizedBashCommand(body) {
-  const normalized = normalizedObjectBody("bash", body);
-  if (normalized.error) return normalized;
-  const keys = Object.keys(normalized.value);
-  const unsupportedKeys = keys.filter((key) => key !== "command");
-  if (unsupportedKeys.length > 0) {
-    return { error: `bash body supports only command; received unsupported ${unsupportedKeys.length === 1 ? "field" : "fields"}: ${unsupportedKeys.join(", ")}.` };
+var CODESEARCH_INTEGER_FIELDS = ["limit", "head_limit", "k", "max_results", "maxResults", "max_matches", "max_files", "max_chars", "timeout_ms"];
+var CODESEARCH_BOOLEAN_FIELDS = ["case_insensitive", "whole_word", "comments_only"];
+function withCodesearchScalarsCoerced(verb, body) {
+  if (verb !== "codesearch") return body;
+  const coerced = { ...body };
+  for (const field of CODESEARCH_INTEGER_FIELDS) {
+    if (typeof coerced[field] === "string" && /^[0-9]+$/.test(coerced[field].trim())) coerced[field] = Number(coerced[field]);
   }
-  if (!Object.hasOwn(normalized.value, "command")) {
-    return { error: "bash body requires command, a non-empty string." };
+  for (const field of CODESEARCH_BOOLEAN_FIELDS) {
+    if (coerced[field] === "true" || coerced[field] === "false") coerced[field] = coerced[field] === "true";
   }
-  if (typeof normalized.value.command !== "string") {
-    return { error: `bash body.command must be a string; received ${Array.isArray(normalized.value.command) ? "an array" : typeof normalized.value.command}.` };
-  }
-  if (!normalized.value.command.trim()) {
-    return { error: "bash body.command must be a non-empty string." };
-  }
-  return { value: normalized.value.command };
+  return coerced;
 }
-function objectBodyDiagnostic(verb, body) {
-  if (verb === "prd-add" && (typeof body.id !== "string" || !body.id.trim())) {
-    return "prd-add requires a non-empty body.id. A blank id would create an unaddressable PRD row; provide a stable identifier before dispatching.";
-  }
-  if (verb !== "git_merge" || typeof body.ref === "string" && body.ref.trim()) return void 0;
-  if (typeof body.branch === "string" && body.branch.trim()) {
-    return 'git_merge requires body.ref. body.branch is not a git_merge field; call again with {"ref":"' + body.branch + '"}.';
-  }
-  return 'git_merge requires a non-empty body.ref, for example {"ref":"origin/main"}.';
-}
-var RUNNER_DIR = path.join(os.homedir(), ".gm-tools");
-var RUNNER_PATH = path.join(RUNNER_DIR, process.platform === "win32" ? "agentplug-runner.exe" : "agentplug-runner");
-var ENSURE_INTERVAL_MS = 15e3;
-var ENSURE_LEASE_MS = 5e3;
-var lastEnsuredAtByRoot = /* @__PURE__ */ new Map();
-function runnerBinaryMissing() {
-  return !fs.existsSync(RUNNER_PATH);
-}
-var SWEEPER_HEARTBEAT_TRUSTED_MS = 12e4;
-function spoolAlreadySweptBySomeone(root) {
-  try {
-    const status = JSON.parse(fs.readFileSync(path.join(root, ".gm", "exec-spool", ".status.json"), "utf8"));
-    return Date.now() - (status.ts || 0) < SWEEPER_HEARTBEAT_TRUSTED_MS;
-  } catch {
-    return false;
-  }
-}
-function claimRunnerEnsure(root) {
-  const lockPath = path.join(root, ".gm", "exec-spool", ".runner-ensure.lock");
-  const claim2 = () => {
-    const fd = fs.openSync(lockPath, "wx", 384);
-    try {
-      fs.writeFileSync(fd, `${process.pid} ${Date.now()}`, "utf8");
-    } finally {
-      fs.closeSync(fd);
-    }
-    return true;
-  };
-  try {
-    return claim2();
-  } catch (error62) {
-    if (error62?.code !== "EEXIST") return false;
-  }
-  try {
-    if (Date.now() - fs.statSync(lockPath).mtimeMs <= ENSURE_LEASE_MS) return false;
-    const stalePath = `${lockPath}.${process.pid}.${Date.now()}.stale`;
-    fs.renameSync(lockPath, stalePath);
-    fs.unlinkSync(stalePath);
-  } catch {
-    return false;
-  }
-  try {
-    return claim2();
-  } catch {
-    return false;
-  }
-}
-function ensureSpoolRunnerRunning(root) {
-  if (runnerBinaryMissing()) return;
-  const now = Date.now();
-  const last = lastEnsuredAtByRoot.get(root) || 0;
-  if (now - last < ENSURE_INTERVAL_MS) return;
-  lastEnsuredAtByRoot.set(root, now);
-  if (spoolAlreadySweptBySomeone(root)) return;
-  if (!claimRunnerEnsure(root)) return;
-  try {
-    const child = spawn(RUNNER_PATH, ["spool"], {
-      cwd: root,
-      env: { ...process.env, CLAUDE_PROJECT_DIR: root },
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    });
-    child.on("error", () => {
-    });
-    child.unref();
-  } catch {
-  }
-}
-function sleep(ms, signal) {
-  return new Promise((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(t);
-      signal?.removeEventListener("abort", onAbort);
-      reject(new Error("aborted"));
-    };
-    const t = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
-  return new Promise((resolve, reject) => {
-    let watcher;
-    let wakeTimer;
-    let fallbackTimer;
-    let settled = false;
-    const finish = (wakeSource, error62) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(wakeTimer);
-      clearTimeout(fallbackTimer);
-      watcher?.close();
-      signal?.removeEventListener("abort", onAbort);
-      if (error62) reject(error62);
-      else resolve(wakeSource);
-    };
-    const onAbort = () => finish(void 0, new Error("aborted"));
-    const wake = (_event, filename) => {
-      if (!filename || filename.toString() === path.basename(outPath)) finish("filesystem_event");
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    try {
-      watcher = fs.watch(outDir, { persistent: false }, wake);
-      watcher.on("error", () => {
-        watcher?.close();
-        watcher = void 0;
-      });
-    } catch {
-      watcher = void 0;
-    }
-    if (fs.existsSync(outPath)) return finish("already_landed");
-    wakeTimer = setTimeout(() => finish("deadline"), Math.max(1, waitMs));
-    fallbackTimer = setTimeout(() => finish("fallback_poll"), Math.min(Math.max(25, fallbackMs), Math.max(1, waitMs)));
-  });
-}
-var NOISE_KEYS = /* @__PURE__ */ new Set(["dispatch_id", "request_fingerprint"]);
-var LONG_TEXT_FIELD_TRUNCATE_AT = 400;
-var COLLECTION_ITEMS_TRUNCATE_AT = 40;
 var RESULT_CHUNK_DEFAULT_CHARACTERS = 12e3;
 var RESULT_CHUNK_MAX_CHARACTERS = 16e3;
 var RESULT_FILE_MAX_BYTES = 4 * 1024 * 1024;
 var RESULT_READ_CHUNK_BYTES = 64 * 1024;
-var NEVER_TRUNCATE_KEYS = /* @__PURE__ */ new Set(["error", "reason", "residuals"]);
-var EXEC_OUTPUT_KEYS = /* @__PURE__ */ new Set(["stdout", "stderr", "result"]);
-var EXEC_OUTPUT_FIELD_TRUNCATE_AT = 16e3;
-function truncateLongText(value, key, outPath) {
-  if (typeof value !== "string") return value;
-  if (NEVER_TRUNCATE_KEYS.has(key)) return value;
-  const truncateAt = EXEC_OUTPUT_KEYS.has(key) ? EXEC_OUTPUT_FIELD_TRUNCATE_AT : LONG_TEXT_FIELD_TRUNCATE_AT;
-  if (value.length <= truncateAt) return value;
-  return `${value.slice(0, truncateAt)}... [${value.length} chars total; retrieve it with gm_result using result_file ${outPath} and field '${key}']`;
-}
-function truncateCollection(value, key, outPath) {
-  if (value.length <= COLLECTION_ITEMS_TRUNCATE_AT) return value;
-  const field = key || "nested array";
-  return [
-    ...value.slice(0, COLLECTION_ITEMS_TRUNCATE_AT),
-    `... [${value.length - COLLECTION_ITEMS_TRUNCATE_AT} additional items; retrieve the full result with gm_result using result_file ${outPath} and field '${field}']`
-  ];
-}
-var HIT_ARRAY_KEYS = /* @__PURE__ */ new Set(["recall_hits", "bm25_hits", "vector_hits", "commits"]);
-var HIT_NOISE_KEYS = /* @__PURE__ */ new Set(["cos", "recency"]);
-var FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS = /* @__PURE__ */ new Set([
-  "session_mismatch",
-  "instruction_unchanged",
-  "instruction_suppressible_by_asserting_hash",
-  "recall_embed_failed",
-  "should_residual_scan",
-  "fsm_graph_rejected"
-]);
-function dropDuplicateRows(rows) {
-  const seen = /* @__PURE__ */ new Set();
-  return rows.filter((row) => {
-    if (!row || typeof row !== "object") return true;
-    const fingerprint = JSON.stringify(row);
-    if (seen.has(fingerprint)) return false;
-    seen.add(fingerprint);
-    return true;
-  });
-}
-function cleanHit(hit, outPath) {
-  if (!hit || typeof hit !== "object") return hit;
-  const out = {};
-  for (const [k, v] of Object.entries(hit)) {
-    if (HIT_NOISE_KEYS.has(k)) continue;
-    if (v === "" || v === null || v === void 0) continue;
-    out[k] = typeof v === "string" ? truncateLongText(v, k, outPath) : v && typeof v === "object" && !Array.isArray(v) ? cleanHit(v, outPath) : v;
-  }
-  return out;
-}
-function cleanResponse(value, keyHint, outPath) {
-  if (Array.isArray(value)) {
-    if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map((h) => cleanHit(h, outPath)));
-    const cleaned = value.map((v) => cleanResponse(v, void 0, outPath)).filter((v) => v !== void 0);
-    return truncateCollection(dropDuplicateRows(cleaned), keyHint, outPath);
-  }
-  if (value && typeof value === "object") {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) {
-      if (NOISE_KEYS.has(k)) continue;
-      if (v === null || v === void 0 || v === "") continue;
-      if (v === false && FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS.has(k)) continue;
-      const cleanedV = cleanResponse(v, k, outPath);
-      if (Array.isArray(cleanedV) && cleanedV.length === 0) continue;
-      if (cleanedV && typeof cleanedV === "object" && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue;
-      out[k] = cleanedV;
-    }
-    return out;
-  }
-  if (typeof value === "string" && keyHint) return truncateLongText(value, keyHint, outPath);
-  return value;
-}
-var BROWSER_PLAIN_TEXT_VERBS = ["serp", "browser", "cdp"];
-var EXEC_FAMILY_VERBS = ["exec_js", "nodejs", "javascript", "node", "js", "typescript", "bash", "sh", "shell", "zsh", "python", "py", "powershell", "ps1", "ssh", "go", "rust", "c", "cpp", "java", "deno"];
-var PLAIN_TEXT_BODY_VERBS = /* @__PURE__ */ new Set([...EXEC_FAMILY_VERBS, ...BROWSER_PLAIN_TEXT_VERBS]);
-var TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS);
 function assertResultFileInsideSpool(root, resultFile) {
   const outDir = path.join(root, ".gm", "exec-spool", "out");
   const candidate = path.resolve(root, resultFile);
@@ -38613,21 +38717,13 @@ function openedDescriptorPath(fd) {
 function openResultFile(root, resultFile) {
   const { candidate, resolvedFile, resolvedOutDir } = assertResultFileInsideSpool(root, resultFile);
   const before = fs.lstatSync(candidate);
-  if (!before.isFile() || before.nlink !== 1) {
-    throw new Error("result_file must be an unlinked regular spool file");
-  }
+  if (!before.isFile() || before.nlink !== 1) throw new Error("result_file must be an unlinked regular spool file");
   const fd = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
     const opened = fs.fstatSync(fd);
-    if (!opened.isFile() || opened.nlink !== 1) {
-      throw new Error("result_file must be an unlinked regular spool file");
-    }
-    if (opened.dev !== before.dev || opened.ino !== before.ino) {
-      throw new Error("result_file changed while opening");
-    }
-    if (opened.size > RESULT_FILE_MAX_BYTES) {
-      throw new Error(`result_file exceeds ${RESULT_FILE_MAX_BYTES} byte limit`);
-    }
+    if (!opened.isFile() || opened.nlink !== 1) throw new Error("result_file must be an unlinked regular spool file");
+    if (opened.dev !== before.dev || opened.ino !== before.ino) throw new Error("result_file changed while opening");
+    if (opened.size > RESULT_FILE_MAX_BYTES) throw new Error(`result_file exceeds ${RESULT_FILE_MAX_BYTES} byte limit`);
     const descriptorPath = openedDescriptorPath(fd);
     if (descriptorPath) {
       const relative = path.relative(resolvedOutDir, descriptorPath);
@@ -38699,9 +38795,7 @@ function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_DEFAULT
   if (typeof result_file !== "string" || !result_file) return toYaml({ error: "result_file required" });
   if (field !== void 0 && (typeof field !== "string" || !field)) return toYaml({ error: "field must be a non-empty string when provided" });
   if (!Number.isInteger(offset) || offset < 0) return toYaml({ error: "offset must be a non-negative integer" });
-  if (!Number.isInteger(limit) || limit < 1 || limit > RESULT_CHUNK_MAX_CHARACTERS) {
-    return toYaml({ error: `limit must be an integer from 1 through ${RESULT_CHUNK_MAX_CHARACTERS}` });
-  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > RESULT_CHUNK_MAX_CHARACTERS) return toYaml({ error: `limit must be an integer from 1 through ${RESULT_CHUNK_MAX_CHARACTERS}` });
   try {
     const { fd, file: file2, size } = openResultFile(root, result_file);
     try {
@@ -38735,11 +38829,343 @@ function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_DEFAULT
     return toYaml({ error: `result_file could not be read: ${error62.message}` });
   }
 }
+var PLAIN_TEXT_BODY_FIELDS = ["raw_body", "code", "script", "command", "source", "text", "body"];
+function plainTextFromBody(body) {
+  if (typeof body === "string") return body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return void 0;
+  const present2 = PLAIN_TEXT_BODY_FIELDS.filter((field) => typeof body[field] === "string");
+  return present2.length === 1 ? body[present2[0]] : void 0;
+}
+var GLOB_FILTER_FIELDS = ["glob", "path_glob", "include"];
+var GLOB_EXCLUDE_FIELDS = ["exclude_glob", "exclude_globs"];
+function withGlobFiltersCoerced(verb, body) {
+  if (!body || typeof body !== "object") return { value: body };
+  const coerced = { ...body };
+  for (const field of [...GLOB_FILTER_FIELDS, ...GLOB_EXCLUDE_FIELDS]) {
+    const value = coerced[field];
+    if (value === null || value === void 0) continue;
+    const single = `${verb} body.${field}`;
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return { error: `${single} is an empty string -- a blank glob is dropped before the scan runs, so it silently searched everything; omit the field to search unscoped` };
+      coerced[field] = trimmed;
+      continue;
+    }
+    if (!Array.isArray(value)) {
+      return { error: `${single} must be a string or an array of strings; received ${typeof value}. This filter takes one glob, e.g. {"${field}":"**/*.rs"} or {"${field}":["**/*.rs","!**/dist/**"]}` };
+    }
+    if (value.length === 0) return { error: `${single} is an empty array -- a blank glob is dropped before the scan runs; omit the field to search unscoped` };
+    const patterns = [];
+    for (const element of value) {
+      if (typeof element !== "string" || !element.trim()) {
+        return { error: `${single} is an array whose entries must all be non-empty glob strings; received ${JSON.stringify(element)}` };
+      }
+      patterns.push(element.trim());
+    }
+    coerced[field] = patterns;
+  }
+  return { value: coerced };
+}
+function objectBodyDiagnostic(verb, body) {
+  if (verb === "prd-add" && (typeof body.id !== "string" || !body.id.trim())) {
+    return "prd-add requires a non-empty body.id. A blank id would create an unaddressable PRD row; provide a stable identifier before dispatching.";
+  }
+  if (verb !== "git_merge" || typeof body.ref === "string" && body.ref.trim()) return void 0;
+  if (typeof body.branch === "string" && body.branch.trim()) {
+    return 'git_merge requires body.ref. body.branch is not a git_merge field; call again with {"ref":"' + body.branch + '"}.';
+  }
+  return 'git_merge requires a non-empty body.ref, for example {"ref":"origin/main"}.';
+}
+var RUNNER_DIR = path.join(os.homedir(), ".gm-tools");
+var RUNNER_PATH = path.join(RUNNER_DIR, process.platform === "win32" ? "agentplug-runner.exe" : "agentplug-runner");
+var AGENTPLUG_DIR = path.join(os.homedir(), ".agentplug");
+var GLOBAL_DAEMON_STATUS_PATH = path.join(AGENTPLUG_DIR, "daemon-status.json");
+var GLOBAL_DAEMON_OWNER_LOCK_PATH = path.join(AGENTPLUG_DIR, "daemon-owner.lock");
+var GLOBAL_DAEMON_LOG_PATH = path.join(AGENTPLUG_DIR, "daemon.log");
+var ENSURE_INTERVAL_MS = 2e3;
+var ENSURE_LEASE_MS = 3e3;
+var ENSURE_BOOT_GRACE_MS = 3e4;
+var WATCHDOG_INTERVAL_MS = 5e3;
+var lastEnsuredAtByRoot = /* @__PURE__ */ new Map();
+var watchdogTimersByRoot = /* @__PURE__ */ new Map();
+function runnerBinaryMissing() {
+  return !fs.existsSync(RUNNER_PATH);
+}
+function readJsonFile(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function pidAlive(pid) {
+  const value = Number(pid);
+  if (!Number.isInteger(value) || value <= 0) return null;
+  try {
+    process.kill(value, 0);
+    return true;
+  } catch (error62) {
+    return error62?.code === "EPERM" ? true : false;
+  }
+}
+function globalDaemonPid() {
+  const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH);
+  if (pidAlive(status?.pid) === true) return status.pid;
+  try {
+    const owner = Number.parseInt(fs.readFileSync(GLOBAL_DAEMON_OWNER_LOCK_PATH, "utf8").trim(), 10);
+    if (pidAlive(owner) === true) return owner;
+  } catch {
+  }
+  return null;
+}
+function daemonBootGraceActive() {
+  const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH);
+  const bootTs = status?.daemon_boot_ts;
+  if (typeof bootTs !== "number") return false;
+  if (Date.now() - bootTs >= ENSURE_BOOT_GRACE_MS) return false;
+  return globalDaemonPid() !== null || Date.now() - (status.ts || 0) < 1e4;
+}
+function liveDaemonSweepsProject(spoolDir) {
+  const status = readJsonFile(path.join(spoolDir, ".status.json"));
+  if (!status) return false;
+  if (!(Date.now() - (status.ts || 0) < DAEMON_HEARTBEAT_STALE_MS)) return false;
+  const alive = pidAlive(status.pid);
+  return alive !== false;
+}
+var GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, "spool-launch.lock");
+function readLauncherLock() {
+  try {
+    const [pid, ts] = fs.readFileSync(GLOBAL_LAUNCHER_LOCK_PATH, "utf8").trim().split(/\s+/).map(Number);
+    return { pid, ts };
+  } catch {
+    return null;
+  }
+}
+function claimGlobalLauncher() {
+  fs.mkdirSync(AGENTPLUG_DIR, { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${process.pid} ${Date.now()}`, { flag: "wx", mode: 384 });
+      return true;
+    } catch (error62) {
+      if (error62?.code !== "EEXIST") return false;
+    }
+    const held = readLauncherLock();
+    const heldAgeMs = held?.ts ? Date.now() - held.ts : Number.POSITIVE_INFINITY;
+    if (held && heldAgeMs < ENSURE_CHILD_MAX_AGE_MS && pidAlive(held.pid) !== false) return false;
+    if (held && pidAlive(held.pid) === true && held.pid !== process.pid) {
+      try {
+        process.kill(held.pid);
+      } catch {
+      }
+    }
+    try {
+      fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+function claimRunnerEnsure(root) {
+  const lockPath = path.join(root, ".gm", "exec-spool", ".runner-ensure.lock");
+  const claim2 = () => {
+    const fd = fs.openSync(lockPath, "wx", 384);
+    try {
+      fs.writeFileSync(fd, `${process.pid} ${Date.now()}`, "utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+    return true;
+  };
+  try {
+    return claim2();
+  } catch (error62) {
+    if (error62?.code !== "EEXIST") return false;
+  }
+  try {
+    const ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
+    if (ageMs <= ENSURE_LEASE_MS) return false;
+    const holderPid = Number.parseInt(fs.readFileSync(lockPath, "utf8").trim().split(/\s+/)[0], 10);
+    if (ageMs < ENSURE_CHILD_MAX_AGE_MS && pidAlive(holderPid) === true) return false;
+    const stalePath = `${lockPath}.${process.pid}.${Date.now()}.stale`;
+    fs.renameSync(lockPath, stalePath);
+    fs.unlinkSync(stalePath);
+  } catch {
+    return false;
+  }
+  try {
+    return claim2();
+  } catch {
+    return false;
+  }
+}
+var ENSURE_CHILD_MAX_AGE_MS = 12e4;
+var inflightEnsuresByRoot = /* @__PURE__ */ new Map();
+var consecutiveFailedEnsuresByRoot = /* @__PURE__ */ new Map();
+var ENSURE_BACKOFF_CEILING_MS = 6e4;
+function runnerEnsureInFlight(root, now = Date.now()) {
+  const entry = inflightEnsuresByRoot.get(root);
+  if (!entry) return false;
+  if (entry.exitCode !== null && entry.exitCode !== void 0) {
+    inflightEnsuresByRoot.delete(root);
+    return false;
+  }
+  if (pidAlive(entry.pid) === false) {
+    inflightEnsuresByRoot.delete(root);
+    return false;
+  }
+  if (now - entry.spawnedAtMs >= ENSURE_CHILD_MAX_AGE_MS) {
+    inflightEnsuresByRoot.delete(root);
+    entry.child?.kill();
+    return false;
+  }
+  return true;
+}
+function ensureSpoolRunnerRunning(root) {
+  if (runnerBinaryMissing()) return;
+  if (liveDaemonSweepsProject(path.join(root, ".gm", "exec-spool"))) {
+    consecutiveFailedEnsuresByRoot.delete(root);
+    return;
+  }
+  const now = Date.now();
+  if (runnerEnsureInFlight(root, now)) return;
+  if (now - (lastEnsuredAtByRoot.get(root) || 0) < ENSURE_INTERVAL_MS) return;
+  if (daemonBootGraceActive()) {
+    lastEnsuredAtByRoot.set(root, now);
+    return;
+  }
+  const failures = consecutiveFailedEnsuresByRoot.get(root) || 0;
+  lastEnsuredAtByRoot.set(root, now + Math.min(ENSURE_BACKOFF_CEILING_MS, ENSURE_INTERVAL_MS * 2 ** failures) - ENSURE_INTERVAL_MS);
+  if (!claimRunnerEnsure(root)) return;
+  if (!claimGlobalLauncher()) return;
+  consecutiveFailedEnsuresByRoot.set(root, failures + 1);
+  let child;
+  try {
+    child = spawn(RUNNER_PATH, ["spool"], {
+      cwd: root,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    });
+  } catch {
+    try {
+      fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH);
+    } catch {
+    }
+    return;
+  }
+  try {
+    fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${child.pid} ${now}`, "utf8");
+  } catch {
+  }
+  const entry = { pid: child.pid, child, spawnedAtMs: now, exitCode: null };
+  const settle2 = (code) => {
+    entry.exitCode = code ?? 0;
+    if (inflightEnsuresByRoot.get(root) === entry) inflightEnsuresByRoot.delete(root);
+  };
+  child.on("error", () => settle2(-1));
+  child.on("exit", (code) => settle2(code));
+  recordRunnerEnsureInflight(root, entry);
+  try {
+    fs.writeFileSync(path.join(root, ".gm", "exec-spool", ".runner-ensure.lock"), `${child.pid} ${now}`, "utf8");
+  } catch {
+  }
+  child.unref();
+}
+function recordRunnerEnsureInflight(root, entry) {
+  inflightEnsuresByRoot.set(root, entry);
+}
+function startRunnerWatchdog(root) {
+  if (process.env.GM_MCP_RUNNER_WATCHDOG === "0") return;
+  if (watchdogTimersByRoot.has(root)) return;
+  const timer = setInterval(() => {
+    try {
+      ensureSpoolRunnerRunning(root);
+    } catch {
+    }
+  }, WATCHDOG_INTERVAL_MS);
+  timer.unref?.();
+  watchdogTimersByRoot.set(root, timer);
+}
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(t);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new Error("aborted"));
+    };
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
+  return new Promise((resolve, reject) => {
+    let watcher;
+    let wakeTimer;
+    let fallbackTimer;
+    let settled = false;
+    const finish = (wakeSource, error62) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(wakeTimer);
+      clearTimeout(fallbackTimer);
+      watcher?.close();
+      signal?.removeEventListener("abort", onAbort);
+      if (error62) reject(error62);
+      else resolve(wakeSource);
+    };
+    const onAbort = () => finish(void 0, new Error("aborted"));
+    const wake = (_event, filename) => {
+      if (!filename || filename.toString() === path.basename(outPath)) finish("filesystem_event");
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      watcher = fs.watch(outDir, { persistent: false }, wake);
+      watcher.on("error", () => {
+        watcher?.close();
+        watcher = void 0;
+      });
+    } catch {
+      watcher = void 0;
+    }
+    if (fs.existsSync(outPath)) return finish("already_landed");
+    wakeTimer = setTimeout(() => finish("deadline"), Math.max(1, waitMs));
+    fallbackTimer = setTimeout(() => finish("fallback_poll"), Math.min(Math.max(25, fallbackMs), Math.max(1, waitMs)));
+  });
+}
+var BROWSER_PLAIN_TEXT_VERBS = ["serp", "browser", "cdp"];
+var EXEC_FAMILY_VERBS = ["exec_js", "nodejs", "javascript", "node", "js", "bash", "sh", "shell", "zsh", "python", "py", "powershell", "ps1", "ssh", "go", "rust", "c", "cpp", "java", "deno"];
+var PLAIN_TEXT_BODY_VERBS = /* @__PURE__ */ new Set([...EXEC_FAMILY_VERBS, ...BROWSER_PLAIN_TEXT_VERBS]);
+var TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS);
 var TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/;
+var TIMEOUT_MS_PREFIX_VALUE = /^\s*timeout(?:Ms|_ms)=(\d+)/;
 var DEFAULT_TIMEOUT_SECONDS = 120;
+var EXEC_DEFAULT_LIMIT_SECONDS = 300;
+var POLL_MARGIN_PAST_EXEC_TIMEOUT_MS = 5e3;
+function unpackExecOutputEnvelope(verb, parsed) {
+  if (!EXEC_FAMILY_VERBS.includes(verb) || !parsed || typeof parsed.data !== "string") return parsed;
+  try {
+    const inner = JSON.parse(parsed.data);
+    return inner && typeof inner === "object" && !Array.isArray(inner) ? { ...parsed, data: inner } : parsed;
+  } catch {
+    return parsed;
+  }
+}
+function pollTimeoutMs(verb, raw_body, timeout_seconds) {
+  const explicitSeconds = Number(timeout_seconds);
+  if (explicitSeconds > 0) return explicitSeconds * 1e3;
+  const bodyPrefix = TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === "string" ? TIMEOUT_MS_PREFIX_VALUE.exec(raw_body) : null;
+  if (bodyPrefix) return Math.max(DEFAULT_TIMEOUT_SECONDS * 1e3, Number(bodyPrefix[1]) + POLL_MARGIN_PAST_EXEC_TIMEOUT_MS);
+  return DEFAULT_TIMEOUT_SECONDS * 1e3;
+}
 function timeoutMsFor(timeout_seconds) {
   const seconds = Number(timeout_seconds);
-  return Math.max(100, Math.round((seconds > 0 ? seconds : DEFAULT_TIMEOUT_SECONDS) * 1e3));
+  return Math.max(100, Math.round((seconds > 0 ? seconds : EXEC_DEFAULT_LIMIT_SECONDS) * 1e3));
 }
 function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
   if (!TIMEOUT_MS_PREFIX_VERBS.has(verb)) return raw_body;
@@ -38748,30 +39174,110 @@ function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
 ${raw_body}`;
 }
 var DAEMON_HEARTBEAT_STALE_MS = 2e4;
+function projectRootOfSpool(spoolDir) {
+  return path.resolve(spoolDir, "..", "..");
+}
+function heartbeatAgeMs(spoolDir) {
+  const status = readJsonFile(path.join(spoolDir, ".status.json"));
+  return status && typeof status.ts === "number" ? Date.now() - status.ts : null;
+}
+function daemonRestartCommand(root) {
+  return `"${RUNNER_PATH}" spool   (run with cwd ${path.resolve(root)}; the launcher detaches agentplug-runner daemon for this project)`;
+}
+function coldProjectLiveness() {
+  const shared = readJsonFile(GLOBAL_DAEMON_STATUS_PATH);
+  const sharedPid = globalDaemonPid();
+  if (sharedPid === null) {
+    return { alive: null, note: "no .status.json heartbeat found for this project yet and no shared daemon process is running -- nothing has swept this project; start one with the restart command for this project" };
+  }
+  return {
+    alive: null,
+    shared_daemon_pid: sharedPid,
+    shared_daemon_active_projects: shared?.active_projects ?? null,
+    note: `no .status.json heartbeat for this project yet, but the shared daemon (pid ${sharedPid}, serving ${shared?.active_projects ?? "many"} registered projects) is running -- this is a cold project waiting its turn behind that daemon's other work (measured 85-110 s for a brand-new project, git repo or not; the project is keyed on its own directory, so a non-git cwd needs no git_root_override). The dispatch is still queued and will be claimed: re-dispatch with resume_task set to this response's task instead of writing a second request`
+  };
+}
 function readDaemonLiveness(spoolDir) {
   let status;
   try {
     status = JSON.parse(fs.readFileSync(path.join(spoolDir, ".status.json"), "utf8"));
   } catch {
-    return { alive: null, note: "no .status.json heartbeat found for this project yet -- the daemon may not have picked up this project at all" };
+    return coldProjectLiveness();
   }
   const now = Date.now();
-  const heartbeatAgeMs = typeof status.ts === "number" ? now - status.ts : null;
-  const alive = heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS;
+  const heartbeatAgeMs2 = typeof status.ts === "number" ? now - status.ts : null;
+  const pid = typeof status.pid === "number" ? status.pid : Number(status.pid) || null;
+  const pidAliveFlag = pidAlive(pid);
+  const alive = pidAliveFlag === false ? false : heartbeatAgeMs2 !== null && heartbeatAgeMs2 < DAEMON_HEARTBEAT_STALE_MS;
   const busyForMs = typeof status.busy_until === "number" ? status.busy_until - now : null;
   const busy = busyForMs !== null && busyForMs > 0;
-  const note = !alive ? "daemon heartbeat is stale or missing -- it may be down or has not registered this project; check daemon.log, this is not necessarily this dispatch's fault" : busy ? "daemon is alive and still actively working on this project" : "daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that";
-  const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note };
+  const note = !alive ? runnerBinaryMissing() ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed` : pidAliveFlag === false ? `the daemon process that last swept this project (pid ${pid}) is gone -- the daemon recycles itself on idle/memory pressure and on a runner version handoff, and is restarted on demand; this call already asked for a replacement, so a dispatch submitted now waits for its cold start (wasm compile, tens of seconds) instead of for a queue` : `daemon heartbeat is ${heartbeatAgeMs2} ms stale (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) -- it is down, hung, or has not registered this project; its own log is ${GLOBAL_DAEMON_LOG_PATH} (this project's spool log is ${path.join(spoolDir, ".watcher.log")}) and it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}; this is not necessarily this dispatch's fault` : busy ? "daemon is alive and still actively working on this project" : "daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that";
+  const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs2, busy, busy_for_ms: busy ? busyForMs : null, note };
+  if (pid !== null) liveness.pid = pid;
+  if (pidAliveFlag !== null) liveness.pid_alive = pidAliveFlag;
   if (status.runtime) liveness.runtime = status.runtime;
   if (typeof status.shared_process === "boolean") liveness.shared_process = status.shared_process;
   if (typeof status.queue_wait_ms === "number") liveness.queue_wait_ms = status.queue_wait_ms;
   if (typeof status.queue_depth === "number") liveness.queue_depth = status.queue_depth;
   if (typeof status.queue_position === "number") liveness.queue_position = status.queue_position;
+  if (typeof status.claimed_step_count === "number") liveness.claimed_step_count = status.claimed_step_count;
+  if (typeof status.queued_step_count === "number") liveness.queued_step_count = status.queued_step_count;
+  if (typeof status.gm_processor_capacity === "number") liveness.gm_processor_capacity = status.gm_processor_capacity;
+  const sharedProjects = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)?.active_projects;
+  if (typeof sharedProjects === "number") liveness.daemon_active_projects = sharedProjects;
   if (status.runner_update_in_progress) {
     liveness.runner_update_in_progress = true;
     liveness.runner_update_waiting_ms = status.runner_update_waiting_ms ?? null;
   }
   return liveness;
+}
+function runnerUnavailable(root, spoolDir) {
+  if (!runnerBinaryMissing()) return null;
+  if (readDaemonLiveness(spoolDir).alive) return null;
+  return {
+    error: "runner-not-installed",
+    runner_binary_missing: true,
+    runner_path: RUNNER_PATH,
+    note: `the agentplug-runner binary is not installed at ${RUNNER_PATH} and no live daemon heartbeat was found for ${path.resolve(root)}, so this dispatch could never be claimed. Install it once, then dispatch again: npx github:AnEntrypoint/gm -g   (or, in this project: curl -fsSL https://raw.githubusercontent.com/AnEntrypoint/gm/main/install.sh | sh -s -- spool)`
+  };
+}
+var DAEMON_START_GRACE_MS = Number(process.env.GM_MCP_DAEMON_START_GRACE_MS) > 0 ? Number(process.env.GM_MCP_DAEMON_START_GRACE_MS) : 15e3;
+var DAEMON_START_POLL_MS = 250;
+async function awaitDaemonHeartbeat(spoolDir, signal) {
+  const deadline = Date.now() + DAEMON_START_GRACE_MS;
+  while (true) {
+    const age = heartbeatAgeMs(spoolDir);
+    if (age !== null && age < DAEMON_HEARTBEAT_STALE_MS) return "recovered";
+    if (Date.now() >= deadline) return "still_dead";
+    try {
+      await sleep(DAEMON_START_POLL_MS, signal);
+    } catch {
+      return "aborted";
+    }
+  }
+}
+async function daemonNotRunning(root, spoolDir, signal) {
+  if (process.env.GM_MCP_DAEMON_PREFLIGHT === "0") return void 0;
+  if (readDaemonLiveness(spoolDir).alive) return void 0;
+  const age = heartbeatAgeMs(spoolDir);
+  if (age === null) return void 0;
+  if (daemonBootGraceActive()) return void 0;
+  if (readJsonFile(path.join(spoolDir, ".status.json"))?.runner_update_in_progress) return void 0;
+  ensureSpoolRunnerRunning(root);
+  startRunnerWatchdog(root);
+  if (await awaitDaemonHeartbeat(spoolDir, signal) !== "still_dead") return void 0;
+  const staleFor = heartbeatAgeMs(spoolDir);
+  return {
+    error: "daemon-not-running",
+    daemon_not_running: true,
+    heartbeat_age_ms: staleFor,
+    stale_after_ms: DAEMON_HEARTBEAT_STALE_MS,
+    waited_for_start_ms: DAEMON_START_GRACE_MS,
+    note: `this project's daemon heartbeat is ${staleFor} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) and did not come back within ${DAEMON_START_GRACE_MS} ms of asking for a runner, so no dispatch was written -- it would sit queued_not_yet_claimed and only fail at the poll timeout. Restart it and dispatch again: ${daemonRestartCommand(root)}`,
+    checked_status_file: path.join(spoolDir, ".status.json"),
+    daemon_log: GLOBAL_DAEMON_LOG_PATH,
+    spool_log: path.join(spoolDir, ".watcher.log")
+  };
 }
 function readSpoolDispatchState(spoolDir, verb, task) {
   const queuedPath = path.join(spoolDir, "in", verb, `${task}.txt`);
@@ -38779,8 +39285,81 @@ function readSpoolDispatchState(spoolDir, verb, task) {
   const claimed = fs.existsSync(claimedPath);
   const queued = !claimed && fs.existsSync(queuedPath);
   const state = claimed ? "claimed_still_in_flight" : queued ? "queued_not_yet_claimed" : "no_input_file_left";
-  const note = claimed ? `the daemon HAS claimed this dispatch (${claimedPath} exists) and has not written its out-file yet -- it is still running, not lost. Re-dispatch with resume_task set to this response's task to keep waiting on the SAME request instead of starting a duplicate` : queued ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet, typically because its worker pool is saturated by other tickets. Re-dispatch with resume_task set to this response's task; writing a second dispatch only deepens the queue` : "neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id";
-  return { state, claimed, queued, note };
+  const pressure = scanSpoolQueue(spoolDir, queuedPath);
+  const stall = claimSweepStall(pressure, queued);
+  const note = claimed ? `the daemon HAS claimed this dispatch (${claimedPath} exists) and has not written its out-file yet -- it is still running, not lost. Do NOT re-dispatch: call again with the same verb and cwd, resume_task set to this response's task and no body, to keep waiting on the SAME request` : queued && pressure ? queuePressureNote(pressure, queuedPath, stall) : queued ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet; it claims every settled ticket on each tick, so do NOT re-dispatch: call again with the same verb and cwd, resume_task set to this response's task and no body; writing a second dispatch only deepens the queue` : "neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id";
+  return { state, claimed, queued, ...stall ?? {}, ...pressure ?? {}, note };
+}
+var CLAIM_SWEEP_STALL_MS = 3e4;
+function claimSweepStall(pressure, queued) {
+  const oldestMs = queued && pressure ? pressure.oldest_unclaimed_age_ms : null;
+  if (!queued || !pressure || pressure.cap_saturated || oldestMs === null) {
+    return { claim_sweep_stalled: false, claim_sweep_stalled_for_ms: oldestMs === null ? null : oldestMs };
+  }
+  const stalled = oldestMs >= CLAIM_SWEEP_STALL_MS;
+  return { claim_sweep_stalled: stalled, claim_sweep_stalled_for_ms: oldestMs };
+}
+var MAX_CLAIMED_DISPATCHES_PER_PROJECT = 32;
+function scanSpoolQueue(spoolDir, myQueuedPath) {
+  const inDir = path.join(spoolDir, "in");
+  let verbs;
+  try {
+    verbs = fs.readdirSync(inDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const now = Date.now();
+  let myMtimeMs = null;
+  try {
+    myMtimeMs = fs.statSync(myQueuedPath).mtimeMs;
+  } catch {
+  }
+  let claimedCount = 0;
+  let unclaimedCount = 0;
+  let aheadOfMine = 0;
+  let oldestUnclaimedMs = null;
+  for (const verbEntry of verbs) {
+    if (!verbEntry.isDirectory()) continue;
+    const verbDir = path.join(inDir, verbEntry.name);
+    let files;
+    try {
+      files = fs.readdirSync(verbDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const fileEntry of files) {
+      if (!fileEntry.isFile() || fileEntry.name.startsWith(".")) continue;
+      if (fileEntry.name.endsWith(".inflight")) {
+        claimedCount += 1;
+        continue;
+      }
+      if (!path.extname(fileEntry.name)) continue;
+      unclaimedCount += 1;
+      let mtimeMs = null;
+      try {
+        mtimeMs = fs.statSync(path.join(verbDir, fileEntry.name)).mtimeMs;
+      } catch {
+      }
+      if (mtimeMs === null) continue;
+      if (oldestUnclaimedMs === null || mtimeMs < oldestUnclaimedMs) oldestUnclaimedMs = mtimeMs;
+      if (myMtimeMs !== null && mtimeMs < myMtimeMs) aheadOfMine += 1;
+    }
+  }
+  return {
+    project_claimed_count: claimedCount,
+    project_unclaimed_count: unclaimedCount,
+    oldest_unclaimed_age_ms: oldestUnclaimedMs === null ? null : now - oldestUnclaimedMs,
+    unclaimed_ahead_of_mine: myMtimeMs === null ? null : aheadOfMine,
+    claimed_dispatch_cap: MAX_CLAIMED_DISPATCHES_PER_PROJECT,
+    claim_budget_left: Math.max(0, MAX_CLAIMED_DISPATCHES_PER_PROJECT - claimedCount),
+    cap_saturated: claimedCount >= MAX_CLAIMED_DISPATCHES_PER_PROJECT
+  };
+}
+function queuePressureNote(pressure, queuedPath, stall) {
+  const head = `${queuedPath} is still UNCLAIMED -- measured from the spool: ${pressure.project_claimed_count}/${pressure.claimed_dispatch_cap} dispatches claimed in flight for this project, ${pressure.project_unclaimed_count} unclaimed, ${pressure.unclaimed_ahead_of_mine} of them older than this one, oldest unclaimed waiting ${pressure.oldest_unclaimed_age_ms} ms`;
+  const stalled = Boolean(stall && stall.claim_sweep_stalled);
+  const stallTail = stalled ? `. CLAIM SWEEP STALLED: ${pressure.claim_budget_left} claim slot(s) are free and the oldest queued dispatch has been waiting ${pressure.oldest_unclaimed_age_ms} ms (past the ${CLAIM_SWEEP_STALL_MS} ms sweep bound), so the pass that claims requests is not reaching this project -- it walks every registered root in order, so a stalled pass delays everything behind it. This dispatch is still queued and will be claimed when the pass resumes: keep waiting on it with resume_task, and check the daemon log for a synchronous update poll or a saturated shared plugin pool holding the pass up.` : "";
+  return pressure.cap_saturated ? `${head}. THIS PROJECT IS AT ITS CLAIM CAP: the daemon claims nothing new here until one of the ${pressure.project_claimed_count} in-flight dispatches finishes. Wait it out on this same dispatch with resume_task -- re-dispatching adds to the ${pressure.project_unclaimed_count} already queued and cannot be claimed any sooner.` : `${head}. Not cap saturation (${pressure.claim_budget_left} claim slot(s) free): the daemon is between sweeps of this project or busy elsewhere -- see daemon.daemon_active_projects and daemon.gm_processor_capacity for how many projects share it. Keep waiting on this dispatch with resume_task; nothing here is wedged.${stallTail}`;
 }
 var FINAL_OUT_RECHECK_WINDOW_MS = 2500;
 var FINAL_OUT_RECHECK_INTERVAL_MS = 150;
@@ -38794,6 +39373,14 @@ function resumeDisclosure(task, landedAtMs, callStartedAtMs) {
     note: resultPredatesResume ? "this is the original dispatch's stored result, read back unchanged -- any error below (including a missing-body/validation error) came from that dispatch, NOT from this resume call, which sent no body" : "the original dispatch finished while this resume was polling -- the result below is its own"
   };
 }
+function carriedNoFailure(out) {
+  return Boolean(out) && typeof out === "object" && !Array.isArray(out) && out.error === void 0 && out.timed_out !== true && out.ok !== false;
+}
+var DISPATCH_WAIT_DISCLOSED_AT_MS = 5e3;
+function withDispatchWait(out, waitedMs) {
+  if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !out || typeof out !== "object" || Array.isArray(out)) return out;
+  return { ...out, dispatch_waited_ms: waitedMs };
+}
 function withResumeDisclosure(out, disclosure) {
   if (!out || typeof out !== "object" || Array.isArray(out)) return { resumed: disclosure, response: out };
   const key = "resumed" in out ? "resumed_dispatch" : "resumed";
@@ -38803,11 +39390,15 @@ var deliveredInstructionHashByOwner = /* @__PURE__ */ new Map();
 function instructionOwnerKey(root, sessionId) {
   return `${path.resolve(root)} ${sessionId}`;
 }
+var deliveredReplyHashByOwner = /* @__PURE__ */ new Map();
 function withAssertedInstructionHash(verb, body, root, sessionId) {
   if (verb !== "instruction") return body;
-  if (typeof body.instruction_hash === "string" || typeof body.known_instruction_hash === "string") return body;
-  const known = deliveredInstructionHashByOwner.get(instructionOwnerKey(root, sessionId));
-  return known ? { ...body, instruction_hash: known } : body;
+  const owner = instructionOwnerKey(root, sessionId);
+  const knownReply = deliveredReplyHashByOwner.get(owner);
+  const withReply = knownReply && typeof body.known_reply_hash !== "string" ? { ...body, known_reply_hash: knownReply } : body;
+  if (typeof body.instruction_hash === "string" || typeof body.known_instruction_hash === "string") return withReply;
+  const known = deliveredInstructionHashByOwner.get(owner);
+  return known ? { ...withReply, instruction_hash: known } : withReply;
 }
 function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
   if (verb !== "instruction" || !parsed || parsed.ok === false) return;
@@ -38818,44 +39409,40 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
   if (prose || data.instruction_unchanged === true) {
     deliveredInstructionHashByOwner.set(instructionOwnerKey(root, sessionId), hash2);
   }
+  if (typeof data.reply_hash === "string" && data.reply_hash) {
+    deliveredReplyHashByOwner.set(instructionOwnerKey(root, sessionId), data.reply_hash);
+  }
 }
-async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task }, signal) {
+async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal) {
   if (!verb) return "error: verb required";
   if (!session_id) return "error: session_id required";
-  const root = cwd || process.cwd();
+  const n = resume_task || nextN(session_id);
+  const unsafeName = unsafeSpoolName("verb", verb) || unsafeSpoolName("session_id", session_id) || unsafeSpoolName("task", n);
+  if (unsafeName) return `error: ${unsafeName} -- nothing was written to the spool, so no dispatch was queued`;
+  const root = projectRootFor(cwd || process.cwd());
   const spoolDir = path.join(root, ".gm", "exec-spool");
   const inDir = path.join(spoolDir, "in", verb);
   const outDir = path.join(spoolDir, "out");
-  try {
-    fs.mkdirSync(outDir, { recursive: true });
-  } catch (error62) {
-    return inaccessibleSpoolRootError(root, spoolDir, error62);
-  }
-  const n = resume_task || nextN(session_id);
+  fs.mkdirSync(outDir, { recursive: true });
   const callStartedAtMs = Date.now();
   let lastWakeSource = "initial_check";
   const toYaml = (obj) => dump(obj, { lineWidth: 100 });
-  const hasStructuredBashBody = verb === "bash" && body !== void 0 && body !== null;
-  if (!resume_task && hasStructuredBashBody && typeof raw_body === "string") {
-    return "error: bash accepts either raw_body or body.command, not both.";
-  }
-  let plainTextBody = raw_body;
-  if (!resume_task && hasStructuredBashBody) {
-    const normalized = normalizedBashCommand(body);
-    if (normalized.error) return `error: ${normalized.error}`;
-    plainTextBody = normalized.value;
-  }
   const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === "string";
-  if (!resume_task && isPlainText && typeof plainTextBody !== "string") {
-    return `error: ${verb} takes a plain-text body -- pass raw_body (a string), not body (a JSON object)`;
+  if (!resume_task && isPlainText && typeof raw_body !== "string") {
+    raw_body = plainTextFromBody(body);
+    if (typeof raw_body !== "string") {
+      return `error: ${verb} takes a plain-text body -- pass the text as the top-level raw_body argument (a string), e.g. raw_body: "return 1". body is for JSON verbs; here it is accepted only as a string or as an object with exactly one string field among ${PLAIN_TEXT_BODY_FIELDS.join(", ")}`;
+    }
   }
   let normalizedBody;
   if (!resume_task && !isPlainText) {
     const normalized = normalizedObjectBody(verb, body);
     if (normalized.error) return `error: ${normalized.error}`;
-    const diagnostic = objectBodyDiagnostic(verb, normalized.value);
+    const globCoerced = withGlobFiltersCoerced(verb, normalized.value);
+    if (globCoerced.error) return `error: ${globCoerced.error}`;
+    const diagnostic = objectBodyDiagnostic(verb, globCoerced.value);
     if (diagnostic) return `error: ${diagnostic}`;
-    normalizedBody = withAssertedInstructionHash(verb, normalized.value, root, session_id);
+    normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, globCoerced.value), root, session_id);
   }
   const inPath = path.join(inDir, `${n}.txt`);
   const outPath = path.join(outDir, `${verb}-${n}.json`);
@@ -38874,15 +39461,20 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
     });
   }
   if (!resume_task) {
+    const unavailable = runnerUnavailable(root, spoolDir);
+    if (unavailable) return toYaml(unavailable);
+    const notRunning = await daemonNotRunning(root, spoolDir, signal);
+    if (notRunning) return toYaml(notRunning);
     ensureSpoolRunnerRunning(root);
+    startRunnerWatchdog(root);
     if (isPlainText) {
-      publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, plainTextBody, timeout_seconds));
+      publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds));
     } else {
       const fullBody = { ...normalizedBody, session_id };
       publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody));
     }
   }
-  const timeoutMs = Math.max(0, (Number(timeout_seconds) || 120) * 1e3);
+  const timeoutMs = resume_task ? Math.max(0, (Number(timeout_seconds) || DEFAULT_TIMEOUT_SECONDS) * 1e3) : pollTimeoutMs(verb, raw_body, timeout_seconds);
   const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1e3);
   const deadline = Date.now() + timeoutMs;
   const readLandedOutFile = () => {
@@ -38894,20 +39486,23 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
       landedAtMs = null;
     }
     try {
-      const parsed = JSON.parse(fs.readFileSync(outPath, "utf8"));
+      const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, "utf8")));
       rememberDeliveredInstructionHash(verb, parsed, root, session_id);
-      const cleaned = cleanResponse(parsed, void 0, outPath);
+      const plainTextFile = typeof parsed?.result_file === "string" ? parsed.result_file : void 0;
+      const cleaned = cleanResponse(parsed, void 0, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }));
       let out = cleaned;
       if (cleaned && typeof cleaned === "object" && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === "object" && !Array.isArray(cleaned.data)) {
         const { data, ...rest } = cleaned;
         const collides = Object.keys(data).some((k) => k in rest);
         if (!collides) out = { ...rest, ...data };
       }
+      if (!full_response && carriedNoFailure(out)) out = compactWireResponse(out, outPath);
       if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs));
+      else out = withDispatchWait(out, Date.now() - callStartedAtMs);
       if (out && typeof out === "object" && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
         out = { ...out, instruction_text_at: path.join(root, ".gm", "next-step.md") };
       }
-      if (include_timing) {
+      if (include_timing === true || include_timing === "true") {
         const timingKey = out && typeof out === "object" && !Array.isArray(out) && "mcp_timing" in out ? "mcp_client_timing" : "mcp_timing";
         const timing = {
           submitted_at_ms: callStartedAtMs,
@@ -38924,8 +39519,25 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
       return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed);
     }
   };
+  const withdrawUnclaimedRequest = () => {
+    if (resume_task) return false;
+    try {
+      fs.unlinkSync(inPath);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const abortedReply = () => toYaml({
+    error: "aborted",
+    task: n,
+    in_path: inPath,
+    out_path: outPath,
+    request_withdrawn_before_claim: withdrawUnclaimedRequest()
+  });
   while (true) {
-    if (signal?.aborted) return toYaml({ error: "aborted", task: n, in_path: inPath, out_path: outPath });
+    if (signal?.aborted) return abortedReply();
+    ensureSpoolRunnerRunning(root);
     const landed = readLandedOutFile();
     if (landed !== void 0) return landed;
     if (Date.now() >= deadline) {
@@ -38954,7 +39566,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
     try {
       lastWakeSource = await waitForSpoolChange(outDir, outPath, deadline - Date.now(), pollMs, signal);
     } catch {
-      return toYaml({ error: "aborted", task: n, in_path: inPath, out_path: outPath });
+      return abortedReply();
     }
   }
 }
@@ -38962,20 +39574,146 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
 // src/self-update.js
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path2 from "node:path";
 import { fileURLToPath } from "node:url";
+
+// src/bundle-version.js
+var BUNDLE_VERSION = "0.2.4";
+
+// src/self-update.js
 var DEPLOYED_BUNDLE_FILE_NAME = "gm-mcp-server.mjs";
 var DEFAULT_BUNDLE_URL = "https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js";
 var DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1e3;
 var FETCH_TIMEOUT_MS = 2e4;
 var MIN_PLAUSIBLE_BUNDLE_BYTES = 1e5;
 var BUNDLE_SHEBANG = "#!/usr/bin/env node";
+var NO_SELF_UPDATE_ENV = "GM_MCP_NO_SELF_UPDATE";
+var NO_SELF_UPDATE_FILE = "gm-mcp-server.no-self-update";
+var LOCAL_BUILD_PIN_FILE = "gm-mcp-server.local-build.json";
+var SELF_UPDATE_OFF_VALUES = /* @__PURE__ */ new Set(["0", "false", "no", "off"]);
+var BUNDLE_VERSION_ASSIGNMENT = /BUNDLE_VERSION\s*=\s*["']([^"']+)["']/;
 var sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 var shortHash = (hex3) => hex3.slice(0, 12);
 function toolsDir() {
   return process.env.GM_TOOLS_DIR || path2.join(homedir(), ".gm-tools");
+}
+function defaultDeployedPath() {
+  return path2.join(toolsDir(), DEPLOYED_BUNDLE_FILE_NAME);
+}
+function agentplugDir() {
+  const override = (process.env.AGENTPLUG_HOME || "").trim();
+  return override ? path2.resolve(override) : path2.join(homedir(), ".agentplug");
+}
+function noSelfUpdateFilePath() {
+  return path2.join(agentplugDir(), NO_SELF_UPDATE_FILE);
+}
+function localBuildPinPath() {
+  return path2.join(agentplugDir(), LOCAL_BUILD_PIN_FILE);
+}
+function selfUpdateFreezeReason() {
+  const envValue = process.env[NO_SELF_UPDATE_ENV];
+  if (envValue !== void 0 && !SELF_UPDATE_OFF_VALUES.has(envValue.trim().toLowerCase())) {
+    return `${NO_SELF_UPDATE_ENV}=${JSON.stringify(envValue)} freezes the deployed bundle (set it to 0 to allow updates again)`;
+  }
+  const marker = noSelfUpdateFilePath();
+  if (existsSync(marker)) return `${marker} exists, which freezes the deployed bundle (delete that file to allow updates again)`;
+  return null;
+}
+function readLocalBuildPin() {
+  try {
+    const pin = JSON.parse(readFileSync(localBuildPinPath(), "utf8"));
+    return pin && typeof pin.sha256 === "string" && pin.sha256 ? pin : null;
+  } catch {
+    return null;
+  }
+}
+function pinLocalBuild(deployedPath = defaultDeployedPath()) {
+  const bytes = readFileSync(deployedPath);
+  const pinPath = localBuildPinPath();
+  const pin = {
+    sha256: sha256(bytes),
+    path: path2.resolve(deployedPath),
+    version: parseBundleVersion(bytes) || BUNDLE_VERSION,
+    ts: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  mkdirSync(path2.dirname(pinPath), { recursive: true });
+  writeFileSync(pinPath, `${JSON.stringify(pin, null, 2)}
+`, "utf8");
+  return pin;
+}
+function clearLocalBuildPin() {
+  const pinPath = localBuildPinPath();
+  rmSync(pinPath, { force: true });
+  return pinPath;
+}
+function parseBundleVersion(bytes) {
+  const text = Buffer.isBuffer(bytes) ? bytes.toString("utf8") : String(bytes);
+  const found = BUNDLE_VERSION_ASSIGNMENT.exec(text);
+  return found ? found[1] : null;
+}
+function compareVersions(left, right) {
+  const parts = (value) => String(value).split(/[.+-]/).map((part) => {
+    const parsed = Number.parseInt(part, 10);
+    return Number.isFinite(parsed) ? parsed : 0;
+  });
+  const a = parts(left);
+  const b = parts(right);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const leftPart = a[i] ?? 0;
+    const rightPart = b[i] ?? 0;
+    if (leftPart > rightPart) return 1;
+    if (leftPart < rightPart) return -1;
+  }
+  return 0;
+}
+function versionGuardReason(candidateBytes) {
+  const candidateVersion = parseBundleVersion(candidateBytes);
+  if (!candidateVersion) {
+    return {
+      code: "candidate-version-unknown",
+      reason: `the candidate bundle carries no ${BUNDLE_VERSION_ASSIGNMENT} assignment, so it cannot be proven newer than the installed ${BUNDLE_VERSION}`
+    };
+  }
+  if (compareVersions(candidateVersion, BUNDLE_VERSION) <= 0) {
+    return {
+      code: "no-downgrade",
+      reason: `the candidate bundle is version ${candidateVersion} and the installed one is ${BUNDLE_VERSION} -- a self-update may only move strictly forward`
+    };
+  }
+  return { code: null, reason: null, candidateVersion };
+}
+function localBuildPinReason(deployedHash) {
+  const pin = readLocalBuildPin();
+  if (!pin || pin.sha256 !== deployedHash) return null;
+  const pinPath = localBuildPinPath();
+  return {
+    code: "local-build-pinned",
+    reason: `the installed bundle is pinned as a local build by ${pinPath} (sha256 ${shortHash(pin.sha256)}${pin.ts ? `, pinned at ${pin.ts}` : ""}) -- clear it with "gm-mcp unpin-local-build" or delete that file to hand it back to the release channel`
+  };
+}
+function selfUpdateStatus() {
+  const deployedPath = defaultDeployedPath();
+  let bytes = null;
+  try {
+    bytes = readFileSync(deployedPath);
+  } catch {
+    bytes = null;
+  }
+  const pin = readLocalBuildPin();
+  return {
+    installed_version: BUNDLE_VERSION,
+    deployed_bundle: deployedPath,
+    running_from_deployed_bundle: isRunningFromDeployedBundle(deployedPath),
+    deployed_sha256: bytes ? sha256(bytes) : null,
+    deployed_pinned_as_local_build: Boolean(bytes && pin && pin.sha256 === sha256(bytes)),
+    frozen_by: selfUpdateFreezeReason(),
+    no_self_update_file: noSelfUpdateFilePath(),
+    no_self_update_file_present: existsSync(noSelfUpdateFilePath()),
+    local_build_pin_path: localBuildPinPath(),
+    local_build_pin: pin
+  };
 }
 function canonicalPath(file2) {
   const resolved = realpathSync(file2);
@@ -39004,7 +39742,7 @@ async function fetchBundleBytes(url2) {
 function assertLoadableBundle(bytes, candidatePath) {
   if (bytes.length < MIN_PLAUSIBLE_BUNDLE_BYTES) throw new Error(`candidate bundle is only ${bytes.length} bytes`);
   if (!bytes.subarray(0, BUNDLE_SHEBANG.length).toString("utf8").startsWith(BUNDLE_SHEBANG)) throw new Error("candidate bundle has no node shebang");
-  const syntaxCheck = spawnSync(process.execPath, ["--check", candidatePath], { encoding: "utf8" });
+  const syntaxCheck = spawnSync(process.execPath, ["--check", candidatePath], { encoding: "utf8", windowsHide: true });
   if (syntaxCheck.status !== 0) throw new Error(`candidate bundle fails node --check: ${syntaxCheck.stderr.trim().split("\n")[0]}`);
 }
 function replaceDeployedBundle(deployedPath, bytes) {
@@ -39021,26 +39759,36 @@ function replaceDeployedBundle(deployedPath, bytes) {
 }
 async function refreshStaleDeployedBundle() {
   if (process.env.GM_MCP_SELF_UPDATE === "0") return { outcome: "disabled" };
-  const deployedPath = path2.join(toolsDir(), DEPLOYED_BUNDLE_FILE_NAME);
+  const deployedPath = defaultDeployedPath();
   if (!isRunningFromDeployedBundle(deployedPath)) return { outcome: "not-deployed-copy" };
+  const refuse = (code, reason) => {
+    console.error(`gm-mcp: refusing deployed bundle self-update (${code}) -- ${reason}`);
+    return { outcome: "refused", code, reason, deployed_bundle: deployedPath };
+  };
+  const frozen = selfUpdateFreezeReason();
+  if (frozen) return refuse("frozen", frozen);
   const stampPath = `${deployedPath}.checked`;
   if (checkedRecently(stampPath)) return { outcome: "checked-recently" };
+  const deployedHash = sha256(readFileSync(deployedPath));
+  const pinned = localBuildPinReason(deployedHash);
+  if (pinned) return refuse(pinned.code, pinned.reason);
   const url2 = process.env.GM_MCP_BUNDLE_URL || DEFAULT_BUNDLE_URL;
   const freshBytes = await fetchBundleBytes(url2);
   const freshHash = sha256(freshBytes);
-  const deployedHash = sha256(readFileSync(deployedPath));
   if (freshHash === deployedHash) {
     touch(stampPath);
     return { outcome: "current", hash: freshHash };
   }
+  const version2 = versionGuardReason(freshBytes);
+  if (version2.code) return refuse(version2.code, version2.reason);
   replaceDeployedBundle(deployedPath, freshBytes);
   touch(stampPath);
-  return { outcome: "refreshed", from: deployedHash, to: freshHash, url: url2 };
+  return { outcome: "refreshed", from: deployedHash, to: freshHash, url: url2, version: `${BUNDLE_VERSION} -> ${version2.candidateVersion}` };
 }
 function refreshStaleDeployedBundleInBackground() {
   refreshStaleDeployedBundle().then((result) => {
     if (result.outcome === "refreshed") {
-      console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} from ${result.url}; takes effect on next connect (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`);
+      console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} (${result.version}) from ${result.url}; takes effect on next connect (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`);
     }
   }).catch((error62) => {
     console.error(`gm-mcp: bundle staleness check failed (${error62.message}); keeping the deployed copy`);
@@ -39051,7 +39799,7 @@ function refreshStaleDeployedBundleInBackground() {
 var numberLike = external_exports.union([external_exports.number(), external_exports.string()]);
 var booleanLike = external_exports.union([external_exports.boolean(), external_exports.string()]);
 function createServer() {
-  const server = new McpServer({ name: "gm-mcp", version: "0.2.1" });
+  const server = new McpServer({ name: "gm-mcp", version: BUNDLE_VERSION });
   const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`;
   server.registerTool(
     "gm_instruction",
@@ -39060,13 +39808,14 @@ function createServer() {
       inputSchema: {
         prompt: external_exports.string().optional().describe("Current task prompt. An omitted prompt is dispatched as an empty string."),
         session_id: external_exports.string().optional().describe("Optional gm session id. A stable server-local id is used when omitted."),
-        cwd: external_exports.string().optional().describe("Project root containing .gm/exec-spool -- defaults to process.cwd()."),
+        cwd: external_exports.string().optional().describe("Project root containing .gm/exec-spool -- defaults to process.cwd(). It picks which project's daemon handles the dispatch, so it is how you aim a dispatch at a project other than the one the server started in."),
         timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120)."),
         poll_interval_seconds: numberLike.optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)."),
         include_timing: booleanLike.optional().describe("Include MCP submission-to-response timing and the last response wakeup source."),
         resume_task: external_exports.string().optional().describe("Resume a previous instruction dispatch without writing a new request."),
         mode: external_exports.string().optional().describe('Pass "investigate_readonly" for a read-only/investigate-only ask (scan/grep/report, no code changes). Skips the SPECIFY->PROVE->EMIT->...->COMPLETE phase/PRD orchestration entirely and returns a short direct-execution instruction instead -- no phase is read or changed, no PRD/mutables state is touched. It serves no phase prose, so it never satisfies the long-gap gate mid-chain; a plain re-dispatch is the cheap re-check, since fields unchanged since the last delivered reply come back elided and listed in unchanged_since_last_reply. Omit for the normal phase-managed flow.'),
-        git_root_override: external_exports.string().optional().describe("Pin the project root explicitly when cwd is not itself a git repo and is not inside one (e.g. a directory holding many unrelated repos for a cross-repo audit), or when the git subprocess is otherwise unavailable/contended. Skips `git rev-parse --show-toplevel` for this cwd; every .gm/ state file for this dispatch is then read/written under <git_root_override>/.gm. Prefer dispatching with cwd set to one of the actual repos under the directory when that is an option -- this is for the genuinely repo-less or multi-repo case.")
+        git_root_override: external_exports.string().optional().describe("Pin the project root explicitly when cwd is not itself a git repo and is not inside one (e.g. a directory holding many unrelated repos for a cross-repo audit), or when the git subprocess is otherwise unavailable/contended. Skips `git rev-parse --show-toplevel` for this cwd; every .gm/ state file for this dispatch is then read/written under <git_root_override>/.gm. Prefer dispatching with cwd set to one of the actual repos under the directory when that is an option -- this is for the genuinely repo-less or multi-repo case."),
+        full_response: external_exports.boolean().optional().describe("Return the uncompacted dispatch payload. By default the response is compacted for the wire: low-signal telemetry blocks (route_hint, orient_nouns, reply_hash, clean supply_chain_scan, codeinsight detail, dream_rsi evidence rows) are dropped, long row prose is cut to a 160-char excerpt, and a `wire_compacted` block names every field dropped or shortened plus the on-disk file holding the full payload. Set true to get every field verbatim: no field dropped or excerpted, and no text field truncated (up to 1048576 characters per field; longer still carries a pointer to the out-file).")
       }
     },
     async (args = {}, extra) => {
@@ -39082,7 +39831,8 @@ function createServer() {
         timeout_seconds: args.timeout_seconds,
         poll_interval_seconds: args.poll_interval_seconds,
         include_timing: args.include_timing,
-        resume_task: args.resume_task
+        resume_task: args.resume_task,
+        full_response: args.full_response
       }, extra?.signal);
       return { content: [{ type: "text", text }] };
     }
@@ -39111,17 +39861,19 @@ function createServer() {
   server.registerTool(
     "gm",
     {
-      description: "Run the whole gm spool write-then-poll-for-response cycle for one verb dispatch in a single call, instead of writing the input file, polling for the output file, and reading it as three separate steps. Writes .gm/exec-spool/in/<verb>/<N>.txt, polls .gm/exec-spool/out/<verb>-<N>.json until it appears (or the timeout elapses), and returns its contents as flat YAML text, auto-cleaned for readability: opaque internal ids (dispatch_id, request_fingerprint) stripped, the redundant response/data nesting levels flattened up to the top (unless a field name would collide), long text fields (e.g. instruction phase prose) truncated with a pointer naming the on-disk file to read for the full text, hit-array ranking internals (cos/recency in recall_hits/bm25_hits/vector_hits/commits) dropped, score retained as ranked evidence, byte-identical object rows repeated inside one array collapsed to the first copy, and empty/null/empty-string fields removed at every level (an empty result list such as edges/reachable/matches/definitions stays as [] so nothing-found reads as an answer) along with a false on a flag that only ever means the absence of a problem (session_mismatch, instruction_unchanged, instruction_suppressible_by_asserting_hash, recall_embed_failed, should_residual_scan, fsm_graph_rejected). A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look. For plain-text-body verbs (exec_js and every language stem it backs, serp, browser, cdp), pass raw_body instead of body -- these verbs reject a JSON object outright.",
+      description: "Run the whole gm spool write-then-poll-for-response cycle for one verb dispatch in a single call, instead of writing the input file, polling for the output file, and reading it as three separate steps. Writes .gm/exec-spool/in/<verb>/<N>.txt, polls .gm/exec-spool/out/<verb>-<N>.json until it appears (or the timeout elapses), and returns its contents as flat YAML text, auto-cleaned for readability: opaque internal ids (dispatch_id, request_fingerprint) stripped, the redundant response/data nesting levels flattened up to the top (unless a field name would collide), long text fields (e.g. instruction phase prose) truncated with a pointer naming the on-disk file to read for the full text, hit-array ranking internals (cos/recency in recall_hits/bm25_hits/vector_hits/commits) dropped, score retained as ranked evidence, byte-identical object rows repeated inside one array collapsed to the first copy, and empty/null/empty-string fields removed at every level (an empty result list such as edges/reachable/matches/definitions stays as [] so nothing-found reads as an answer) along with a false on a flag that only ever means the absence of a problem (session_mismatch, instruction_unchanged, instruction_suppressible_by_asserting_hash, recall_embed_failed, should_residual_scan, fsm_graph_rejected). On top of that cleaning the response is compacted for the wire by default: low-signal telemetry (route_hint, orient_nouns, reply_hash, an all-clear supply_chain_scan, codeinsight detail, dream_rsi evidence rows) is dropped, config_changed keeps only the newest transition, recall_hits keep key/title/score plus a 160-char excerpt, and a `wire_compacted` block names every field dropped or shortened plus the on-disk file holding the full payload; pass full_response=true for every field verbatim. A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look. For plain-text-body verbs (exec_js and every language stem it backs, serp, browser, cdp), pass raw_body instead of body -- these verbs reject a JSON object outright.",
       inputSchema: {
-        verb: external_exports.string().describe("gm spool verb name, e.g. instruction, prd-add, git_status, exec_js"),
-        body: external_exports.union([external_exports.record(external_exports.string(), external_exports.unknown()), external_exports.string()]).optional().describe("JSON body for the dispatch (an object, or a string holding a JSON object). session_id is added automatically if not present. Not valid for plain-text-body verbs (exec_js and its language stems, serp, browser, cdp) -- use raw_body for those instead."),
-        raw_body: external_exports.string().optional().describe("Literal text body for a plain-text-body verb (exec_js/bash/python/etc, serp, browser, cdp) -- sent exactly as given, no JSON wrapping. Mutually exclusive with body."),
+        verb: external_exports.string().describe(`gm spool verb name, e.g. instruction, prd-add, git_status, exec_js, fs_read. Only verbs the running build registers are dispatchable; anything else answers error_code: unknown_verb. There is no fs_list (use fs_readdir), no fs_glob and no glob (use grep or codesearch with a body "glob" filter), and no exec_bash (use bash or exec_js with raw_body). Dispatch health for the build's own verb inventory.`),
+        body: external_exports.union([external_exports.record(external_exports.string(), external_exports.unknown()), external_exports.string()]).optional().describe(`JSON body for the dispatch (an object, or a string holding a JSON object). session_id is added automatically if not present. Not valid for plain-text-body verbs (exec_js and its language stems, serp, browser, cdp) -- use raw_body for those instead. Search verbs take a project directory in the body: codesearch/grep/codeinsight accept "root" (aliases "projectPath", "cwd") to search another project than the one this dispatch's cwd selected, with "path" relative to it.`),
+        raw_body: external_exports.string().optional().describe('Literal text body for a plain-text-body verb (exec_js/bash/python/etc, serp, browser, cdp) -- sent exactly as given, no JSON wrapping. Mutually exclusive with body. The server writes these bytes to the spool input file with no escaping, so the shell sees them verbatim -- but this argument is itself a JSON string, so a backslash you write as \\ reaches the shell as ; write \\\\ to make bash receive \\. Inside bash double quotes one backslash is then removed again, and \\$ is a literal dollar sign, so "C:\\dir\\${V}" never expands ${V} -- prefer forward slashes ("C:/dir/${V}.bat") for Windows paths.'),
         session_id: external_exports.string().describe("gm SESSION_ID for this dispatch (required by gm on every body)"),
-        cwd: external_exports.string().optional().describe("Project root containing .gm/exec-spool -- defaults to process.cwd()"),
+        cwd: external_exports.string().optional().describe(`Project root containing .gm/exec-spool -- defaults to process.cwd(). It picks which project's daemon handles the dispatch, and so which project a verb like codesearch searches; it is not forwarded into the verb body, so to point a single dispatch at another project pass "root" (aliases "projectPath", "cwd") inside body.`),
         timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120)"),
         poll_interval_seconds: numberLike.optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)"),
         include_timing: booleanLike.optional().describe("Include MCP submission-to-response timing and the last response wakeup source"),
-        resume_task: external_exports.string().optional().describe("Pass the `task` field from a previous timed_out/aborted response to keep polling that SAME dispatch instead of writing a new one -- a first-time cold index/embed pass on a large repo can legitimately outrun a short timeout_seconds, and re-dispatching from scratch discards a result that may already be in flight or done. A resume sends NO body: omit body/raw_body entirely (they are ignored if passed), since the dispatch being resumed already carries its own. It still needs `verb` and `cwd` to match the original call exactly -- those two plus the task name are how the dispatch is addressed on disk -- and `session_id` remains required by this tool for every call, though a resume never writes a new spool file with it. If that triple matches no dispatch in the project spool, the call returns an immediate error naming the three paths it checked instead of polling a task that cannot arrive. A resumed result carries a `resumed` block stating that this call sent no body and whether the result predates it, so a stored error from the ORIGINAL dispatch is never misread as a verdict on the resume call. Before any timeout is reported the out-file is re-checked past the deadline, so a result that lands moments late comes back as the ordinary success it is. A genuine timed_out response carries `resume_task_supported: true` (absent on older server builds, which silently drop this argument), a `dispatch_state` block read from the spool itself (claimed_still_in_flight / queued_not_yet_claimed / no_input_file_left) plus a `daemon` liveness block (alive/heartbeat age/runtime/queue wait) -- dispatch_state is the per-dispatch authority, daemon.busy is project-scoped and says nothing about your own request.")
+        resume_task: external_exports.string().optional().describe("Pass the `task` field from a previous timed_out/aborted response to keep polling that SAME dispatch instead of writing a new one -- a first-time cold index/embed pass on a large repo can legitimately outrun a short timeout_seconds, and re-dispatching from scratch discards a result that may already be in flight or done. A resume sends NO body: omit body/raw_body entirely (they are ignored if passed), since the dispatch being resumed already carries its own. It still needs `verb` and `cwd` to match the original call exactly -- those two plus the task name are how the dispatch is addressed on disk -- and `session_id` remains required by this tool for every call, though a resume never writes a new spool file with it. If that triple matches no dispatch in the project spool, the call returns an immediate error naming the three paths it checked instead of polling a task that cannot arrive. A resumed result carries a `resumed` block stating that this call sent no body and whether the result predates it, so a stored error from the ORIGINAL dispatch is never misread as a verdict on the resume call. Before any timeout is reported the out-file is re-checked past the deadline, so a result that lands moments late comes back as the ordinary success it is. A genuine timed_out response carries `resume_task_supported: true` (absent on older server builds, which silently drop this argument), a `dispatch_state` block read from the spool itself (claimed_still_in_flight / queued_not_yet_claimed / no_input_file_left) plus a `daemon` liveness block (alive/heartbeat age/runtime/queue wait) -- dispatch_state is the per-dispatch authority, daemon.busy is project-scoped and says nothing about your own request."),
+        max_chars: external_exports.number().optional().describe("Cap, in characters, on how much of any single text field this dispatch returns inline: default 400, 32768 for a plain-text-body verb, 65536 for fs_read, hard ceiling 1048576. Past the cap the field is truncated with a pointer naming the on-disk out-file that holds the full text. Raise it to pull a large file back whole in one call."),
+        full_response: external_exports.boolean().optional().describe("Return the uncompacted dispatch payload. By default the response is compacted for the wire: low-signal telemetry blocks (route_hint, orient_nouns, reply_hash, clean supply_chain_scan, codeinsight detail, dream_rsi evidence rows) are dropped, long row prose is cut to a 160-char excerpt, and a `wire_compacted` block names every field dropped or shortened plus the on-disk file holding the full payload. Set true to get every field verbatim: no field dropped or excerpted, and no text field truncated (up to 1048576 characters per field; longer still carries a pointer to the out-file).")
       }
     },
     async (args = {}, extra) => {
@@ -39153,6 +39905,44 @@ async function main() {
 }
 
 // src/cli.js
+var COMMANDS = {
+  "pin-local-build": () => {
+    const deployedPath = process.argv[3];
+    const pin = deployedPath ? pinLocalBuild(deployedPath) : pinLocalBuild();
+    console.log(`gm-mcp ${BUNDLE_VERSION}: pinned ${pin.path} (sha256 ${pin.sha256}) as a local build in ${localBuildPinPath()} -- the release channel can no longer overwrite it`);
+    return 0;
+  },
+  "unpin-local-build": () => {
+    const pinPath = clearLocalBuildPin();
+    console.log(`gm-mcp ${BUNDLE_VERSION}: cleared the local-build pin at ${pinPath} -- the release channel may update the deployed bundle again`);
+    return 0;
+  },
+  "self-update-status": () => {
+    console.log(JSON.stringify(selfUpdateStatus(), null, 2));
+    return 0;
+  }
+};
+var command = process.argv[2];
+if (command === "--help" || command === "-h") {
+  console.log(`gm-mcp ${BUNDLE_VERSION}
+
+usage:
+  gm-mcp-server.js                 start the MCP stdio server
+  gm-mcp-server.js pin-local-build [path]   pin the deployed bundle (default ~/.gm-tools/gm-mcp-server.mjs) so a self-update cannot overwrite it
+  gm-mcp-server.js unpin-local-build        clear that pin
+  gm-mcp-server.js self-update-status       print freeze state, local-build pin and deployed bundle sha256
+
+freeze a self-update without a pin by setting ${"GM_MCP_NO_SELF_UPDATE"}=1 or creating ${noSelfUpdateFilePath()}`);
+  process.exit(0);
+}
+if (command && COMMANDS[command]) {
+  try {
+    process.exit(COMMANDS[command]());
+  } catch (error62) {
+    console.error(`gm-mcp: ${command} failed: ${error62.message}`);
+    process.exit(1);
+  }
+}
 main().catch((e) => {
   console.error(e);
   process.exit(1);
