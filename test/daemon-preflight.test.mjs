@@ -159,6 +159,44 @@ await test('a project at its claim cap says so plainly', async () => {
     assert.equal(withFreeSlot.cap_saturated, false)
 })
 
+// A queued file with free claim budget is only "waiting for the next sweep" for
+// as long as the sweep actually runs. Past the sweep bound the verdict has to be
+// a stalled claim sweep, because the advice differs: keep waiting is right for
+// ordinary queueing and wrong for a pass that is not reaching this project.
+await test('an unclaimed dispatch past the sweep bound is reported as a stalled claim sweep', async () => {
+    const dir = queueProject('queue-stalled')
+    queueFile(dir, 'instruction', 'mine.txt', 45_000)
+    const state = readSpoolDispatchState(dir, 'instruction', 'mine')
+    assert.equal(state.state, 'queued_not_yet_claimed')
+    assert.equal(state.cap_saturated, false)
+    assert.equal(state.claim_budget_left, 32)
+    assert.equal(state.project_unclaimed_count, 1)
+    assert.equal(state.claim_sweep_stalled, true)
+    assert.ok(state.claim_sweep_stalled_for_ms >= 45_000, state.claim_sweep_stalled_for_ms)
+    assert.ok(state.note.includes('CLAIM SWEEP STALLED'), state.note)
+    assert.ok(state.note.includes('resume_task'), state.note)
+})
+
+await test('a freshly queued dispatch is ordinary queueing, not a stalled sweep', async () => {
+    const dir = queueProject('queue-fresh')
+    queueFile(dir, 'instruction', 'mine.txt', 2_000)
+    const state = readSpoolDispatchState(dir, 'instruction', 'mine')
+    assert.equal(state.claim_sweep_stalled, false)
+    assert.equal(state.cap_saturated, false)
+    assert.ok(state.note.includes('Not cap saturation'), state.note)
+    assert.ok(!state.note.includes('CLAIM SWEEP STALLED'), state.note)
+})
+
+await test('a cap-saturated project blames the cap, not the sweep', async () => {
+    const dir = queueProject('queue-stalled-but-capped')
+    queueFile(dir, 'instruction', 'mine.txt', 90_000)
+    for (let i = 0; i < 32; i += 1) queueFile(dir, 'instruction', `busy-${i}.txt.inflight`, 30_000)
+    const state = readSpoolDispatchState(dir, 'instruction', 'mine')
+    assert.equal(state.claim_sweep_stalled, false)
+    assert.equal(state.cap_saturated, true)
+    assert.ok(state.note.includes('AT ITS CLAIM CAP'), state.note)
+})
+
 await test('a hidden .tmp publish file is not counted as a queued dispatch', async () => {
     const dir = queueProject('queue-tmp')
     queueFile(dir, 'instruction', 'mine.txt', 1_000)

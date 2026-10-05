@@ -573,14 +573,33 @@ export function readSpoolDispatchState(spoolDir, verb, task) {
     const queued = !claimed && fs.existsSync(queuedPath)
     const state = claimed ? 'claimed_still_in_flight' : queued ? 'queued_not_yet_claimed' : 'no_input_file_left'
     const pressure = scanSpoolQueue(spoolDir, queuedPath)
+    const stall = claimSweepStall(pressure, queued)
     const note = claimed
         ? `the daemon HAS claimed this dispatch (${claimedPath} exists) and has not written its out-file yet -- it is still running, not lost. Re-dispatch with resume_task set to this response's task to keep waiting on the SAME request instead of starting a duplicate`
         : queued && pressure
-            ? queuePressureNote(pressure, queuedPath)
+            ? queuePressureNote(pressure, queuedPath, stall)
             : queued
                 ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet; it claims every settled ticket on each tick, so wait with resume_task set to this response's task; writing a second dispatch only deepens the queue`
                 : 'neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id'
-    return { state, claimed, queued, ...(pressure ?? {}), note }
+    return { state, claimed, queued, ...(stall ?? {}), ...(pressure ?? {}), note }
+}
+
+// A live daemon with free claim slots claims a settled ticket on its next pass
+// over the project's spool. Past this age an unclaimed ticket is not ordinary
+// queueing: the pass that claims is not reaching this project (it walks the whole
+// registry in order, and anything that stalls it -- a synchronous network update
+// poll, a saturated shared plugin pool -- stalls every project behind it). Name
+// that instead of telling the caller to keep waiting on a sweep that is not
+// running.
+const CLAIM_SWEEP_STALL_MS = 30_000
+
+function claimSweepStall(pressure, queued) {
+    const oldestMs = queued && pressure ? pressure.oldest_unclaimed_age_ms : null
+    if (!queued || !pressure || pressure.cap_saturated || oldestMs === null) {
+        return { claim_sweep_stalled: false, claim_sweep_stalled_for_ms: oldestMs === null ? null : oldestMs }
+    }
+    const stalled = oldestMs >= CLAIM_SWEEP_STALL_MS
+    return { claim_sweep_stalled: stalled, claim_sweep_stalled_for_ms: oldestMs }
 }
 
 // The daemon refuses to claim another dispatch for a project once that project
@@ -650,11 +669,15 @@ export function scanSpoolQueue(spoolDir, myQueuedPath) {
     }
 }
 
-function queuePressureNote(pressure, queuedPath) {
+function queuePressureNote(pressure, queuedPath, stall) {
     const head = `${queuedPath} is still UNCLAIMED -- measured from the spool: ${pressure.project_claimed_count}/${pressure.claimed_dispatch_cap} dispatches claimed in flight for this project, ${pressure.project_unclaimed_count} unclaimed, ${pressure.unclaimed_ahead_of_mine} of them older than this one, oldest unclaimed waiting ${pressure.oldest_unclaimed_age_ms} ms`
+    const stalled = Boolean(stall && stall.claim_sweep_stalled)
+    const stallTail = stalled
+        ? `. CLAIM SWEEP STALLED: ${pressure.claim_budget_left} claim slot(s) are free and the oldest queued dispatch has been waiting ${pressure.oldest_unclaimed_age_ms} ms (past the ${CLAIM_SWEEP_STALL_MS} ms sweep bound), so the pass that claims requests is not reaching this project -- it walks every registered root in order, so a stalled pass delays everything behind it. This dispatch is still queued and will be claimed when the pass resumes: keep waiting on it with resume_task, and check the daemon log for a synchronous update poll or a saturated shared plugin pool holding the pass up.`
+        : ''
     return pressure.cap_saturated
         ? `${head}. THIS PROJECT IS AT ITS CLAIM CAP: the daemon claims nothing new here until one of the ${pressure.project_claimed_count} in-flight dispatches finishes. Wait it out on this same dispatch with resume_task -- re-dispatching adds to the ${pressure.project_unclaimed_count} already queued and cannot be claimed any sooner.`
-        : `${head}. Not cap saturation (${pressure.claim_budget_left} claim slot(s) free): the daemon is between sweeps of this project or busy elsewhere -- see daemon.daemon_active_projects and daemon.gm_processor_capacity for how many projects share it. Keep waiting on this dispatch with resume_task; nothing here is wedged.`
+        : `${head}. Not cap saturation (${pressure.claim_budget_left} claim slot(s) free): the daemon is between sweeps of this project or busy elsewhere -- see daemon.daemon_active_projects and daemon.gm_processor_capacity for how many projects share it. Keep waiting on this dispatch with resume_task; nothing here is wedged.${stallTail}`
 }
 
 const FINAL_OUT_RECHECK_WINDOW_MS = 2500
