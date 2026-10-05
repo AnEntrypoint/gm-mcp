@@ -1,24 +1,24 @@
 import process from 'node:process'
+import { BUNDLE_VERSION } from './bundle-version.js'
+import { inflightDispatchCount } from './dispatch.js'
+import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 
-const JSON_RPC_FRAME = /^\s*\{[\s\S]*\}\s*$/
+const CLIENT_GONE_EXIT_RECHECK_MS = 15_000
+const CLIENT_GONE_EXIT_RECHECK_LIMIT = 240
 
+// A JSON-RPC frame is always a single JSON object terminated by a newline.
+// Testing the first byte before parsing keeps this off the hot path: a
+// response can be a megabyte and every write goes through here.
 function isJsonRpcFrame(chunk) {
-    if (typeof chunk === 'string') {
-        if (!JSON_RPC_FRAME.test(chunk)) return false
-        try {
-            JSON.parse(chunk)
-            return true
-        } catch {
-            return false
-        }
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8')
+    if (buffer.length === 0 || buffer[0] !== 0x7b) return false
+    const text = buffer.toString('utf8')
+    try {
+        const parsed = JSON.parse(text)
+        return Boolean(parsed) && typeof parsed === 'object' && !Array.isArray(parsed)
+    } catch {
+        return false
     }
-    if (Buffer.isBuffer(chunk)) return isJsonRpcFrame(chunk.toString('utf8'))
-    return false
-}
-
-function descriptionOf(error) {
-    if (error instanceof Error) return error.stack || `${error.name}: ${error.message}`
-    return String(error)
 }
 
 export function reserveStdoutForJsonRpc() {
@@ -27,7 +27,7 @@ export function reserveStdoutForJsonRpc() {
     stdout.write = (chunk, encoding, callback) => {
         if (!isJsonRpcFrame(chunk)) {
             const text = typeof chunk === 'string' ? chunk : Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
-            process.stderr.write(`gm-mcp: diverted a non-JSON-RPC stdout write to stderr -- ${text.slice(0, 400)}\n`)
+            appendDiagnostic('stdout-write-diverted', { bytes: text.length, text: text.slice(0, 400) })
             if (typeof encoding === 'function') encoding()
             else if (typeof callback === 'function') callback()
             return true
@@ -39,23 +39,43 @@ export function reserveStdoutForJsonRpc() {
     return stdout
 }
 
+// Nothing here exits. The transport outlives every async fault: a dispatch is
+// a spool ticket somebody is waiting on, and killing the process loses both
+// the reply and the only record of why.
 export function keepServingOnAsyncFailure() {
     const report = (label) => (error) => {
-        process.stderr.write(`gm-mcp: ${label} absorbed, stdio transport stays up -- ${descriptionOf(error)}\n`)
+        appendDiagnostic(label, { error: describeError(error), dispatches_inflight: inflightDispatchCount() })
     }
-    process.on('uncaughtException', report('uncaught exception'))
-    process.on('unhandledRejection', report('unhandled rejection'))
-    process.stdin.on('error', report('stdin error'))
-    process.stderr.on('error', report('stderr error'))
+    process.on('uncaughtException', report('uncaught-exception'))
+    process.on('unhandledRejection', report('unhandled-rejection'))
+    process.stdin.on('error', report('stdin-error'))
+    process.stderr.on('error', report('stderr-error'))
+    process.on('exit', (code) => {
+        appendDiagnostic('exit', { code, dispatches_inflight: inflightDispatchCount() })
+    })
 }
 
 export function exitWhenClientGone() {
-    process.stdout.on('error', (error) => {
-        process.stderr.write(`gm-mcp: stdout pipe to the client is gone (${descriptionOf(error)}) -- exiting 0 so the next connect spawns a fresh server\n`)
+    let pending = 0
+    const exitIfIdle = (reason, error) => {
+        if (inflightDispatchCount() > 0) {
+            appendDiagnostic('exit-deferred-dispatch-inflight', {
+                reason,
+                error: error ? describeError(error) : null,
+                dispatches_inflight: inflightDispatchCount(),
+                recheck_ms: CLIENT_GONE_EXIT_RECHECK_MS,
+            })
+            if (pending >= CLIENT_GONE_EXIT_RECHECK_LIMIT) return
+            pending += 1
+            setTimeout(() => exitIfIdle(reason, error), CLIENT_GONE_EXIT_RECHECK_MS).unref?.()
+            return
+        }
+        appendDiagnostic('exit', { reason, error: error ? describeError(error) : null })
         process.exit(0)
-    })
+    }
+    process.stdout.on('error', (error) => exitIfIdle('stdout-pipe-gone', error))
     process.stdin.on('end', () => {
-        process.stderr.write('gm-mcp: stdin ended (client disconnected or platform pipe quirk) -- server stays up\n')
+        appendDiagnostic('stdin-ended', { note: 'client disconnect or platform pipe quirk -- server stays up' })
     })
 }
 
@@ -63,4 +83,12 @@ export function installStdioGuards() {
     keepServingOnAsyncFailure()
     reserveStdoutForJsonRpc()
     exitWhenClientGone()
+    appendDiagnostic('start', {
+        bundle_version: BUNDLE_VERSION,
+        argv: process.argv.slice(1),
+        cwd: process.cwd(),
+        node: process.version,
+        log: logFilePath(),
+    })
+    return true
 }
