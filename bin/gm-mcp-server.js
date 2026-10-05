@@ -38006,7 +38006,10 @@ function claimRunnerEnsure(root) {
     if (error61?.code !== "EEXIST") return false;
   }
   try {
-    if (Date.now() - fs.statSync(lockPath).mtimeMs <= ENSURE_LEASE_MS) return false;
+    const ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
+    if (ageMs <= ENSURE_LEASE_MS) return false;
+    const holderPid = Number.parseInt(fs.readFileSync(lockPath, "utf8").trim().split(/\s+/)[0], 10);
+    if (ageMs < ENSURE_CHILD_MAX_AGE_MS && pidAlive(holderPid) === true) return false;
     const stalePath = `${lockPath}.${process.pid}.${Date.now()}.stale`;
     fs.renameSync(lockPath, stalePath);
     fs.unlinkSync(stalePath);
@@ -38021,6 +38024,8 @@ function claimRunnerEnsure(root) {
 }
 var ENSURE_CHILD_MAX_AGE_MS = 12e4;
 var inflightEnsuresByRoot = /* @__PURE__ */ new Map();
+var consecutiveFailedEnsuresByRoot = /* @__PURE__ */ new Map();
+var ENSURE_BACKOFF_CEILING_MS = 6e4;
 function runnerEnsureInFlight(root, now = Date.now()) {
   const entry = inflightEnsuresByRoot.get(root);
   if (!entry) return false;
@@ -38044,7 +38049,10 @@ function runnerEnsureInFlight(root, now = Date.now()) {
 }
 function ensureSpoolRunnerRunning(root) {
   if (runnerBinaryMissing()) return;
-  if (liveDaemonSweepsProject(path.join(root, ".gm", "exec-spool"))) return;
+  if (liveDaemonSweepsProject(path.join(root, ".gm", "exec-spool"))) {
+    consecutiveFailedEnsuresByRoot.delete(root);
+    return;
+  }
   const now = Date.now();
   if (runnerEnsureInFlight(root, now)) return;
   if (now - (lastEnsuredAtByRoot.get(root) || 0) < ENSURE_INTERVAL_MS) return;
@@ -38052,8 +38060,10 @@ function ensureSpoolRunnerRunning(root) {
     lastEnsuredAtByRoot.set(root, now);
     return;
   }
-  lastEnsuredAtByRoot.set(root, now);
+  const failures = consecutiveFailedEnsuresByRoot.get(root) || 0;
+  lastEnsuredAtByRoot.set(root, now + Math.min(ENSURE_BACKOFF_CEILING_MS, ENSURE_INTERVAL_MS * 2 ** failures) - ENSURE_INTERVAL_MS);
   if (!claimRunnerEnsure(root)) return;
+  consecutiveFailedEnsuresByRoot.set(root, failures + 1);
   let child;
   try {
     child = spawn(RUNNER_PATH, ["spool"], {
@@ -38074,6 +38084,10 @@ function ensureSpoolRunnerRunning(root) {
   child.on("error", () => settle(-1));
   child.on("exit", (code) => settle(code));
   recordRunnerEnsureInflight(root, entry);
+  try {
+    fs.writeFileSync(path.join(root, ".gm", "exec-spool", ".runner-ensure.lock"), `${child.pid} ${now}`, "utf8");
+  } catch {
+  }
   child.unref();
 }
 function recordRunnerEnsureInflight(root, entry) {
@@ -38288,8 +38302,18 @@ function readSpoolDispatchState(spoolDir, verb, task) {
   const queued = !claimed && fs.existsSync(queuedPath);
   const state = claimed ? "claimed_still_in_flight" : queued ? "queued_not_yet_claimed" : "no_input_file_left";
   const pressure = scanSpoolQueue(spoolDir, queuedPath);
-  const note = claimed ? `the daemon HAS claimed this dispatch (${claimedPath} exists) and has not written its out-file yet -- it is still running, not lost. Re-dispatch with resume_task set to this response's task to keep waiting on the SAME request instead of starting a duplicate` : queued && pressure ? queuePressureNote(pressure, queuedPath) : queued ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet; it claims every settled ticket on each tick, so wait with resume_task set to this response's task; writing a second dispatch only deepens the queue` : "neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id";
-  return { state, claimed, queued, ...pressure ?? {}, note };
+  const stall = claimSweepStall(pressure, queued);
+  const note = claimed ? `the daemon HAS claimed this dispatch (${claimedPath} exists) and has not written its out-file yet -- it is still running, not lost. Do NOT re-dispatch: call again with the same verb and cwd, resume_task set to this response's task and no body, to keep waiting on the SAME request` : queued && pressure ? queuePressureNote(pressure, queuedPath, stall) : queued ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet; it claims every settled ticket on each tick, so do NOT re-dispatch: call again with the same verb and cwd, resume_task set to this response's task and no body; writing a second dispatch only deepens the queue` : "neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id";
+  return { state, claimed, queued, ...stall ?? {}, ...pressure ?? {}, note };
+}
+var CLAIM_SWEEP_STALL_MS = 3e4;
+function claimSweepStall(pressure, queued) {
+  const oldestMs = queued && pressure ? pressure.oldest_unclaimed_age_ms : null;
+  if (!queued || !pressure || pressure.cap_saturated || oldestMs === null) {
+    return { claim_sweep_stalled: false, claim_sweep_stalled_for_ms: oldestMs === null ? null : oldestMs };
+  }
+  const stalled = oldestMs >= CLAIM_SWEEP_STALL_MS;
+  return { claim_sweep_stalled: stalled, claim_sweep_stalled_for_ms: oldestMs };
 }
 var MAX_CLAIMED_DISPATCHES_PER_PROJECT = 32;
 function scanSpoolQueue(spoolDir, myQueuedPath) {
@@ -38347,9 +38371,11 @@ function scanSpoolQueue(spoolDir, myQueuedPath) {
     cap_saturated: claimedCount >= MAX_CLAIMED_DISPATCHES_PER_PROJECT
   };
 }
-function queuePressureNote(pressure, queuedPath) {
+function queuePressureNote(pressure, queuedPath, stall) {
   const head = `${queuedPath} is still UNCLAIMED -- measured from the spool: ${pressure.project_claimed_count}/${pressure.claimed_dispatch_cap} dispatches claimed in flight for this project, ${pressure.project_unclaimed_count} unclaimed, ${pressure.unclaimed_ahead_of_mine} of them older than this one, oldest unclaimed waiting ${pressure.oldest_unclaimed_age_ms} ms`;
-  return pressure.cap_saturated ? `${head}. THIS PROJECT IS AT ITS CLAIM CAP: the daemon claims nothing new here until one of the ${pressure.project_claimed_count} in-flight dispatches finishes. Wait it out on this same dispatch with resume_task -- re-dispatching adds to the ${pressure.project_unclaimed_count} already queued and cannot be claimed any sooner.` : `${head}. Not cap saturation (${pressure.claim_budget_left} claim slot(s) free): the daemon is between sweeps of this project or busy elsewhere -- see daemon.daemon_active_projects and daemon.gm_processor_capacity for how many projects share it. Keep waiting on this dispatch with resume_task; nothing here is wedged.`;
+  const stalled = Boolean(stall && stall.claim_sweep_stalled);
+  const stallTail = stalled ? `. CLAIM SWEEP STALLED: ${pressure.claim_budget_left} claim slot(s) are free and the oldest queued dispatch has been waiting ${pressure.oldest_unclaimed_age_ms} ms (past the ${CLAIM_SWEEP_STALL_MS} ms sweep bound), so the pass that claims requests is not reaching this project -- it walks every registered root in order, so a stalled pass delays everything behind it. This dispatch is still queued and will be claimed when the pass resumes: keep waiting on it with resume_task, and check the daemon log for a synchronous update poll or a saturated shared plugin pool holding the pass up.` : "";
+  return pressure.cap_saturated ? `${head}. THIS PROJECT IS AT ITS CLAIM CAP: the daemon claims nothing new here until one of the ${pressure.project_claimed_count} in-flight dispatches finishes. Wait it out on this same dispatch with resume_task -- re-dispatching adds to the ${pressure.project_unclaimed_count} already queued and cannot be claimed any sooner.` : `${head}. Not cap saturation (${pressure.claim_budget_left} claim slot(s) free): the daemon is between sweeps of this project or busy elsewhere -- see daemon.daemon_active_projects and daemon.gm_processor_capacity for how many projects share it. Keep waiting on this dispatch with resume_task; nothing here is wedged.${stallTail}`;
 }
 var FINAL_OUT_RECHECK_WINDOW_MS = 2500;
 var FINAL_OUT_RECHECK_INTERVAL_MS = 150;
