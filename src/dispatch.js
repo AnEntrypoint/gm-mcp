@@ -347,7 +347,9 @@ function globalDaemonPid() {
     const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
     if (pidAlive(status?.pid) === true) return status.pid
     try {
-        const owner = Number.parseInt(fs.readFileSync(GLOBAL_DAEMON_OWNER_LOCK_PATH, 'utf8').trim(), 10)
+        const ownerText = fs.readFileSync(GLOBAL_DAEMON_OWNER_LOCK_PATH, 'utf8').trim()
+        if (!/^[1-9][0-9]*$/.test(ownerText)) return null
+        const owner = Number(ownerText)
         if (pidAlive(owner) === true) return owner
     } catch {
     }
