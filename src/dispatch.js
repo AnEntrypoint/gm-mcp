@@ -451,12 +451,26 @@ function daemonRestartCommand(root) {
     return `"${RUNNER_PATH}" spool   (run with cwd ${path.resolve(root)}; the launcher detaches agentplug-runner daemon for this project)`
 }
 
-function readDaemonLiveness(spoolDir) {
+function coldProjectLiveness() {
+    const shared = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    const sharedPid = globalDaemonPid()
+    if (sharedPid === null) {
+        return { alive: null, note: 'no .status.json heartbeat found for this project yet and no shared daemon process is running -- nothing has swept this project; start one with the restart command for this project' }
+    }
+    return {
+        alive: null,
+        shared_daemon_pid: sharedPid,
+        shared_daemon_active_projects: shared?.active_projects ?? null,
+        note: `no .status.json heartbeat for this project yet, but the shared daemon (pid ${sharedPid}, serving ${shared?.active_projects ?? 'many'} registered projects) is running -- this is a cold project waiting its turn behind that daemon's other work (measured 85-110 s for a brand-new project, git repo or not; the project is keyed on its own directory, so a non-git cwd needs no git_root_override). The dispatch is still queued and will be claimed: re-dispatch with resume_task set to this response's task instead of writing a second request`,
+    }
+}
+
+export function readDaemonLiveness(spoolDir) {
     let status
     try {
         status = JSON.parse(fs.readFileSync(path.join(spoolDir, '.status.json'), 'utf8'))
     } catch {
-        return { alive: null, note: 'no .status.json heartbeat found for this project yet -- the daemon may not have picked up this project at all' }
+        return coldProjectLiveness()
     }
     const now = Date.now()
     const heartbeatAgeMs = typeof status.ts === 'number' ? now - status.ts : null

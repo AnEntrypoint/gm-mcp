@@ -8,7 +8,7 @@ import path from 'node:path'
 process.env.GM_MCP_DAEMON_START_GRACE_MS = '400'
 // The watchdog re-ensures every 5 s, which outlives the lease that holds the runner spawn off.
 process.env.GM_MCP_RUNNER_WATCHDOG = '0'
-const { daemonBootGraceActive, daemonNotRunning } = await import('../src/dispatch.js')
+const { daemonBootGraceActive, daemonNotRunning, readDaemonLiveness } = await import('../src/dispatch.js')
 
 let passed = 0
 async function test(name, fn) {
@@ -89,6 +89,15 @@ await test('GM_MCP_DAEMON_PREFLIGHT=0 bypasses the check', async () => {
     } finally {
         delete process.env.GM_MCP_DAEMON_PREFLIGHT
     }
+})
+
+await test('a cold project explains the wait instead of blaming git or the daemon', async () => {
+    const dir = project('cold-non-git')
+    const liveness = readDaemonLiveness(dir)
+    assert.equal(liveness.alive, null)
+    assert.ok(liveness.note.includes('.status.json'), liveness.note)
+    const sharedDaemonRunning = liveness.shared_daemon_pid !== undefined
+    assert.ok(liveness.note.includes(sharedDaemonRunning ? 'resume_task' : 'no shared daemon process'), liveness.note)
 })
 
 // A handle on the tree can outlive the process that opened it, so one rmSync is not enough: retry
