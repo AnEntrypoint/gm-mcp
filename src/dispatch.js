@@ -95,17 +95,16 @@ const RESULT_CHUNK_MAX_CHARACTERS = 16000
 const RESULT_FILE_MAX_BYTES = 4 * 1024 * 1024
 const RESULT_READ_CHUNK_BYTES = 64 * 1024
 
-function assertResultFileInsideSpool(root, resultFile) {
+function spoolFilePath(root, file) {
     const outDir = path.join(root, '.gm', 'exec-spool', 'out')
-    const candidate = path.resolve(root, resultFile)
+    const candidate = path.resolve(root, file)
+    const absoluteOutDir = path.resolve(outDir)
     const resolvedOutDir = fs.realpathSync(outDir)
-    const resolvedFile = fs.realpathSync(candidate)
-    const relative = path.relative(resolvedOutDir, resolvedFile)
+    const relative = path.relative(absoluteOutDir, candidate)
     if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-        throw new Error('result_file must name a file inside this project\'s .gm/exec-spool/out directory')
+        throw new Error('spool file must name a file inside this project\'s .gm/exec-spool/out directory')
     }
-    if (!fs.statSync(resolvedFile).isFile()) throw new Error('result_file must name a regular file')
-    return { candidate, resolvedFile, resolvedOutDir }
+    return { candidate, resolvedOutDir }
 }
 
 function openedDescriptorPath(fd) {
@@ -120,28 +119,32 @@ function openedDescriptorPath(fd) {
     }
 }
 
-function openResultFile(root, resultFile) {
-    const { candidate, resolvedFile, resolvedOutDir } = assertResultFileInsideSpool(root, resultFile)
+function openSpoolRegularFile(root, file) {
+    const { candidate, resolvedOutDir } = spoolFilePath(root, file)
     const before = fs.lstatSync(candidate)
-    if (!before.isFile() || before.nlink !== 1) throw new Error('result_file must be an unlinked regular spool file')
+    if (!before.isFile() || before.nlink !== 1) throw new Error('spool file must be an unlinked regular spool file')
     const fd = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
     try {
         const opened = fs.fstatSync(fd)
-        if (!opened.isFile() || opened.nlink !== 1) throw new Error('result_file must be an unlinked regular spool file')
-        if (opened.dev !== before.dev || opened.ino !== before.ino) throw new Error('result_file changed while opening')
-        if (opened.size > RESULT_FILE_MAX_BYTES) throw new Error(`result_file exceeds ${RESULT_FILE_MAX_BYTES} byte limit`)
+        if (!opened.isFile() || opened.nlink !== 1) throw new Error('spool file must be an unlinked regular spool file')
+        if (opened.dev !== before.dev || opened.ino !== before.ino) throw new Error('spool file changed while opening')
+        if (opened.size > RESULT_FILE_MAX_BYTES) throw new Error(`spool file exceeds ${RESULT_FILE_MAX_BYTES} byte limit`)
         const descriptorPath = openedDescriptorPath(fd)
         if (descriptorPath) {
             const relative = path.relative(resolvedOutDir, descriptorPath)
             if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-                throw new Error('result_file is outside the GM output spool')
+                throw new Error('spool file is outside the GM output spool')
             }
         }
-        return { fd, file: resolvedFile, size: opened.size }
+        return { fd, file: candidate, size: opened.size, mtimeMs: opened.mtimeMs }
     } catch (error) {
         fs.closeSync(fd)
         throw error
     }
+}
+
+function openResultFile(root, resultFile) {
+    return openSpoolRegularFile(root, resultFile)
 }
 
 function readAllBounded(fd, size) {
@@ -1028,13 +1031,11 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
     const readLandedOutFile = () => {
         if (!fs.existsSync(outPath)) return undefined
         let landedAtMs = null
+        let opened
         try {
-            landedAtMs = fs.statSync(outPath).mtimeMs
-        } catch {
-            landedAtMs = null
-        }
-        try {
-            const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, 'utf8')))
+            opened = openSpoolRegularFile(root, outPath)
+            landedAtMs = opened.mtimeMs
+            const parsed = unpackExecOutputEnvelope(verb, JSON.parse(readAllBounded(opened.fd, opened.size)))
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
             const cleaned = cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
@@ -1065,6 +1066,8 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         } catch (e) {
             const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
+        } finally {
+            if (opened) fs.closeSync(opened.fd)
         }
     }
 
