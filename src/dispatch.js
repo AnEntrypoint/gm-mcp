@@ -299,8 +299,6 @@ const GLOBAL_DAEMON_STATUS_PATH = path.join(AGENTPLUG_DIR, 'daemon-status.json')
 const GLOBAL_DAEMON_OWNER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'daemon-owner.lock')
 const GLOBAL_DAEMON_LOG_PATH = path.join(AGENTPLUG_DIR, 'daemon.log')
 
-// Recovery windows for a daemon that exits on purpose and is restarted from
-// here -- see AGENTS.md ("Runner recovery").
 const ENSURE_INTERVAL_MS = 2_000
 const ENSURE_LEASE_MS = 3_000
 const ENSURE_BOOT_GRACE_MS = 30_000
@@ -430,13 +428,6 @@ function claimRunnerEnsure(root) {
     }
 }
 
-// A cold `agentplug-runner spool` takes tens of seconds (it registers the
-// project, then waits out the shared daemon's wasm compile). The watchdog wakes
-// every WATCHDOG_INTERVAL_MS, so without this guard one cold start spawns a new
-// runner every ENSURE_INTERVAL_MS -- a pile of processes that all contend for
-// daemon.lock and none of which finish faster. ENSURE_CHILD_MAX_AGE_MS caps it:
-// a `spool` that outlives the cap is treated as wedged and re-issued, so a hung
-// child can never block supervision forever.
 const ENSURE_CHILD_MAX_AGE_MS = 120_000
 const inflightEnsuresByRoot = new Map()
 const consecutiveFailedEnsuresByRoot = new Map()
@@ -514,14 +505,10 @@ function ensureSpoolRunnerRunning(root) {
     child.unref()
 }
 
-// Seam for the recovery tests: seeds the in-flight map so runnerEnsureInFlight
-// can be asserted without spawning a real runner.
 export function recordRunnerEnsureInflight(root, entry) {
     inflightEnsuresByRoot.set(root, entry)
 }
 
-// A timer per root keeps the daemon up between dispatches, so the next dispatch
-// lands on a live sweeper instead of reviving one inside its own poll budget.
 function startRunnerWatchdog(root) {
     if (process.env.GM_MCP_RUNNER_WATCHDOG === '0') return
     if (watchdogTimersByRoot.has(root)) return
@@ -707,11 +694,6 @@ export function readDaemonLiveness(spoolDir) {
     return liveness
 }
 
-// A missing runner binary with no live shared daemon means the daemon can never
-// claim a fresh ticket: without this guard the request is written, sits
-// unclaimed, and the caller only learns the binary is absent after a full poll
-// timeout. Failing fast here keeps a working shared daemon usable (its liveness
-// short-circuits) and turns the silent no-op into one actionable error.
 function runnerUnavailable(root, spoolDir) {
     if (!runnerBinaryMissing()) return null
     if (readDaemonLiveness(spoolDir).alive) return null
@@ -723,14 +705,6 @@ function runnerUnavailable(root, spoolDir) {
     }
 }
 
-// A dispatch written to a project whose daemon is gone sits
-// queued_not_yet_claimed and costs the caller its whole poll budget -- the
-// spool has no way to answer "nobody is listening". This asks for a runner,
-// waits out the cold start, and only then reports, so a dead daemon answers in
-// DAEMON_START_GRACE_MS instead of after a silent 120 s. A project with no
-// heartbeat at all is a first run, not a dead daemon: it still dispatches,
-// because the runner registers the project on its next tick and
-// startRunnerWatchdog keeps it up from then on.
 const DAEMON_START_GRACE_MS = Number(process.env.GM_MCP_DAEMON_START_GRACE_MS) > 0
     ? Number(process.env.GM_MCP_DAEMON_START_GRACE_MS)
     : 15_000
@@ -792,13 +766,6 @@ export function readSpoolDispatchState(spoolDir, verb, task) {
     return { state, claimed, queued, ...(stall ?? {}), ...(pressure ?? {}), note }
 }
 
-// A live daemon with free claim slots claims a settled ticket on its next pass
-// over the project's spool. Past this age an unclaimed ticket is not ordinary
-// queueing: the pass that claims is not reaching this project (it walks the whole
-// registry in order, and anything that stalls it -- a synchronous network update
-// poll, a saturated shared plugin pool -- stalls every project behind it). Name
-// that instead of telling the caller to keep waiting on a sweep that is not
-// running.
 const CLAIM_SWEEP_STALL_MS = 30_000
 
 function claimSweepStall(pressure, queued) {
@@ -810,13 +777,6 @@ function claimSweepStall(pressure, queued) {
     return { claim_sweep_stalled: stalled, claim_sweep_stalled_for_ms: oldestMs }
 }
 
-// The daemon refuses to claim another dispatch for a project once that project
-// already holds MAX_CLAIMED_DISPATCHES_PER_PROJECT claimed ones (agentplug-runner
-// daemon.rs, claim_budget). A dispatch that sits unclaimed is therefore either
-// blocked by that cap or merely waiting for the daemon's next sweep of this
-// project -- and the two need opposite responses from the caller (wait vs
-// escalate). The spool holds both numbers, so measure them instead of listing
-// hypotheses.
 const MAX_CLAIMED_DISPATCHES_PER_PROJECT = 32
 
 export function scanSpoolQueue(spoolDir, myQueuedPath) {
@@ -848,8 +808,6 @@ export function scanSpoolQueue(spoolDir, myQueuedPath) {
         }
         for (const fileEntry of files) {
             if (!fileEntry.isFile() || fileEntry.name.startsWith('.')) continue
-            // A claim renames <task>.<ext> to <task>.<ext>.inflight in place, so
-            // .inflight is the only marker of a dispatch the daemon owns.
             if (fileEntry.name.endsWith('.inflight')) {
                 claimedCount += 1
                 continue
@@ -1088,11 +1046,6 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
 
     while (true) {
         if (signal?.aborted) return abortedReply()
-        // A daemon that dies between the preflight and the claim leaves this
-        // dispatch queued_not_yet_claimed for its whole poll budget. Re-ask for
-        // a runner on every wake instead of only once up front: the throttle
-        // inside ensureSpoolRunnerRunning keeps it to one attempt every
-        // ENSURE_INTERVAL_MS, and it is a no-op while the daemon is live.
         ensureSpoolRunnerRunning(root)
         const landed = readLandedOutFile()
         if (landed !== undefined) return landed
