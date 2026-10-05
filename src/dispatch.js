@@ -367,6 +367,10 @@ function readLauncherLock() {
     }
 }
 
+export function launcherLockMayBeReclaimed(held) {
+    return !held || pidAlive(held.pid) !== true
+}
+
 function claimGlobalLauncher() {
     fs.mkdirSync(AGENTPLUG_DIR, { recursive: true })
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -377,14 +381,7 @@ function claimGlobalLauncher() {
             if (error?.code !== 'EEXIST') return false
         }
         const held = readLauncherLock()
-        const heldAgeMs = held?.ts ? Date.now() - held.ts : Number.POSITIVE_INFINITY
-        if (held && heldAgeMs < ENSURE_CHILD_MAX_AGE_MS && pidAlive(held.pid) !== false) return false
-        if (held && pidAlive(held.pid) === true && held.pid !== process.pid) {
-            try {
-                process.kill(held.pid)
-            } catch {
-            }
-        }
+        if (!launcherLockMayBeReclaimed(held)) return false
         try {
             fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH)
         } catch {
