@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased - glob filters forwarded as documented, and a slow dispatch discloses its wait
+
+Glob filters no longer reject a leading `!` or brace lists: the wasm already excludes, merges aliases and expands braces, so the wrapper only validates types and blanks. `exclude_glob`/`exclude_globs` are validated the same way. Replies that waited 5 s or more carry `dispatch_waited_ms`. `timeout_ms` coerces from a numeric string like the other codesearch integers.
+
+## Unreleased - a queued dispatch reports measured queue pressure instead of three hypotheses
+
+A dispatch that timed out `queued_not_yet_claimed` was explained in prose: "the
+daemon is between ticks or still starting, or this project already has its
+maximum of 32 claimed dispatches in flight". Those are different situations with
+opposite responses -- wait, or escalate -- and nothing in the response let the
+caller tell them apart.
+
+The spool holds both numbers, so the response now measures them:
+`dispatch_state` gains `project_claimed_count`, `project_unclaimed_count`,
+`oldest_unclaimed_age_ms`, `unclaimed_ahead_of_mine`, `claimed_dispatch_cap`,
+`claim_budget_left` and `cap_saturated`, counted from `in/<verb>/` the same way
+the daemon counts its own (`*.inflight` is the claim marker). When the cap is
+the blocker the note says so and points at `resume_task`; when it is not, the
+note says the claim budget is free and the wait is the daemon's sweep of other
+projects. `daemon` also stops dropping the counts the heartbeat already
+publishes -- `claimed_step_count`, `queued_step_count`,
+`gm_processor_capacity` -- and adds `daemon_active_projects` from the shared
+daemon status, which is what actually explains a long `queue_wait_ms` on a
+shared daemon.
+
 ## Unreleased - a daemon that dies mid-dispatch is re-asked for, and one cold start no longer stacks runners
 
 A dispatch whose daemon exits after the preflight sat `queued_not_yet_claimed`

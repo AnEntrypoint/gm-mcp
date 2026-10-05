@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 // Set before importing: dispatch.js reads the grace once at module load, and
@@ -8,7 +8,7 @@ import path from 'node:path'
 process.env.GM_MCP_DAEMON_START_GRACE_MS = '400'
 // The watchdog re-ensures every 5 s, which outlives the lease that holds the runner spawn off.
 process.env.GM_MCP_RUNNER_WATCHDOG = '0'
-const { daemonBootGraceActive, daemonNotRunning, readDaemonLiveness } = await import('../src/dispatch.js')
+const { daemonBootGraceActive, daemonNotRunning, readDaemonLiveness, readSpoolDispatchState, scanSpoolQueue } = await import('../src/dispatch.js')
 
 let passed = 0
 async function test(name, fn) {
@@ -98,6 +98,82 @@ await test('a cold project explains the wait instead of blaming git or the daemo
     assert.ok(liveness.note.includes('.status.json'), liveness.note)
     const sharedDaemonRunning = liveness.shared_daemon_pid !== undefined
     assert.ok(liveness.note.includes(sharedDaemonRunning ? 'resume_task' : 'no shared daemon process'), liveness.note)
+})
+
+// An unclaimed dispatch used to be explained with three hypotheses. These build
+// a spool by hand so the numbers -- not the prose -- are what gets asserted.
+const queueProject = (name) => {
+    const dir = project(name)
+    mkdirSync(path.join(dir, 'in', 'instruction'), { recursive: true })
+    return dir
+}
+const queueFile = (dir, verb, name, ageMs) => {
+    const verbDir = path.join(dir, 'in', verb)
+    mkdirSync(verbDir, { recursive: true })
+    const filePath = path.join(verbDir, name)
+    writeFileSync(filePath, '{}')
+    const backdated = (Date.now() - ageMs) / 1000
+    utimesSync(filePath, backdated, backdated)
+    return filePath
+}
+
+await test('an unclaimed dispatch reports measured queue pressure, not hypotheses', async () => {
+    const dir = queueProject('queue-measured')
+    const mine = queueFile(dir, 'instruction', 'mine.txt', 5_000)
+    queueFile(dir, 'instruction', 'older.txt', 60_000)
+    queueFile(dir, 'codesearch', 'oldest.txt', 120_000)
+    const state = readSpoolDispatchState(dir, 'instruction', 'mine')
+    assert.equal(state.state, 'queued_not_yet_claimed')
+    assert.equal(state.project_claimed_count, 0)
+    assert.equal(state.project_unclaimed_count, 3)
+    assert.equal(state.unclaimed_ahead_of_mine, 2)
+    assert.equal(state.claimed_dispatch_cap, 32)
+    assert.equal(state.claim_budget_left, 32)
+    assert.equal(state.cap_saturated, false)
+    assert.ok(state.oldest_unclaimed_age_ms >= 120_000, state.oldest_unclaimed_age_ms)
+    assert.ok(state.note.includes('Not cap saturation'), state.note)
+    assert.ok(state.note.includes('resume_task'), state.note)
+    assert.ok(!state.note.includes('maximum of 32 claimed dispatches in flight'), state.note)
+    assert.ok(existsSync(mine))
+})
+
+await test('a project at its claim cap says so plainly', async () => {
+    const dir = queueProject('queue-saturated')
+    queueFile(dir, 'instruction', 'mine.txt', 1_000)
+    for (let i = 0; i < 32; i += 1) queueFile(dir, 'instruction', `busy-${i}.txt.inflight`, 30_000)
+    const state = scanSpoolQueue(dir, path.join(dir, 'in', 'instruction', 'mine.txt'))
+    assert.equal(state.project_claimed_count, 32)
+    assert.equal(state.project_unclaimed_count, 1)
+    assert.equal(state.claim_budget_left, 0)
+    assert.equal(state.cap_saturated, true)
+    const note = readSpoolDispatchState(dir, 'instruction', 'mine').note
+    assert.ok(note.includes('AT ITS CLAIM CAP'), note)
+    // The census counts the daemon's .inflight claim marker, not raw files:
+    // free a slot and the saturation verdict flips with it.
+    const busy0 = path.join(dir, 'in', 'instruction', 'busy-0.txt.inflight')
+    rmSync(busy0)
+    writeFileSync(path.join(dir, 'in', 'instruction', 'busy-0.txt'), '{}')
+    const withFreeSlot = scanSpoolQueue(dir, path.join(dir, 'in', 'instruction', 'mine.txt'))
+    assert.equal(withFreeSlot.project_claimed_count, 31)
+    assert.equal(withFreeSlot.project_unclaimed_count, 2)
+    assert.equal(withFreeSlot.cap_saturated, false)
+})
+
+await test('a hidden .tmp publish file is not counted as a queued dispatch', async () => {
+    const dir = queueProject('queue-tmp')
+    queueFile(dir, 'instruction', 'mine.txt', 1_000)
+    queueFile(dir, 'instruction', '.mine.1.2.tmp', 1_000)
+    const state = scanSpoolQueue(dir, path.join(dir, 'in', 'instruction', 'mine.txt'))
+    assert.equal(state.project_unclaimed_count, 1)
+})
+
+await test('a live daemon block carries the counts it already published', async () => {
+    const dir = project('status-counts')
+    writeStatus(dir, { pid: process.pid, ts: Date.now(), claimed_step_count: 7, queued_step_count: 3, gm_processor_capacity: 8 })
+    const liveness = readDaemonLiveness(dir)
+    assert.equal(liveness.claimed_step_count, 7)
+    assert.equal(liveness.queued_step_count, 3)
+    assert.equal(liveness.gm_processor_capacity, 8)
 })
 
 // A handle on the tree can outlive the process that opened it, so one rmSync is not enough: retry
