@@ -38034,6 +38034,10 @@ function runnerEnsureInFlight(root, now = Date.now()) {
   }
   if (now - entry.spawnedAtMs >= ENSURE_CHILD_MAX_AGE_MS) {
     inflightEnsuresByRoot.delete(root);
+    try {
+      process.kill(entry.pid);
+    } catch {
+    }
     return false;
   }
   return true;
