@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased - gm-mcp also serves streamable HTTP, so a lost connection is no longer permanent
+
+A Claude Code session lost its `gm` MCP connection mid-session (2026-10-05, cwd
+`C:\dev\mc-420`): `mcp__gm__gm` answered "No such tool available ... Its MCP
+server 'gm' has disconnected" for the rest of the session. The server was not
+at fault -- a fresh stdio session ran initialize, two real `git_status`
+dispatches and a 45 s idle hold without a hiccup. The defect is structural:
+`gm` is registered as a user-scope **stdio** server, so the client owns one
+child process on one pipe, and when that pipe goes the tool is gone with no way
+to re-attach -- not by the server, and not by the client until it is restarted.
+
+Two changes. `src/transport-guard.js` no longer treats a dead pipe as a reason
+to die: `exitWhenClientGone()` is replaced by `surviveClientGone()`, which logs
+the EPIPE once per error kind and keeps serving, and `logSignalExits()` names
+the signal on the way out so a SIGTERM kill is distinguishable from a crash.
+Exiting could only ever turn a recoverable stall into a guaranteed disconnect.
+
+`src/http-transport.js` adds a **streamable HTTP** transport (stateless: no
+session id, one request per call) on `127.0.0.1:8787/mcp`, with `/health`.
+`src/singleton.js` keeps exactly one per machine -- health probe first, spawn
+detached only when nothing answers -- and a stdio server seeds it on startup so
+the durable transport is already up before anything asks for it. `ensure-http`
+and `http-status` are new CLI commands. Switching the registration over is a
+one-liner that needs nothing installed:
+
+    claude mcp remove gm -s user && claude mcp add --transport http gm http://127.0.0.1:8787/mcp -s user
+
+A first cut held one shared stateless transport across requests: it answered its
+first request and then 500'd every later one, a worse failure than the drop it
+replaced, so a fresh server and transport are now built per request.
+
 ## Unreleased - the MCP shim survives an async fault, and no gm-mcp server signals another process
 
 A Claude Code session lost its `gm` MCP connection mid-session (2026-10-05, cwd
