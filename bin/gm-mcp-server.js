@@ -37989,6 +37989,41 @@ function liveDaemonSweepsProject(spoolDir) {
   const alive = pidAlive(status.pid);
   return alive !== false;
 }
+var GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, "spool-launch.lock");
+function readLauncherLock() {
+  try {
+    const [pid, ts] = fs.readFileSync(GLOBAL_LAUNCHER_LOCK_PATH, "utf8").trim().split(/\s+/).map(Number);
+    return { pid, ts };
+  } catch {
+    return null;
+  }
+}
+function claimGlobalLauncher() {
+  fs.mkdirSync(AGENTPLUG_DIR, { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${process.pid} ${Date.now()}`, { flag: "wx", mode: 384 });
+      return true;
+    } catch (error61) {
+      if (error61?.code !== "EEXIST") return false;
+    }
+    const held = readLauncherLock();
+    const heldAgeMs = held?.ts ? Date.now() - held.ts : Number.POSITIVE_INFINITY;
+    if (held && heldAgeMs < ENSURE_CHILD_MAX_AGE_MS && pidAlive(held.pid) !== false) return false;
+    if (held && pidAlive(held.pid) === true && held.pid !== process.pid) {
+      try {
+        process.kill(held.pid);
+      } catch {
+      }
+    }
+    try {
+      fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
 function claimRunnerEnsure(root) {
   const lockPath = path.join(root, ".gm", "exec-spool", ".runner-ensure.lock");
   const claim2 = () => {
@@ -38059,6 +38094,7 @@ function ensureSpoolRunnerRunning(root) {
   const failures = consecutiveFailedEnsuresByRoot.get(root) || 0;
   lastEnsuredAtByRoot.set(root, now + Math.min(ENSURE_BACKOFF_CEILING_MS, ENSURE_INTERVAL_MS * 2 ** failures) - ENSURE_INTERVAL_MS);
   if (!claimRunnerEnsure(root)) return;
+  if (!claimGlobalLauncher()) return;
   consecutiveFailedEnsuresByRoot.set(root, failures + 1);
   let child;
   try {
@@ -38070,7 +38106,15 @@ function ensureSpoolRunnerRunning(root) {
       windowsHide: true
     });
   } catch {
+    try {
+      fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH);
+    } catch {
+    }
     return;
+  }
+  try {
+    fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${child.pid} ${now}`, "utf8");
+  } catch {
   }
   const entry = { pid: child.pid, spawnedAtMs: now, exitCode: null };
   const settle = (code) => {
@@ -38583,6 +38627,71 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
   }
 }
 
+// src/transport-guard.js
+import process4 from "node:process";
+var JSON_RPC_FRAME = /^\s*\{[\s\S]*\}\s*$/;
+function isJsonRpcFrame(chunk) {
+  if (typeof chunk === "string") {
+    if (!JSON_RPC_FRAME.test(chunk)) return false;
+    try {
+      JSON.parse(chunk);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  if (Buffer.isBuffer(chunk)) return isJsonRpcFrame(chunk.toString("utf8"));
+  return false;
+}
+function descriptionOf(error61) {
+  if (error61 instanceof Error) return error61.stack || `${error61.name}: ${error61.message}`;
+  return String(error61);
+}
+function reserveStdoutForJsonRpc() {
+  const stdout = process4.stdout;
+  const write = stdout.write.bind(stdout);
+  stdout.write = (chunk, encoding, callback) => {
+    if (!isJsonRpcFrame(chunk)) {
+      const text = typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      process4.stderr.write(`gm-mcp: diverted a non-JSON-RPC stdout write to stderr -- ${text.slice(0, 400)}
+`);
+      if (typeof encoding === "function") encoding();
+      else if (typeof callback === "function") callback();
+      return true;
+    }
+    return write(chunk, encoding, callback);
+  };
+  console.log = (...args) => process4.stderr.write(`${args.map(String).join(" ")}
+`);
+  console.info = console.log;
+  return stdout;
+}
+function keepServingOnAsyncFailure() {
+  const report = (label) => (error61) => {
+    process4.stderr.write(`gm-mcp: ${label} absorbed, stdio transport stays up -- ${descriptionOf(error61)}
+`);
+  };
+  process4.on("uncaughtException", report("uncaught exception"));
+  process4.on("unhandledRejection", report("unhandled rejection"));
+  process4.stdin.on("error", report("stdin error"));
+  process4.stderr.on("error", report("stderr error"));
+}
+function exitWhenClientGone() {
+  process4.stdout.on("error", (error61) => {
+    process4.stderr.write(`gm-mcp: stdout pipe to the client is gone (${descriptionOf(error61)}) -- exiting 0 so the next connect spawns a fresh server
+`);
+    process4.exit(0);
+  });
+  process4.stdin.on("end", () => {
+    process4.stderr.write("gm-mcp: stdin ended (client disconnected or platform pipe quirk) -- server stays up\n");
+  });
+}
+function installStdioGuards() {
+  keepServingOnAsyncFailure();
+  reserveStdoutForJsonRpc();
+  exitWhenClientGone();
+}
+
 // src/self-update.js
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -38592,7 +38701,7 @@ import path2 from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/bundle-version.js
-var BUNDLE_VERSION = "0.2.4";
+var BUNDLE_VERSION = "0.2.5";
 
 // src/self-update.js
 var DEPLOYED_BUNDLE_FILE_NAME = "gm-mcp-server.mjs";
@@ -38810,6 +38919,10 @@ function refreshStaleDeployedBundleInBackground() {
 // src/index.js
 var numberLike = external_exports.union([external_exports.number(), external_exports.string()]);
 var booleanLike = external_exports.union([external_exports.boolean(), external_exports.string()]);
+function failedDispatchResult(error61) {
+  const detail = error61 instanceof Error ? error61.stack || error61.message : String(error61);
+  return { content: [{ type: "text", text: `gm-mcp: dispatch threw, stdio transport stays up -- ${detail}` }], isError: true };
+}
 function createServer() {
   const server = new McpServer({ name: "gm-mcp", version: BUNDLE_VERSION });
   const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`;
@@ -38831,22 +38944,26 @@ function createServer() {
       }
     },
     async (args = {}, extra) => {
-      const text = await gmDispatch({
-        verb: "instruction",
-        body: args.resume_task ? void 0 : {
-          prompt: args.prompt ?? "",
-          ...args.mode ? { mode: args.mode } : {},
-          ...args.git_root_override ? { git_root_override: args.git_root_override } : {}
-        },
-        session_id: args.session_id || instructionSessionId,
-        cwd: args.cwd,
-        timeout_seconds: args.timeout_seconds,
-        poll_interval_seconds: args.poll_interval_seconds,
-        include_timing: args.include_timing,
-        resume_task: args.resume_task,
-        full_response: args.full_response
-      }, extra?.signal);
-      return { content: [{ type: "text", text }] };
+      try {
+        const text = await gmDispatch({
+          verb: "instruction",
+          body: args.resume_task ? void 0 : {
+            prompt: args.prompt ?? "",
+            ...args.mode ? { mode: args.mode } : {},
+            ...args.git_root_override ? { git_root_override: args.git_root_override } : {}
+          },
+          session_id: args.session_id || instructionSessionId,
+          cwd: args.cwd,
+          timeout_seconds: args.timeout_seconds,
+          poll_interval_seconds: args.poll_interval_seconds,
+          include_timing: args.include_timing,
+          resume_task: args.resume_task,
+          full_response: args.full_response
+        }, extra?.signal);
+        return { content: [{ type: "text", text }] };
+      } catch (error61) {
+        return failedDispatchResult(error61);
+      }
     }
   );
   server.registerTool(
@@ -38868,28 +38985,22 @@ function createServer() {
       }
     },
     async (args = {}, extra) => {
-      const text = await gmDispatch(args, extra?.signal);
-      return { content: [{ type: "text", text }] };
+      try {
+        const text = await gmDispatch(args, extra?.signal);
+        return { content: [{ type: "text", text }] };
+      } catch (error61) {
+        return failedDispatchResult(error61);
+      }
     }
   );
   return server;
 }
 async function main() {
+  installStdioGuards();
   const server = createServer();
   const transport = new StdioServerTransport();
   const keepAlive = setInterval(() => {
   }, 1 << 30);
-  process.stdin.on("end", () => {
-    console.error("gm-mcp: stdin ended (client disconnected or platform pipe quirk) -- server stays up");
-  });
-  process.on("uncaughtException", (err) => {
-    console.error("gm-mcp: uncaught exception", err);
-    process.exit(1);
-  });
-  process.on("unhandledRejection", (err) => {
-    console.error("gm-mcp: unhandled rejection", err);
-    process.exit(1);
-  });
   await server.connect(transport);
   console.error("gm-mcp: connected, serving on stdio");
   refreshStaleDeployedBundleInBackground();
