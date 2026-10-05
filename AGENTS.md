@@ -5,6 +5,32 @@ The exec-family `timeoutMs` prefix and the `raw_body`/plain-text-verb contract
 are documented in README.md ("Exec-family timeout prefix"); this file covers
 what README does not.
 
+- **The stdio transport outlives every failure it can absorb.** `src/index.js`
+  installs `installStdioGuards()` from `src/transport-guard.js` before
+  `server.connect`, and that module is the only place allowed to touch process
+  fatal handlers. Three rules, each measured by `.scratch/mcp-dropout/drive-*.mjs`
+  against the real bundle: (1) `uncaughtException`, `unhandledRejection`,
+  `stdin 'error'` and `stderr 'error'` are logged to stderr and absorbed -- never
+  `process.exit`. Before this, one stray async failure anywhere in the process
+  took the whole JSON-RPC session down, and a stdio MCP server that exits is
+  never respawned by the client: the caller sees the pipe close as ECONNRESET
+  and `mcp__gm__gm` is gone for the rest of the session, which is how a dropped
+  upstream API connection cost this project its gm tool twice. Witnessed on the
+  pre-fix bundle: destroying the client's stdout read end made the next
+  `StdioServerTransport.send` emit EPIPE on `process.stdout`, with no `error`
+  listener that became an uncaughtException and `process.exit(1)` -- the same
+  exit path any unrelated async error reached. (2) `reserveStdoutForJsonRpc`
+  owns `process.stdout.write` and `console.log`/`console.info`: stdout is a
+  newline-delimited JSON-RPC channel, so a chunk that is not a parseable JSON
+  object is diverted to stderr instead of corrupting framing, and every
+  diagnostic in this file must therefore use `console.error`. (3) A *broken*
+  stdout pipe is the one unrecoverable case -- the client cannot read another
+  byte and cannot reconnect to a live stdio process -- so `exitWhenClientGone`
+  turns it into `process.exit(0)` instead of a crash, which also keeps a dead
+  session from leaking an orphan server into the next one. A *failed dispatch*
+  is the opposite case and must never reach it: both `gm` and `gm_instruction`
+  wrap `gmDispatch` and return `failedDispatchResult` (`isError: true`) so a
+  throwing dispatch keeps the transport serving.
 - **Runner recovery.** The daemon exits on purpose and depends on this file to
   bring it back: it self-recycles when idle or over its wasm memory ceiling
   (`self-recycling after 3600000ms fully idle ... next real dispatch spawns a
