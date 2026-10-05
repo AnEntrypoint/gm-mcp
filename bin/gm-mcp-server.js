@@ -3262,8 +3262,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path3) {
-      let input2 = path3;
+    function removeDotSegments(path4) {
+      let input2 = path4;
       const output2 = [];
       let nextSlash = -1;
       let len = 0;
@@ -3672,8 +3672,8 @@ var require_schemes = __commonJS({
       }
       if (wsComponent.resourceName) {
         const queryIndex = wsComponent.resourceName.indexOf("?");
-        const path3 = queryIndex === -1 ? wsComponent.resourceName : wsComponent.resourceName.slice(0, queryIndex);
-        wsComponent.path = path3 && path3 !== "/" ? path3 : void 0;
+        const path4 = queryIndex === -1 ? wsComponent.resourceName : wsComponent.resourceName.slice(0, queryIndex);
+        wsComponent.path = path4 && path4 !== "/" ? path4 : void 0;
         wsComponent.query = queryIndex === -1 ? void 0 : wsComponent.resourceName.slice(queryIndex + 1);
         wsComponent.resourceName = void 0;
       }
@@ -7572,8 +7572,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path3, errorMaps, issueData } = params;
-  const fullPath = [...path3, ...issueData.path || []];
+  const { data, path: path4, errorMaps, issueData } = params;
+  const fullPath = [...path4, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7688,11 +7688,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path3, key) {
+  constructor(parent, value, path4, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path3;
+    this._path = path4;
     this._key = key;
   }
   get path() {
@@ -11580,10 +11580,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path3) {
-  if (!path3)
+function getElementAtPath(obj, path4) {
+  if (!path4)
     return obj;
-  return path3.reduce((acc, key) => acc?.[key], obj);
+  return path4.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11995,11 +11995,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path3, issues) {
+function prefixIssues(path4, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path3);
+    iss.path.unshift(path4);
     return iss;
   });
 }
@@ -12432,16 +12432,16 @@ function flattenError(error61, mapper = (issue2) => issue2.message) {
 }
 function formatError(error61, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error62, path3 = []) => {
+  const processError = (error62, path4 = []) => {
     for (const issue2 of error62.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path3, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path4, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
       } else {
-        const fullpath = [...path3, ...issue2.path];
+        const fullpath = [...path4, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -12480,17 +12480,17 @@ function formatError(error61, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error61, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error62, path3 = []) => {
+  const processError = (error62, path4 = []) => {
     var _a3;
     for (const issue2 of error62.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path3, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path4, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
       } else {
-        const fullpath = [...path3, ...issue2.path];
+        const fullpath = [...path4, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -12529,8 +12529,8 @@ function treeifyError(error61, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path3 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path3) {
+  const path4 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path4) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -27511,11 +27511,11 @@ function normalizeObjectSchema(schema) {
   }
   return void 0;
 }
-function getDotPath(path3) {
-  if (path3.length === 0) {
+function getDotPath(path4) {
+  if (path4.length === 0) {
     return "object root";
   }
-  return path3.reduce((acc, seg, index) => {
+  return path4.reduce((acc, seg, index) => {
     if (index === 0) {
       return String(seg);
     }
@@ -29678,13 +29678,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path3 = ref.slice(1).split("/").filter(Boolean);
-  if (path3.length === 0) {
+  const path4 = ref.slice(1).split("/").filter(Boolean);
+  if (path4.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path3[0] === defsKey) {
-    const key = path3[1] === void 0 ? void 0 : decodeJSONPointerSegment(path3[1]);
+  if (path4[0] === defsKey) {
+    const key = path4[1] === void 0 ? void 0 : decodeJSONPointerSegment(path4[1]);
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -35677,7 +35677,7 @@ var StdioServerTransport = class {
 // src/dispatch.js
 import fs from "node:fs";
 import os from "node:os";
-import path from "node:path";
+import path2 from "node:path";
 import { spawn, execFileSync } from "node:child_process";
 
 // node_modules/js-yaml/dist/js-yaml.mjs
@@ -37809,12 +37809,58 @@ function compactWireResponse(response, outPath) {
   return out;
 }
 
+// src/server-log.js
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+var LOG_FILE_NAME = "gm-mcp-server.log";
+var MAX_LOG_BYTES = 4 * 1024 * 1024;
+var KEEP_TAIL_BYTES = 512 * 1024;
+function logFilePath() {
+  const override = (process.env.GM_MCP_LOG_PATH || "").trim();
+  if (override) return path.resolve(override);
+  const dir = (process.env.GM_TOOLS_DIR || "").trim() || path.join(homedir(), ".gm-tools");
+  return path.join(dir, LOG_FILE_NAME);
+}
+function trimOversizedLog(file2) {
+  if (statSync(file2).size <= MAX_LOG_BYTES) return;
+  const bytes = readFileSync(file2);
+  const tail = bytes.subarray(Math.max(0, bytes.length - KEEP_TAIL_BYTES));
+  const firstNewline = tail.indexOf(10);
+  writeFileSync(file2, firstNewline === -1 ? tail : tail.subarray(firstNewline + 1));
+}
+function appendDiagnostic(event, fields = {}) {
+  const record2 = JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), pid: process.pid, event, ...fields });
+  try {
+    process.stderr.write(`gm-mcp: ${record2}
+`);
+  } catch {
+  }
+  try {
+    const file2 = logFilePath();
+    mkdirSync(path.dirname(file2), { recursive: true });
+    appendFileSync(file2, `${record2}
+`, "utf8");
+    trimOversizedLog(file2);
+  } catch {
+  }
+  return record2;
+}
+function describeError(error61) {
+  if (error61 instanceof Error) return error61.stack || `${error61.name}: ${error61.message}`;
+  return String(error61);
+}
+
 // src/dispatch.js
+var inflightDispatches = 0;
+function inflightDispatchCount() {
+  return inflightDispatches;
+}
 function projectRootFor(dir) {
-  const resolved = path.resolve(dir);
+  const resolved = path2.resolve(dir);
   try {
     const top = execFileSync("git", ["-C", resolved, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }).trim();
-    return top ? path.resolve(top) : resolved;
+    return top ? path2.resolve(top) : resolved;
   } catch {
     return resolved;
   }
@@ -37846,7 +37892,7 @@ function publishSpoolRequest(inDir, inPath, task, body) {
   const unsafe = unsafeSpoolName("task", task);
   if (unsafe) throw new Error(unsafe);
   fs.mkdirSync(inDir, { recursive: true });
-  const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.tmp`);
+  const tempPath = path2.join(inDir, `.${task}.${process.pid}.${Date.now()}.tmp`);
   try {
     fs.writeFileSync(tempPath, body, "utf8");
     fs.renameSync(tempPath, inPath);
@@ -37933,12 +37979,12 @@ function objectBodyDiagnostic(verb, body) {
   }
   return 'git_merge requires a non-empty body.ref, for example {"ref":"origin/main"}.';
 }
-var RUNNER_DIR = path.join(os.homedir(), ".gm-tools");
-var RUNNER_PATH = path.join(RUNNER_DIR, process.platform === "win32" ? "agentplug-runner.exe" : "agentplug-runner");
-var AGENTPLUG_DIR = path.join(os.homedir(), ".agentplug");
-var GLOBAL_DAEMON_STATUS_PATH = path.join(AGENTPLUG_DIR, "daemon-status.json");
-var GLOBAL_DAEMON_OWNER_LOCK_PATH = path.join(AGENTPLUG_DIR, "daemon-owner.lock");
-var GLOBAL_DAEMON_LOG_PATH = path.join(AGENTPLUG_DIR, "daemon.log");
+var RUNNER_DIR = path2.join(os.homedir(), ".gm-tools");
+var RUNNER_PATH = path2.join(RUNNER_DIR, process.platform === "win32" ? "agentplug-runner.exe" : "agentplug-runner");
+var AGENTPLUG_DIR = path2.join(os.homedir(), ".agentplug");
+var GLOBAL_DAEMON_STATUS_PATH = path2.join(AGENTPLUG_DIR, "daemon-status.json");
+var GLOBAL_DAEMON_OWNER_LOCK_PATH = path2.join(AGENTPLUG_DIR, "daemon-owner.lock");
+var GLOBAL_DAEMON_LOG_PATH = path2.join(AGENTPLUG_DIR, "daemon.log");
 var ENSURE_INTERVAL_MS = 2e3;
 var ENSURE_LEASE_MS = 3e3;
 var ENSURE_BOOT_GRACE_MS = 3e4;
@@ -37983,17 +38029,17 @@ function daemonBootGraceActive() {
   return globalDaemonPid() !== null || Date.now() - (status.ts || 0) < 1e4;
 }
 function liveDaemonSweepsProject(spoolDir) {
-  const status = readJsonFile(path.join(spoolDir, ".status.json"));
+  const status = readJsonFile(path2.join(spoolDir, ".status.json"));
   if (!status) return false;
   if (!(Date.now() - (status.ts || 0) < DAEMON_HEARTBEAT_STALE_MS)) return false;
   const alive = pidAlive(status.pid);
   return alive !== false;
 }
-var GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, "spool-launch.lock");
+var GLOBAL_LAUNCHER_LOCK_PATH = path2.join(AGENTPLUG_DIR, "spool-launch.lock");
 function readLauncherLock() {
   try {
-    const [pid, ts] = fs.readFileSync(GLOBAL_LAUNCHER_LOCK_PATH, "utf8").trim().split(/\s+/).map(Number);
-    return { pid, ts };
+    const [pid, ts, role] = fs.readFileSync(GLOBAL_LAUNCHER_LOCK_PATH, "utf8").trim().split(/\s+/);
+    return { pid: Number(pid), ts: Number(ts), role: role || null };
   } catch {
     return null;
   }
@@ -38002,7 +38048,7 @@ function claimGlobalLauncher() {
   fs.mkdirSync(AGENTPLUG_DIR, { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${process.pid} ${Date.now()}`, { flag: "wx", mode: 384 });
+      fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${process.pid} ${Date.now()} server`, { flag: "wx", mode: 384 });
       return true;
     } catch (error61) {
       if (error61?.code !== "EEXIST") return false;
@@ -38010,12 +38056,13 @@ function claimGlobalLauncher() {
     const held = readLauncherLock();
     const heldAgeMs = held?.ts ? Date.now() - held.ts : Number.POSITIVE_INFINITY;
     if (held && heldAgeMs < ENSURE_CHILD_MAX_AGE_MS && pidAlive(held.pid) !== false) return false;
-    if (held && pidAlive(held.pid) === true && held.pid !== process.pid) {
-      try {
-        process.kill(held.pid);
-      } catch {
-      }
-    }
+    appendDiagnostic("launcher-lock-stolen", {
+      lock: GLOBAL_LAUNCHER_LOCK_PATH,
+      held_pid: held?.pid ?? null,
+      held_role: held?.role ?? null,
+      held_age_ms: Number.isFinite(heldAgeMs) ? Math.round(heldAgeMs) : null,
+      held_pid_alive: pidAlive(held?.pid)
+    });
     try {
       fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH);
     } catch {
@@ -38025,7 +38072,7 @@ function claimGlobalLauncher() {
   return false;
 }
 function claimRunnerEnsure(root) {
-  const lockPath = path.join(root, ".gm", "exec-spool", ".runner-ensure.lock");
+  const lockPath = path2.join(root, ".gm", "exec-spool", ".runner-ensure.lock");
   const claim2 = () => {
     const fd = fs.openSync(lockPath, "wx", 384);
     try {
@@ -38080,7 +38127,7 @@ function runnerEnsureInFlight(root, now = Date.now()) {
 }
 function ensureSpoolRunnerRunning(root) {
   if (runnerBinaryMissing()) return;
-  if (liveDaemonSweepsProject(path.join(root, ".gm", "exec-spool"))) {
+  if (liveDaemonSweepsProject(path2.join(root, ".gm", "exec-spool"))) {
     consecutiveFailedEnsuresByRoot.delete(root);
     return;
   }
@@ -38105,7 +38152,8 @@ function ensureSpoolRunnerRunning(root) {
       stdio: "ignore",
       windowsHide: true
     });
-  } catch {
+  } catch (error61) {
+    appendDiagnostic("runner-spawn-failed", { root, runner: RUNNER_PATH, error: String(error61?.message || error61) });
     try {
       fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH);
     } catch {
@@ -38113,7 +38161,7 @@ function ensureSpoolRunnerRunning(root) {
     return;
   }
   try {
-    fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${child.pid} ${now}`, "utf8");
+    fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${child.pid} ${now} runner`, "utf8");
   } catch {
   }
   const entry = { pid: child.pid, spawnedAtMs: now, exitCode: null };
@@ -38125,7 +38173,7 @@ function ensureSpoolRunnerRunning(root) {
   child.on("exit", (code) => settle(code));
   recordRunnerEnsureInflight(root, entry);
   try {
-    fs.writeFileSync(path.join(root, ".gm", "exec-spool", ".runner-ensure.lock"), `${child.pid} ${now}`, "utf8");
+    fs.writeFileSync(path2.join(root, ".gm", "exec-spool", ".runner-ensure.lock"), `${child.pid} ${now}`, "utf8");
   } catch {
   }
   child.unref();
@@ -38177,7 +38225,7 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
     };
     const onAbort = () => finish(void 0, new Error("aborted"));
     const wake = (_event, filename) => {
-      if (!filename || filename.toString() === path.basename(outPath)) finish("filesystem_event");
+      if (!filename || filename.toString() === path2.basename(outPath)) finish("filesystem_event");
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
@@ -38231,14 +38279,14 @@ ${raw_body}`;
 }
 var DAEMON_HEARTBEAT_STALE_MS = 2e4;
 function projectRootOfSpool(spoolDir) {
-  return path.resolve(spoolDir, "..", "..");
+  return path2.resolve(spoolDir, "..", "..");
 }
 function heartbeatAgeMs(spoolDir) {
-  const status = readJsonFile(path.join(spoolDir, ".status.json"));
+  const status = readJsonFile(path2.join(spoolDir, ".status.json"));
   return status && typeof status.ts === "number" ? Date.now() - status.ts : null;
 }
 function daemonRestartCommand(root) {
-  return `"${RUNNER_PATH}" spool   (run with cwd ${path.resolve(root)}; the launcher detaches agentplug-runner daemon for this project)`;
+  return `"${RUNNER_PATH}" spool   (run with cwd ${path2.resolve(root)}; the launcher detaches agentplug-runner daemon for this project)`;
 }
 function coldProjectLiveness() {
   const shared = readJsonFile(GLOBAL_DAEMON_STATUS_PATH);
@@ -38256,7 +38304,7 @@ function coldProjectLiveness() {
 function readDaemonLiveness(spoolDir) {
   let status;
   try {
-    status = JSON.parse(fs.readFileSync(path.join(spoolDir, ".status.json"), "utf8"));
+    status = JSON.parse(fs.readFileSync(path2.join(spoolDir, ".status.json"), "utf8"));
   } catch {
     return coldProjectLiveness();
   }
@@ -38267,7 +38315,7 @@ function readDaemonLiveness(spoolDir) {
   const alive = pidAliveFlag === false ? false : heartbeatAgeMs2 !== null && heartbeatAgeMs2 < DAEMON_HEARTBEAT_STALE_MS;
   const busyForMs = typeof status.busy_until === "number" ? status.busy_until - now : null;
   const busy = busyForMs !== null && busyForMs > 0;
-  const note = !alive ? runnerBinaryMissing() ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed` : pidAliveFlag === false ? `the daemon process that last swept this project (pid ${pid}) is gone -- the daemon recycles itself on idle/memory pressure and on a runner version handoff, and is restarted on demand; this call already asked for a replacement, so a dispatch submitted now waits for its cold start (wasm compile, tens of seconds) instead of for a queue` : `daemon heartbeat is ${heartbeatAgeMs2} ms stale (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) -- it is down, hung, or has not registered this project; its own log is ${GLOBAL_DAEMON_LOG_PATH} (this project's spool log is ${path.join(spoolDir, ".watcher.log")}) and it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}; this is not necessarily this dispatch's fault` : busy ? "daemon is alive and still actively working on this project" : "daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that";
+  const note = !alive ? runnerBinaryMissing() ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed` : pidAliveFlag === false ? `the daemon process that last swept this project (pid ${pid}) is gone -- the daemon recycles itself on idle/memory pressure and on a runner version handoff, and is restarted on demand; this call already asked for a replacement, so a dispatch submitted now waits for its cold start (wasm compile, tens of seconds) instead of for a queue` : `daemon heartbeat is ${heartbeatAgeMs2} ms stale (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) -- it is down, hung, or has not registered this project; its own log is ${GLOBAL_DAEMON_LOG_PATH} (this project's spool log is ${path2.join(spoolDir, ".watcher.log")}) and it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}; this is not necessarily this dispatch's fault` : busy ? "daemon is alive and still actively working on this project" : "daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that";
   const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs2, busy, busy_for_ms: busy ? busyForMs : null, note };
   if (pid !== null) liveness.pid = pid;
   if (pidAliveFlag !== null) liveness.pid_alive = pidAliveFlag;
@@ -38294,7 +38342,7 @@ function runnerUnavailable(root, spoolDir) {
     error: "runner-not-installed",
     runner_binary_missing: true,
     runner_path: RUNNER_PATH,
-    note: `the agentplug-runner binary is not installed at ${RUNNER_PATH} and no live daemon heartbeat was found for ${path.resolve(root)}, so this dispatch could never be claimed. Install it once, then dispatch again: npx github:AnEntrypoint/gm -g   (or, in this project: curl -fsSL https://raw.githubusercontent.com/AnEntrypoint/gm/main/install.sh | sh -s -- spool)`
+    note: `the agentplug-runner binary is not installed at ${RUNNER_PATH} and no live daemon heartbeat was found for ${path2.resolve(root)}, so this dispatch could never be claimed. Install it once, then dispatch again: npx github:AnEntrypoint/gm -g   (or, in this project: curl -fsSL https://raw.githubusercontent.com/AnEntrypoint/gm/main/install.sh | sh -s -- spool)`
   };
 }
 var DAEMON_START_GRACE_MS = Number(process.env.GM_MCP_DAEMON_START_GRACE_MS) > 0 ? Number(process.env.GM_MCP_DAEMON_START_GRACE_MS) : 15e3;
@@ -38318,7 +38366,7 @@ async function daemonNotRunning(root, spoolDir, signal) {
   const age = heartbeatAgeMs(spoolDir);
   if (age === null) return void 0;
   if (daemonBootGraceActive()) return void 0;
-  if (readJsonFile(path.join(spoolDir, ".status.json"))?.runner_update_in_progress) return void 0;
+  if (readJsonFile(path2.join(spoolDir, ".status.json"))?.runner_update_in_progress) return void 0;
   ensureSpoolRunnerRunning(root);
   startRunnerWatchdog(root);
   if (await awaitDaemonHeartbeat(spoolDir, signal) !== "still_dead") return void 0;
@@ -38330,13 +38378,13 @@ async function daemonNotRunning(root, spoolDir, signal) {
     stale_after_ms: DAEMON_HEARTBEAT_STALE_MS,
     waited_for_start_ms: DAEMON_START_GRACE_MS,
     note: `this project's daemon heartbeat is ${staleFor} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) and did not come back within ${DAEMON_START_GRACE_MS} ms of asking for a runner, so no dispatch was written -- it would sit queued_not_yet_claimed and only fail at the poll timeout. Restart it and dispatch again: ${daemonRestartCommand(root)}`,
-    checked_status_file: path.join(spoolDir, ".status.json"),
+    checked_status_file: path2.join(spoolDir, ".status.json"),
     daemon_log: GLOBAL_DAEMON_LOG_PATH,
-    spool_log: path.join(spoolDir, ".watcher.log")
+    spool_log: path2.join(spoolDir, ".watcher.log")
   };
 }
 function readSpoolDispatchState(spoolDir, verb, task) {
-  const queuedPath = path.join(spoolDir, "in", verb, `${task}.txt`);
+  const queuedPath = path2.join(spoolDir, "in", verb, `${task}.txt`);
   const claimedPath = `${queuedPath}.inflight`;
   const claimed = fs.existsSync(claimedPath);
   const queued = !claimed && fs.existsSync(queuedPath);
@@ -38357,7 +38405,7 @@ function claimSweepStall(pressure, queued) {
 }
 var MAX_CLAIMED_DISPATCHES_PER_PROJECT = 32;
 function scanSpoolQueue(spoolDir, myQueuedPath) {
-  const inDir = path.join(spoolDir, "in");
+  const inDir = path2.join(spoolDir, "in");
   let verbs;
   try {
     verbs = fs.readdirSync(inDir, { withFileTypes: true });
@@ -38376,7 +38424,7 @@ function scanSpoolQueue(spoolDir, myQueuedPath) {
   let oldestUnclaimedMs = null;
   for (const verbEntry of verbs) {
     if (!verbEntry.isDirectory()) continue;
-    const verbDir = path.join(inDir, verbEntry.name);
+    const verbDir = path2.join(inDir, verbEntry.name);
     let files;
     try {
       files = fs.readdirSync(verbDir, { withFileTypes: true });
@@ -38389,11 +38437,11 @@ function scanSpoolQueue(spoolDir, myQueuedPath) {
         claimedCount += 1;
         continue;
       }
-      if (!path.extname(fileEntry.name)) continue;
+      if (!path2.extname(fileEntry.name)) continue;
       unclaimedCount += 1;
       let mtimeMs = null;
       try {
-        mtimeMs = fs.statSync(path.join(verbDir, fileEntry.name)).mtimeMs;
+        mtimeMs = fs.statSync(path2.join(verbDir, fileEntry.name)).mtimeMs;
       } catch {
       }
       if (mtimeMs === null) continue;
@@ -38444,7 +38492,7 @@ function withResumeDisclosure(out, disclosure) {
 }
 var deliveredInstructionHashByOwner = /* @__PURE__ */ new Map();
 function instructionOwnerKey(root, sessionId) {
-  return `${path.resolve(root)} ${sessionId}`;
+  return `${path2.resolve(root)} ${sessionId}`;
 }
 var deliveredReplyHashByOwner = /* @__PURE__ */ new Map();
 function withAssertedInstructionHash(verb, body, root, sessionId) {
@@ -38469,16 +38517,30 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
     deliveredReplyHashByOwner.set(instructionOwnerKey(root, sessionId), data.reply_hash);
   }
 }
-async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal) {
+async function gmDispatch(args, signal) {
+  inflightDispatches += 1;
+  const startedAtMs = Date.now();
+  appendDiagnostic("dispatch-start", { verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null });
+  try {
+    return await runDispatch(args, signal);
+  } catch (error61) {
+    appendDiagnostic("dispatch-error", { verb: args?.verb ?? null, error: error61?.message ? String(error61.message) : String(error61) });
+    throw error61;
+  } finally {
+    appendDiagnostic("dispatch-end", { verb: args?.verb ?? null, ms: Date.now() - startedAtMs, inflight: inflightDispatches - 1 });
+    inflightDispatches -= 1;
+  }
+}
+async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal) {
   if (!verb) return "error: verb required";
   if (!session_id) return "error: session_id required";
   const n = resume_task || nextN(session_id);
   const unsafeName = unsafeSpoolName("verb", verb) || unsafeSpoolName("session_id", session_id) || unsafeSpoolName("task", n);
   if (unsafeName) return `error: ${unsafeName} -- nothing was written to the spool, so no dispatch was queued`;
   const root = projectRootFor(cwd || process.cwd());
-  const spoolDir = path.join(root, ".gm", "exec-spool");
-  const inDir = path.join(spoolDir, "in", verb);
-  const outDir = path.join(spoolDir, "out");
+  const spoolDir = path2.join(root, ".gm", "exec-spool");
+  const inDir = path2.join(spoolDir, "in", verb);
+  const outDir = path2.join(spoolDir, "out");
   fs.mkdirSync(outDir, { recursive: true });
   const callStartedAtMs = Date.now();
   let lastWakeSource = "initial_check";
@@ -38500,8 +38562,8 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
     if (diagnostic) return `error: ${diagnostic}`;
     normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, globCoerced.value), root, session_id);
   }
-  const inPath = path.join(inDir, `${n}.txt`);
-  const outPath = path.join(outDir, `${verb}-${n}.json`);
+  const inPath = path2.join(inDir, `${n}.txt`);
+  const outPath = path2.join(outDir, `${verb}-${n}.json`);
   if (resume_task && !fs.existsSync(outPath) && !fs.existsSync(inPath) && !fs.existsSync(`${inPath}.inflight`)) {
     return toYaml({
       error: `resume_task "${n}" names no dispatch in this project's spool -- nothing was dispatched`,
@@ -38556,7 +38618,7 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
       if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs));
       else out = withDispatchWait(out, Date.now() - callStartedAtMs);
       if (out && typeof out === "object" && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
-        out = { ...out, instruction_text_at: path.join(root, ".gm", "next-step.md") };
+        out = { ...out, instruction_text_at: path2.join(root, ".gm", "next-step.md") };
       }
       if (include_timing === true || include_timing === "true") {
         const timingKey = out && typeof out === "object" && !Array.isArray(out) && "mcp_timing" in out ? "mcp_client_timing" : "mcp_timing";
@@ -38629,23 +38691,23 @@ async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_secon
 
 // src/transport-guard.js
 import process4 from "node:process";
-var JSON_RPC_FRAME = /^\s*\{[\s\S]*\}\s*$/;
+
+// src/bundle-version.js
+var BUNDLE_VERSION = "0.2.5";
+
+// src/transport-guard.js
+var CLIENT_GONE_EXIT_RECHECK_MS = 15e3;
+var CLIENT_GONE_EXIT_RECHECK_LIMIT = 240;
 function isJsonRpcFrame(chunk) {
-  if (typeof chunk === "string") {
-    if (!JSON_RPC_FRAME.test(chunk)) return false;
-    try {
-      JSON.parse(chunk);
-      return true;
-    } catch {
-      return false;
-    }
+  const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
+  if (buffer.length === 0 || buffer[0] !== 123) return false;
+  const text = buffer.toString("utf8");
+  try {
+    const parsed = JSON.parse(text);
+    return Boolean(parsed) && typeof parsed === "object" && !Array.isArray(parsed);
+  } catch {
+    return false;
   }
-  if (Buffer.isBuffer(chunk)) return isJsonRpcFrame(chunk.toString("utf8"));
-  return false;
-}
-function descriptionOf(error61) {
-  if (error61 instanceof Error) return error61.stack || `${error61.name}: ${error61.message}`;
-  return String(error61);
 }
 function reserveStdoutForJsonRpc() {
   const stdout = process4.stdout;
@@ -38653,8 +38715,7 @@ function reserveStdoutForJsonRpc() {
   stdout.write = (chunk, encoding, callback) => {
     if (!isJsonRpcFrame(chunk)) {
       const text = typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
-      process4.stderr.write(`gm-mcp: diverted a non-JSON-RPC stdout write to stderr -- ${text.slice(0, 400)}
-`);
+      appendDiagnostic("stdout-write-diverted", { bytes: text.length, text: text.slice(0, 400) });
       if (typeof encoding === "function") encoding();
       else if (typeof callback === "function") callback();
       return true;
@@ -38668,42 +38729,60 @@ function reserveStdoutForJsonRpc() {
 }
 function keepServingOnAsyncFailure() {
   const report = (label) => (error61) => {
-    process4.stderr.write(`gm-mcp: ${label} absorbed, stdio transport stays up -- ${descriptionOf(error61)}
-`);
+    appendDiagnostic(label, { error: describeError(error61), dispatches_inflight: inflightDispatchCount() });
   };
-  process4.on("uncaughtException", report("uncaught exception"));
-  process4.on("unhandledRejection", report("unhandled rejection"));
-  process4.stdin.on("error", report("stdin error"));
-  process4.stderr.on("error", report("stderr error"));
+  process4.on("uncaughtException", report("uncaught-exception"));
+  process4.on("unhandledRejection", report("unhandled-rejection"));
+  process4.stdin.on("error", report("stdin-error"));
+  process4.stderr.on("error", report("stderr-error"));
+  process4.on("exit", (code) => {
+    appendDiagnostic("exit", { code, dispatches_inflight: inflightDispatchCount() });
+  });
 }
 function exitWhenClientGone() {
-  process4.stdout.on("error", (error61) => {
-    process4.stderr.write(`gm-mcp: stdout pipe to the client is gone (${descriptionOf(error61)}) -- exiting 0 so the next connect spawns a fresh server
-`);
+  let pending = 0;
+  const exitIfIdle = (reason, error61) => {
+    if (inflightDispatchCount() > 0) {
+      appendDiagnostic("exit-deferred-dispatch-inflight", {
+        reason,
+        error: error61 ? describeError(error61) : null,
+        dispatches_inflight: inflightDispatchCount(),
+        recheck_ms: CLIENT_GONE_EXIT_RECHECK_MS
+      });
+      if (pending >= CLIENT_GONE_EXIT_RECHECK_LIMIT) return;
+      pending += 1;
+      setTimeout(() => exitIfIdle(reason, error61), CLIENT_GONE_EXIT_RECHECK_MS).unref?.();
+      return;
+    }
+    appendDiagnostic("exit", { reason, error: error61 ? describeError(error61) : null });
     process4.exit(0);
-  });
+  };
+  process4.stdout.on("error", (error61) => exitIfIdle("stdout-pipe-gone", error61));
   process4.stdin.on("end", () => {
-    process4.stderr.write("gm-mcp: stdin ended (client disconnected or platform pipe quirk) -- server stays up\n");
+    appendDiagnostic("stdin-ended", { note: "client disconnect or platform pipe quirk -- server stays up" });
   });
 }
 function installStdioGuards() {
   keepServingOnAsyncFailure();
   reserveStdoutForJsonRpc();
   exitWhenClientGone();
+  appendDiagnostic("start", {
+    bundle_version: BUNDLE_VERSION,
+    argv: process4.argv.slice(1),
+    cwd: process4.cwd(),
+    node: process4.version,
+    log: logFilePath()
+  });
+  return true;
 }
 
 // src/self-update.js
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import path2 from "node:path";
+import { copyFileSync, existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, realpathSync, renameSync, rmSync, statSync as statSync2, unlinkSync, utimesSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import path3 from "node:path";
 import { fileURLToPath } from "node:url";
-
-// src/bundle-version.js
-var BUNDLE_VERSION = "0.2.5";
-
-// src/self-update.js
 var DEPLOYED_BUNDLE_FILE_NAME = "gm-mcp-server.mjs";
 var DEFAULT_BUNDLE_URL = "https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js";
 var DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1e3;
@@ -38718,20 +38797,20 @@ var BUNDLE_VERSION_ASSIGNMENT = /BUNDLE_VERSION\s*=\s*["']([^"']+)["']/;
 var sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 var shortHash = (hex3) => hex3.slice(0, 12);
 function toolsDir() {
-  return process.env.GM_TOOLS_DIR || path2.join(homedir(), ".gm-tools");
+  return process.env.GM_TOOLS_DIR || path3.join(homedir2(), ".gm-tools");
 }
 function defaultDeployedPath() {
-  return path2.join(toolsDir(), DEPLOYED_BUNDLE_FILE_NAME);
+  return path3.join(toolsDir(), DEPLOYED_BUNDLE_FILE_NAME);
 }
 function agentplugDir() {
   const override = (process.env.AGENTPLUG_HOME || "").trim();
-  return override ? path2.resolve(override) : path2.join(homedir(), ".agentplug");
+  return override ? path3.resolve(override) : path3.join(homedir2(), ".agentplug");
 }
 function noSelfUpdateFilePath() {
-  return path2.join(agentplugDir(), NO_SELF_UPDATE_FILE);
+  return path3.join(agentplugDir(), NO_SELF_UPDATE_FILE);
 }
 function localBuildPinPath() {
-  return path2.join(agentplugDir(), LOCAL_BUILD_PIN_FILE);
+  return path3.join(agentplugDir(), LOCAL_BUILD_PIN_FILE);
 }
 function selfUpdateFreezeReason() {
   const envValue = process.env[NO_SELF_UPDATE_ENV];
@@ -38744,23 +38823,23 @@ function selfUpdateFreezeReason() {
 }
 function readLocalBuildPin() {
   try {
-    const pin = JSON.parse(readFileSync(localBuildPinPath(), "utf8"));
+    const pin = JSON.parse(readFileSync2(localBuildPinPath(), "utf8"));
     return pin && typeof pin.sha256 === "string" && pin.sha256 ? pin : null;
   } catch {
     return null;
   }
 }
 function pinLocalBuild(deployedPath = defaultDeployedPath()) {
-  const bytes = readFileSync(deployedPath);
+  const bytes = readFileSync2(deployedPath);
   const pinPath = localBuildPinPath();
   const pin = {
     sha256: sha256(bytes),
-    path: path2.resolve(deployedPath),
+    path: path3.resolve(deployedPath),
     version: parseBundleVersion(bytes) || BUNDLE_VERSION,
     ts: (/* @__PURE__ */ new Date()).toISOString()
   };
-  mkdirSync(path2.dirname(pinPath), { recursive: true });
-  writeFileSync(pinPath, `${JSON.stringify(pin, null, 2)}
+  mkdirSync2(path3.dirname(pinPath), { recursive: true });
+  writeFileSync2(pinPath, `${JSON.stringify(pin, null, 2)}
 `, "utf8");
   return pin;
 }
@@ -38818,7 +38897,7 @@ function selfUpdateStatus() {
   const deployedPath = defaultDeployedPath();
   let bytes = null;
   try {
-    bytes = readFileSync(deployedPath);
+    bytes = readFileSync2(deployedPath);
   } catch {
     bytes = null;
   }
@@ -38847,15 +38926,15 @@ function isRunningFromDeployedBundle(deployedPath) {
 function checkedRecently(stampPath) {
   const intervalMs = Number(process.env.GM_MCP_SELF_UPDATE_INTERVAL_MS ?? DEFAULT_CHECK_INTERVAL_MS);
   if (!existsSync(stampPath)) return false;
-  return Date.now() - statSync(stampPath).mtimeMs < intervalMs;
+  return Date.now() - statSync2(stampPath).mtimeMs < intervalMs;
 }
 function touch(stampPath) {
-  if (!existsSync(stampPath)) writeFileSync(stampPath, "");
+  if (!existsSync(stampPath)) writeFileSync2(stampPath, "");
   const now = /* @__PURE__ */ new Date();
   utimesSync(stampPath, now, now);
 }
 async function fetchBundleBytes(url2) {
-  if (url2.startsWith("file:")) return readFileSync(fileURLToPath(url2));
+  if (url2.startsWith("file:")) return readFileSync2(fileURLToPath(url2));
   const response = await fetch(url2, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`HTTP ${response.status} from ${url2}`);
   return Buffer.from(await response.arrayBuffer());
@@ -38868,7 +38947,7 @@ function assertLoadableBundle(bytes, candidatePath) {
 }
 function replaceDeployedBundle(deployedPath, bytes) {
   const candidatePath = `${deployedPath}.candidate.${process.pid}.mjs`;
-  writeFileSync(candidatePath, bytes);
+  writeFileSync2(candidatePath, bytes);
   try {
     assertLoadableBundle(bytes, candidatePath);
     copyFileSync(deployedPath, `${deployedPath}.prev`);
@@ -38884,13 +38963,14 @@ async function refreshStaleDeployedBundle() {
   if (!isRunningFromDeployedBundle(deployedPath)) return { outcome: "not-deployed-copy" };
   const refuse = (code, reason) => {
     console.error(`gm-mcp: refusing deployed bundle self-update (${code}) -- ${reason}`);
+    appendDiagnostic("self-update-refused", { code, reason, deployed_bundle: deployedPath });
     return { outcome: "refused", code, reason, deployed_bundle: deployedPath };
   };
   const frozen = selfUpdateFreezeReason();
   if (frozen) return refuse("frozen", frozen);
   const stampPath = `${deployedPath}.checked`;
   if (checkedRecently(stampPath)) return { outcome: "checked-recently" };
-  const deployedHash = sha256(readFileSync(deployedPath));
+  const deployedHash = sha256(readFileSync2(deployedPath));
   const pinned = localBuildPinReason(deployedHash);
   if (pinned) return refuse(pinned.code, pinned.reason);
   const url2 = process.env.GM_MCP_BUNDLE_URL || DEFAULT_BUNDLE_URL;
@@ -38902,16 +38982,19 @@ async function refreshStaleDeployedBundle() {
   }
   const version2 = versionGuardReason(freshBytes);
   if (version2.code) return refuse(version2.code, version2.reason);
+  if (inflightDispatchCount() > 0) return { outcome: "deferred-dispatch-inflight", dispatches_inflight: inflightDispatchCount() };
   replaceDeployedBundle(deployedPath, freshBytes);
   touch(stampPath);
   return { outcome: "refreshed", from: deployedHash, to: freshHash, url: url2, version: `${BUNDLE_VERSION} -> ${version2.candidateVersion}` };
 }
 function refreshStaleDeployedBundleInBackground() {
   refreshStaleDeployedBundle().then((result) => {
+    appendDiagnostic("self-update-check", result);
     if (result.outcome === "refreshed") {
       console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} (${result.version}) from ${result.url}; takes effect on next connect (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`);
     }
   }).catch((error61) => {
+    appendDiagnostic("self-update-failed", { error: error61?.message ? String(error61.message) : String(error61) });
     console.error(`gm-mcp: bundle staleness check failed (${error61.message}); keeping the deployed copy`);
   });
 }
@@ -38919,9 +39002,10 @@ function refreshStaleDeployedBundleInBackground() {
 // src/index.js
 var numberLike = external_exports.union([external_exports.number(), external_exports.string()]);
 var booleanLike = external_exports.union([external_exports.boolean(), external_exports.string()]);
-function failedDispatchResult(error61) {
-  const detail = error61 instanceof Error ? error61.stack || error61.message : String(error61);
-  return { content: [{ type: "text", text: `gm-mcp: dispatch threw, stdio transport stays up -- ${detail}` }], isError: true };
+function failedDispatchResult(verb, error61) {
+  const detail = describeError(error61);
+  appendDiagnostic("dispatch-threw", { verb, error: detail });
+  return { content: [{ type: "text", text: `gm-mcp: ${verb} dispatch threw, stdio transport stays up -- ${detail}` }], isError: true };
 }
 function createServer() {
   const server = new McpServer({ name: "gm-mcp", version: BUNDLE_VERSION });
@@ -38962,7 +39046,7 @@ function createServer() {
         }, extra?.signal);
         return { content: [{ type: "text", text }] };
       } catch (error61) {
-        return failedDispatchResult(error61);
+        return failedDispatchResult("instruction", error61);
       }
     }
   );
@@ -38989,7 +39073,7 @@ function createServer() {
         const text = await gmDispatch(args, extra?.signal);
         return { content: [{ type: "text", text }] };
       } catch (error61) {
-        return failedDispatchResult(error61);
+        return failedDispatchResult(args?.verb ?? "unknown", error61);
       }
     }
   );

@@ -4,6 +4,15 @@ import path from 'node:path'
 import { spawn, execFileSync } from 'node:child_process'
 import * as yaml from 'js-yaml'
 import { cleanResponse, compactWireResponse, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+import { appendDiagnostic } from './server-log.js'
+
+// An exit guard reads this: a process that quits mid-dispatch strands the
+// spool ticket it already wrote and drops the reply nobody else will poll for.
+let inflightDispatches = 0
+
+export function inflightDispatchCount() {
+    return inflightDispatches
+}
 
 function projectRootFor(dir) {
     const resolved = path.resolve(dir)
@@ -208,6 +217,53 @@ export function liveDaemonSweepsProject(spoolDir) {
     return alive !== false
 }
 
+const GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'spool-launch.lock')
+
+function readLauncherLock() {
+    try {
+        const [pid, ts, role] = fs.readFileSync(GLOBAL_LAUNCHER_LOCK_PATH, 'utf8').trim().split(/\s+/)
+        return { pid: Number(pid), ts: Number(ts), role: role || null }
+    } catch {
+        return null
+    }
+}
+
+// The lock names whichever process holds it, so a reader can tell a spawned
+// runner from the server that claimed it. It is only ever stolen, never
+// signalled: the pid it names is read back from disk long after the fact, and
+// pid reuse or a contended write can leave another session's live gm-mcp
+// server in it -- killing that pid is how this server used to take a whole
+// session's MCP connection down with it. A wedged runner is already bounded by
+// ENSURE_CHILD_MAX_AGE_MS and the per-root in-flight guard, and a fresh
+// `agentplug-runner spool` against a live daemon only registers and exits.
+function claimGlobalLauncher() {
+    fs.mkdirSync(AGENTPLUG_DIR, { recursive: true })
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${process.pid} ${Date.now()} server`, { flag: 'wx', mode: 0o600 })
+            return true
+        } catch (error) {
+            if (error?.code !== 'EEXIST') return false
+        }
+        const held = readLauncherLock()
+        const heldAgeMs = held?.ts ? Date.now() - held.ts : Number.POSITIVE_INFINITY
+        if (held && heldAgeMs < ENSURE_CHILD_MAX_AGE_MS && pidAlive(held.pid) !== false) return false
+        appendDiagnostic('launcher-lock-stolen', {
+            lock: GLOBAL_LAUNCHER_LOCK_PATH,
+            held_pid: held?.pid ?? null,
+            held_role: held?.role ?? null,
+            held_age_ms: Number.isFinite(heldAgeMs) ? Math.round(heldAgeMs) : null,
+            held_pid_alive: pidAlive(held?.pid),
+        })
+        try {
+            fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH)
+        } catch {
+            return false
+        }
+    }
+    return false
+}
+
 function claimRunnerEnsure(root) {
     const lockPath = path.join(root, '.gm', 'exec-spool', '.runner-ensure.lock')
     const claim = () => {
@@ -288,6 +344,7 @@ function ensureSpoolRunnerRunning(root) {
     const failures = consecutiveFailedEnsuresByRoot.get(root) || 0
     lastEnsuredAtByRoot.set(root, now + Math.min(ENSURE_BACKOFF_CEILING_MS, ENSURE_INTERVAL_MS * (2 ** failures)) - ENSURE_INTERVAL_MS)
     if (!claimRunnerEnsure(root)) return
+    if (!claimGlobalLauncher()) return
     consecutiveFailedEnsuresByRoot.set(root, failures + 1)
     let child
     try {
@@ -298,8 +355,17 @@ function ensureSpoolRunnerRunning(root) {
             stdio: 'ignore',
             windowsHide: true,
         })
-    } catch {
+    } catch (error) {
+        appendDiagnostic('runner-spawn-failed', { root, runner: RUNNER_PATH, error: String(error?.message || error) })
+        try {
+            fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH)
+        } catch {
+        }
         return
+    }
+    try {
+        fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${child.pid} ${now} runner`, 'utf8')
+    } catch {
     }
     const entry = { pid: child.pid, spawnedAtMs: now, exitCode: null }
     const settle = (code) => {
@@ -756,7 +822,22 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
     }
 }
 
-export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal) {
+export async function gmDispatch(args, signal) {
+    inflightDispatches += 1
+    const startedAtMs = Date.now()
+    appendDiagnostic('dispatch-start', { verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
+    try {
+        return await runDispatch(args, signal)
+    } catch (error) {
+        appendDiagnostic('dispatch-error', { verb: args?.verb ?? null, error: error?.message ? String(error.message) : String(error) })
+        throw error
+    } finally {
+        appendDiagnostic('dispatch-end', { verb: args?.verb ?? null, ms: Date.now() - startedAtMs, inflight: inflightDispatches - 1 })
+        inflightDispatches -= 1
+    }
+}
+
+async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal) {
     if (!verb) return 'error: verb required'
     if (!session_id) return 'error: session_id required'
     const n = resume_task || nextN(session_id)
