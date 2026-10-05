@@ -225,7 +225,10 @@ function claimRunnerEnsure(root) {
         if (error?.code !== 'EEXIST') return false
     }
     try {
-        if (Date.now() - fs.statSync(lockPath).mtimeMs <= ENSURE_LEASE_MS) return false
+        const ageMs = Date.now() - fs.statSync(lockPath).mtimeMs
+        if (ageMs <= ENSURE_LEASE_MS) return false
+        const holderPid = Number.parseInt(fs.readFileSync(lockPath, 'utf8').trim().split(/\s+/)[0], 10)
+        if (ageMs < ENSURE_CHILD_MAX_AGE_MS && pidAlive(holderPid) === true) return false
         const stalePath = `${lockPath}.${process.pid}.${Date.now()}.stale`
         fs.renameSync(lockPath, stalePath)
         fs.unlinkSync(stalePath)
@@ -248,6 +251,8 @@ function claimRunnerEnsure(root) {
 // child can never block supervision forever.
 const ENSURE_CHILD_MAX_AGE_MS = 120_000
 const inflightEnsuresByRoot = new Map()
+const consecutiveFailedEnsuresByRoot = new Map()
+const ENSURE_BACKOFF_CEILING_MS = 60_000
 
 export function runnerEnsureInFlight(root, now = Date.now()) {
     const entry = inflightEnsuresByRoot.get(root)
@@ -269,7 +274,10 @@ export function runnerEnsureInFlight(root, now = Date.now()) {
 
 function ensureSpoolRunnerRunning(root) {
     if (runnerBinaryMissing()) return
-    if (liveDaemonSweepsProject(path.join(root, '.gm', 'exec-spool'))) return
+    if (liveDaemonSweepsProject(path.join(root, '.gm', 'exec-spool'))) {
+        consecutiveFailedEnsuresByRoot.delete(root)
+        return
+    }
     const now = Date.now()
     if (runnerEnsureInFlight(root, now)) return
     if (now - (lastEnsuredAtByRoot.get(root) || 0) < ENSURE_INTERVAL_MS) return
@@ -277,8 +285,10 @@ function ensureSpoolRunnerRunning(root) {
         lastEnsuredAtByRoot.set(root, now)
         return
     }
-    lastEnsuredAtByRoot.set(root, now)
+    const failures = consecutiveFailedEnsuresByRoot.get(root) || 0
+    lastEnsuredAtByRoot.set(root, now + Math.min(ENSURE_BACKOFF_CEILING_MS, ENSURE_INTERVAL_MS * (2 ** failures)) - ENSURE_INTERVAL_MS)
     if (!claimRunnerEnsure(root)) return
+    consecutiveFailedEnsuresByRoot.set(root, failures + 1)
     let child
     try {
         child = spawn(RUNNER_PATH, ['spool'], {
@@ -299,6 +309,10 @@ function ensureSpoolRunnerRunning(root) {
     child.on('error', () => settle(-1))
     child.on('exit', (code) => settle(code))
     recordRunnerEnsureInflight(root, entry)
+    try {
+        fs.writeFileSync(path.join(root, '.gm', 'exec-spool', '.runner-ensure.lock'), `${child.pid} ${now}`, 'utf8')
+    } catch {
+    }
     child.unref()
 }
 
