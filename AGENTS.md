@@ -136,3 +136,10 @@ what README does not.
   7839 -> 3737, 8766 -> 5306, 9507 -> 4959 bytes, and one payload left
   byte-identical because it had nothing worth compacting. Live on this repo's
   own session, back to back: 8815 -> 5355 bytes.
+- **Cold project is not a git-root problem.** A cwd that is not a git repo is
+  rooted on itself (`projectRootFor` falls back to the directory) and the daemon
+  registers and sweeps it like any other: measured 2026-10-05, a fresh non-git
+  dir and a fresh `git init` dir both waited 85-110 s for the first claim,
+  because the shared daemon (100+ registered projects) serves a cold project
+  only after its other work (`queue_wait_ms` 40-90 s). Non-git cwds need no
+  `git_root_override`; the timed-out note says so and points at `resume_task`.
