@@ -357,20 +357,22 @@ function globalDaemonPid() {
 export function daemonBootGraceActive() {
     const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
     const bootTs = status?.daemon_boot_ts
-    if (typeof bootTs !== 'number') return false
-    if (Date.now() - bootTs >= ENSURE_BOOT_GRACE_MS) return false
-    return globalDaemonPid() !== null || Date.now() - (status.ts || 0) < 10_000
+    const age = timestampAgeMs(bootTs)
+    if (age === null || age < -DAEMON_TIMESTAMP_FUTURE_SKEW_MS || age >= ENSURE_BOOT_GRACE_MS) return false
+    return globalDaemonPid() !== null || isFreshDaemonTimestamp(status.ts)
 }
 
 export function liveDaemonSweepsProject(spoolDir) {
     const status = readJsonFile(path.join(spoolDir, '.status.json'))
     if (!status) return false
-    if (!(Date.now() - (status.ts || 0) < DAEMON_HEARTBEAT_STALE_MS)) return false
+    if (!isFreshDaemonTimestamp(status.ts)) return false
     const alive = pidAlive(status.pid)
-    return alive !== false
+    return alive === true
 }
 
 const GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'spool-launch.lock')
+
+const LAUNCHER_LOCK_UNREADABLE_GRACE_MS = 120_000
 
 function readLauncherLock() {
     try {
@@ -381,21 +383,34 @@ function readLauncherLock() {
     }
 }
 
-export function launcherLockMayBeReclaimed(held) {
-    return !held || pidAlive(held.pid) !== true
+export function launcherLockMayBeReclaimed(held, lockPath) {
+    if (held) return pidAlive(held.pid) !== true
+    if (!lockPath) return true
+    try {
+        return Date.now() - fs.statSync(lockPath).mtimeMs > LAUNCHER_LOCK_UNREADABLE_GRACE_MS
+    } catch {
+        return false
+    }
 }
 
 function claimGlobalLauncher() {
     fs.mkdirSync(AGENTPLUG_DIR, { recursive: true })
     for (let attempt = 0; attempt < 2; attempt++) {
+        const tempPath = path.join(AGENTPLUG_DIR, `.spool-launch.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`)
         try {
-            fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${process.pid} ${Date.now()}`, { flag: 'wx', mode: 0o600 })
+            fs.writeFileSync(tempPath, `${process.pid} ${Date.now()}`, { flag: 'wx', mode: 0o600 })
+            fs.linkSync(tempPath, GLOBAL_LAUNCHER_LOCK_PATH)
             return true
         } catch (error) {
             if (error?.code !== 'EEXIST') return false
+        } finally {
+            try {
+                fs.unlinkSync(tempPath)
+            } catch {
+            }
         }
         const held = readLauncherLock()
-        if (!launcherLockMayBeReclaimed(held)) return false
+        if (!launcherLockMayBeReclaimed(held, GLOBAL_LAUNCHER_LOCK_PATH)) return false
         try {
             fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH)
         } catch {
@@ -674,13 +689,26 @@ export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
 
 const DAEMON_HEARTBEAT_STALE_MS = 20000
 
+const DAEMON_TIMESTAMP_FUTURE_SKEW_MS = 60000
+
+
+function timestampAgeMs(timestamp, now = Date.now()) {
+    return typeof timestamp === 'number' && Number.isFinite(timestamp) ? now - timestamp : null
+}
+
+
+function isFreshDaemonTimestamp(timestamp, now = Date.now()) {
+    const age = timestampAgeMs(timestamp, now)
+    return age !== null && age >= -DAEMON_TIMESTAMP_FUTURE_SKEW_MS && age < DAEMON_HEARTBEAT_STALE_MS
+}
+
 function projectRootOfSpool(spoolDir) {
     return path.resolve(spoolDir, '..', '..')
 }
 
 function heartbeatAgeMs(spoolDir) {
     const status = readJsonFile(path.join(spoolDir, '.status.json'))
-    return status && typeof status.ts === 'number' ? Date.now() - status.ts : null
+    return timestampAgeMs(status?.ts)
 }
 
 function daemonRestartCommand(root) {
@@ -708,13 +736,11 @@ export function readDaemonLiveness(spoolDir) {
     } catch {
         return coldProjectLiveness()
     }
-    const now = Date.now()
-    const heartbeatAgeMs = typeof status.ts === 'number' ? now - status.ts : null
+        const now = Date.now()
+        const heartbeatAgeMs = timestampAgeMs(status.ts, now)
     const pid = typeof status.pid === 'number' ? status.pid : Number(status.pid) || null
-    const pidAliveFlag = pidAlive(pid)
-    const alive = pidAliveFlag === false
-        ? false
-        : heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS
+        const pidAliveFlag = pidAlive(pid)
+        const alive = pidAliveFlag === true && isFreshDaemonTimestamp(status.ts, now)
     const busyForMs = typeof status.busy_until === 'number' ? status.busy_until - now : null
     const busy = busyForMs !== null && busyForMs > 0
     const note = !alive
@@ -765,8 +791,7 @@ const DAEMON_START_POLL_MS = 250
 export async function awaitDaemonHeartbeat(spoolDir, signal) {
     const deadline = Date.now() + DAEMON_START_GRACE_MS
     while (true) {
-        const age = heartbeatAgeMs(spoolDir)
-        if (age !== null && age < DAEMON_HEARTBEAT_STALE_MS) return 'recovered'
+        if (liveDaemonSweepsProject(spoolDir)) return 'recovered'
         if (Date.now() >= deadline) return 'still_dead'
         try {
             await sleep(DAEMON_START_POLL_MS, signal)
@@ -779,10 +804,11 @@ export async function awaitDaemonHeartbeat(spoolDir, signal) {
 export async function daemonNotRunning(root, spoolDir, signal) {
     if (process.env.GM_MCP_DAEMON_PREFLIGHT === '0') return undefined
     if (readDaemonLiveness(spoolDir).alive) return undefined
+    const statusPath = path.join(spoolDir, '.status.json')
     const age = heartbeatAgeMs(spoolDir)
-    if (age === null) return undefined
+    if (age === null && !fs.existsSync(statusPath)) return undefined
     if (daemonBootGraceActive()) return undefined
-    if (readJsonFile(path.join(spoolDir, '.status.json'))?.runner_update_in_progress) return undefined
+    if (readJsonFile(statusPath)?.runner_update_in_progress) return undefined
     ensureSpoolRunnerRunning(root)
     startRunnerWatchdog(root)
     if (await awaitDaemonHeartbeat(spoolDir, signal) !== 'still_dead') return undefined
