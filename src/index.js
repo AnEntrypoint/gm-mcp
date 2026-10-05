@@ -2,11 +2,17 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { gmDispatch } from './dispatch.js'
+import { installStdioGuards } from './transport-guard.js'
 import { refreshStaleDeployedBundleInBackground } from './self-update.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 
 const numberLike = z.union([z.number(), z.string()])
 const booleanLike = z.union([z.boolean(), z.string()])
+
+function failedDispatchResult(error) {
+    const detail = error instanceof Error ? (error.stack || error.message) : String(error)
+    return { content: [{ type: 'text', text: `gm-mcp: dispatch threw, stdio transport stays up -- ${detail}` }], isError: true }
+}
 
 export function createServer() {
     const server = new McpServer({ name: 'gm-mcp', version: BUNDLE_VERSION })
@@ -30,22 +36,26 @@ export function createServer() {
             },
         },
         async (args = {}, extra) => {
-            const text = await gmDispatch({
-                verb: 'instruction',
-                body: args.resume_task ? undefined : {
-                    prompt: args.prompt ?? '',
-                    ...(args.mode ? { mode: args.mode } : {}),
-                    ...(args.git_root_override ? { git_root_override: args.git_root_override } : {}),
-                },
-                session_id: args.session_id || instructionSessionId,
-                cwd: args.cwd,
-                timeout_seconds: args.timeout_seconds,
-                poll_interval_seconds: args.poll_interval_seconds,
-                include_timing: args.include_timing,
-                resume_task: args.resume_task,
-                full_response: args.full_response,
-            }, extra?.signal)
-            return { content: [{ type: 'text', text }] }
+            try {
+                const text = await gmDispatch({
+                    verb: 'instruction',
+                    body: args.resume_task ? undefined : {
+                        prompt: args.prompt ?? '',
+                        ...(args.mode ? { mode: args.mode } : {}),
+                        ...(args.git_root_override ? { git_root_override: args.git_root_override } : {}),
+                    },
+                    session_id: args.session_id || instructionSessionId,
+                    cwd: args.cwd,
+                    timeout_seconds: args.timeout_seconds,
+                    poll_interval_seconds: args.poll_interval_seconds,
+                    include_timing: args.include_timing,
+                    resume_task: args.resume_task,
+                    full_response: args.full_response,
+                }, extra?.signal)
+                return { content: [{ type: 'text', text }] }
+            } catch (error) {
+                return failedDispatchResult(error)
+            }
         }
     )
 
@@ -68,8 +78,12 @@ export function createServer() {
             },
         },
         async (args = {}, extra) => {
-            const text = await gmDispatch(args, extra?.signal)
-            return { content: [{ type: 'text', text }] }
+            try {
+                const text = await gmDispatch(args, extra?.signal)
+                return { content: [{ type: 'text', text }] }
+            } catch (error) {
+                return failedDispatchResult(error)
+            }
         }
     )
 
@@ -77,22 +91,11 @@ export function createServer() {
 }
 
 export async function main() {
+    installStdioGuards()
     const server = createServer()
     const transport = new StdioServerTransport()
 
     const keepAlive = setInterval(() => {}, 1 << 30)
-
-    process.stdin.on('end', () => {
-        console.error('gm-mcp: stdin ended (client disconnected or platform pipe quirk) -- server stays up')
-    })
-    process.on('uncaughtException', (err) => {
-        console.error('gm-mcp: uncaught exception', err)
-        process.exit(1)
-    })
-    process.on('unhandledRejection', (err) => {
-        console.error('gm-mcp: unhandled rejection', err)
-        process.exit(1)
-    })
 
     await server.connect(transport)
     console.error('gm-mcp: connected, serving on stdio')
