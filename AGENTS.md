@@ -40,20 +40,8 @@ what README does not.
   start is tens of seconds of wasm compile, so the grace is generous rather
   than tight; the point is that it is bounded and reported, not 120 s of
   silence. `GM_MCP_DAEMON_PREFLIGHT=0` bypasses it.
-- **Glob filters are coerced here because the wasm reads them with `as_str()`
-  only.** `codesearch`/`grep`/`codegraph` take ONE `glob`, and `path_glob` and
-  `include` are aliases of it, so an array of globs -- the shape a caller
-  reaches for first -- was dropped with no error and no echo, and the scan
-  silently covered the whole tree. `withGlobFiltersCoerced` makes an array work
-  by joining it into brace alternation (`["test/**/*.js","tools/**/*.js"]` ->
-  `"{test/**/*.js,tools/**/*.js}"`, which gm's `PathGlob` parses) and fails
-  loudly instead of dropping: a non-string/non-array value, an empty string or
-  array, a `!`-negated pattern (there is no exclude filter, so `!` is a literal
-  path character that matches nothing), a pattern carrying `,`/`{`/`}` that
-  cannot join into one glob, and two aliases with different values. The wasm
-  echoes the applied glob as `path_glob` plus `files_matching_glob`, and sets
-  `glob_matched_no_files: true` when it admits nothing -- that echo is the proof
-  the filter was honored, so never let a value reach the spool unfiltered.
+- **Glob filters are validated here and forwarded untouched.** `codesearch`/`grep`/`codegraph` read `glob`, `path_glob`, `include`, `exclude_glob` and `exclude_globs` as a string or an array of strings in the wasm itself: a leading `!` entry excludes, `{a,b}` brace lists work inside any entry, and every alias is merged rather than dropped. `withGlobFiltersCoerced` therefore only trims entries and fails loudly on what the wasm would silently ignore: a non-string/non-array value, an empty string, an empty array or a blank entry. Never join an array into one brace glob here -- that rewrote entries that already carried `,`/`{`/`}` and refused `!`, the very forms the verb documents. The wasm echoes the applied glob as `path_glob` plus `files_matching_glob`, and sets `glob_matched_no_files: true` when it admits nothing.
+- **A dispatch that waited discloses it.** A reply that landed after `DISPATCH_WAIT_DISCLOSED_AT_MS` (5 s) carries `dispatch_waited_ms`, so queue time behind the shared daemon is visible on success and not only on a `timed_out` reply. `codesearch` `timeout_ms` is a scan wall-clock budget (regex default 20000) enforced in the wasm; its overrun reply is `timed_out: true`, `exhaustive: false`, `budget_ms`.
 - `TIMEOUT_MS_PREFIX_LINE` mirrors gm/rs-plugkit's own
   `strip_timeout_ms_prefix_directive`: skip leading whitespace, then the first
   line must start with `timeoutMs=` or `timeout_ms=`. Keep the two in sync if

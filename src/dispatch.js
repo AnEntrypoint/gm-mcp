@@ -75,7 +75,7 @@ function normalizedObjectBody(verb, body) {
     return { value: body }
 }
 
-const CODESEARCH_INTEGER_FIELDS = ['limit', 'head_limit', 'k', 'max_results', 'maxResults', 'max_matches', 'max_files', 'max_chars']
+const CODESEARCH_INTEGER_FIELDS = ['limit', 'head_limit', 'k', 'max_results', 'maxResults', 'max_matches', 'max_files', 'max_chars', 'timeout_ms']
 const CODESEARCH_BOOLEAN_FIELDS = ['case_insensitive', 'whole_word', 'comments_only']
 
 function withCodesearchScalarsCoerced(verb, body) {
@@ -100,48 +100,33 @@ function plainTextFromBody(body) {
 }
 
 const GLOB_FILTER_FIELDS = ['glob', 'path_glob', 'include']
-const GLOB_ALTERNATION_UNSAFE = /[,{}]/
+const GLOB_EXCLUDE_FIELDS = ['exclude_glob', 'exclude_globs']
 
 export function withGlobFiltersCoerced(verb, body) {
     if (!body || typeof body !== 'object') return { value: body }
     const coerced = { ...body }
-    const applied = []
-    for (const field of GLOB_FILTER_FIELDS) {
+    for (const field of [...GLOB_FILTER_FIELDS, ...GLOB_EXCLUDE_FIELDS]) {
         const value = coerced[field]
         if (value === null || value === undefined) continue
         const single = `${verb} body.${field}`
         if (typeof value === 'string') {
             const trimmed = value.trim()
             if (!trimmed) return { error: `${single} is an empty string -- a blank glob is dropped before the scan runs, so it silently searched everything; omit the field to search unscoped` }
-            if (trimmed.startsWith('!')) return { error: `${single} is the negated pattern "${trimmed}" -- there is no exclude filter in this build ("!" is a literal path character, so this matches nothing); scope with a positive glob like {"${field}":"src/**/*.rs"} or send one dispatch per subtree` }
             coerced[field] = trimmed
-            applied.push(trimmed)
             continue
         }
         if (!Array.isArray(value)) {
-            return { error: `${single} must be a string or an array of strings; received ${Array.isArray(value) ? 'an array' : typeof value}. This filter takes one glob, e.g. {"${field}":"**/*.rs"} or {"${field}":["**/*.rs","**/*.toml"]}` }
+            return { error: `${single} must be a string or an array of strings; received ${typeof value}. This filter takes one glob, e.g. {"${field}":"**/*.rs"} or {"${field}":["**/*.rs","!**/dist/**"]}` }
         }
+        if (value.length === 0) return { error: `${single} is an empty array -- a blank glob is dropped before the scan runs; omit the field to search unscoped` }
         const patterns = []
         for (const element of value) {
             if (typeof element !== 'string' || !element.trim()) {
-                return { error: `${single} is an array whose entries must all be non-empty glob strings; received ${JSON.stringify(element)}. Pass one glob per subtree, or join them yourself: {"${field}":"{src/**/*.rs,tests/**/*.rs}"}` }
+                return { error: `${single} is an array whose entries must all be non-empty glob strings; received ${JSON.stringify(element)}` }
             }
-            const trimmed = element.trim()
-            if (trimmed.startsWith('!')) {
-                return { error: `${single} contains the negated pattern "${trimmed}" -- there is no exclude filter in this build; drop it and scope positively, or send one dispatch per subtree` }
-            }
-            if (GLOB_ALTERNATION_UNSAFE.test(trimmed)) {
-                return { error: `${single} contains "${trimmed}", which cannot be joined into one brace-alternation glob ("," "{" "}" are alternation syntax); send one dispatch per pattern, e.g. {"${field}":"${trimmed}"}` }
-            }
-            patterns.push(trimmed)
+            patterns.push(element.trim())
         }
-        if (patterns.length === 0) return { error: `${single} is an empty array -- a blank glob is dropped before the scan runs; omit the field to search unscoped` }
-        const joined = patterns.length === 1 ? patterns[0] : `{${patterns.join(',')}}`
-        coerced[field] = joined
-        applied.push(joined)
-    }
-    if (applied.length > 1 && new Set(applied).size > 1) {
-        return { error: `${verb} body carries ${applied.length} different glob filters (${GLOB_FILTER_FIELDS.join(', ')}) -- they are aliases of ONE filter, so all but one is silently dropped; pass a single field: {"glob":${JSON.stringify(applied[0])}}` }
+        coerced[field] = patterns
     }
     return { value: coerced }
 }
@@ -502,6 +487,11 @@ export function readDaemonLiveness(spoolDir) {
     if (typeof status.queue_wait_ms === 'number') liveness.queue_wait_ms = status.queue_wait_ms
     if (typeof status.queue_depth === 'number') liveness.queue_depth = status.queue_depth
     if (typeof status.queue_position === 'number') liveness.queue_position = status.queue_position
+    if (typeof status.claimed_step_count === 'number') liveness.claimed_step_count = status.claimed_step_count
+    if (typeof status.queued_step_count === 'number') liveness.queued_step_count = status.queued_step_count
+    if (typeof status.gm_processor_capacity === 'number') liveness.gm_processor_capacity = status.gm_processor_capacity
+    const sharedProjects = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)?.active_projects
+    if (typeof sharedProjects === 'number') liveness.daemon_active_projects = sharedProjects
     if (status.runner_update_in_progress) {
         liveness.runner_update_in_progress = true
         liveness.runner_update_waiting_ms = status.runner_update_waiting_ms ?? null
@@ -576,18 +566,95 @@ export async function daemonNotRunning(root, spoolDir, signal) {
     }
 }
 
-function readSpoolDispatchState(spoolDir, verb, task) {
+export function readSpoolDispatchState(spoolDir, verb, task) {
     const queuedPath = path.join(spoolDir, 'in', verb, `${task}.txt`)
     const claimedPath = `${queuedPath}.inflight`
     const claimed = fs.existsSync(claimedPath)
     const queued = !claimed && fs.existsSync(queuedPath)
     const state = claimed ? 'claimed_still_in_flight' : queued ? 'queued_not_yet_claimed' : 'no_input_file_left'
+    const pressure = scanSpoolQueue(spoolDir, queuedPath)
     const note = claimed
         ? `the daemon HAS claimed this dispatch (${claimedPath} exists) and has not written its out-file yet -- it is still running, not lost. Re-dispatch with resume_task set to this response's task to keep waiting on the SAME request instead of starting a duplicate`
-        : queued
-            ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet; it claims every settled ticket on each tick, so this means the daemon is between ticks or still starting, or this project already has its maximum of 32 claimed dispatches in flight. Re-dispatch with resume_task set to this response's task; writing a second dispatch only deepens the queue`
-            : 'neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id'
-    return { state, claimed, queued, note }
+        : queued && pressure
+            ? queuePressureNote(pressure, queuedPath)
+            : queued
+                ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet; it claims every settled ticket on each tick, so wait with resume_task set to this response's task; writing a second dispatch only deepens the queue`
+                : 'neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id'
+    return { state, claimed, queued, ...(pressure ?? {}), note }
+}
+
+// The daemon refuses to claim another dispatch for a project once that project
+// already holds MAX_CLAIMED_DISPATCHES_PER_PROJECT claimed ones (agentplug-runner
+// daemon.rs, claim_budget). A dispatch that sits unclaimed is therefore either
+// blocked by that cap or merely waiting for the daemon's next sweep of this
+// project -- and the two need opposite responses from the caller (wait vs
+// escalate). The spool holds both numbers, so measure them instead of listing
+// hypotheses.
+const MAX_CLAIMED_DISPATCHES_PER_PROJECT = 32
+
+export function scanSpoolQueue(spoolDir, myQueuedPath) {
+    const inDir = path.join(spoolDir, 'in')
+    let verbs
+    try {
+        verbs = fs.readdirSync(inDir, { withFileTypes: true })
+    } catch {
+        return null
+    }
+    const now = Date.now()
+    let myMtimeMs = null
+    try {
+        myMtimeMs = fs.statSync(myQueuedPath).mtimeMs
+    } catch {
+    }
+    let claimedCount = 0
+    let unclaimedCount = 0
+    let aheadOfMine = 0
+    let oldestUnclaimedMs = null
+    for (const verbEntry of verbs) {
+        if (!verbEntry.isDirectory()) continue
+        const verbDir = path.join(inDir, verbEntry.name)
+        let files
+        try {
+            files = fs.readdirSync(verbDir, { withFileTypes: true })
+        } catch {
+            continue
+        }
+        for (const fileEntry of files) {
+            if (!fileEntry.isFile() || fileEntry.name.startsWith('.')) continue
+            // A claim renames <task>.<ext> to <task>.<ext>.inflight in place, so
+            // .inflight is the only marker of a dispatch the daemon owns.
+            if (fileEntry.name.endsWith('.inflight')) {
+                claimedCount += 1
+                continue
+            }
+            if (!path.extname(fileEntry.name)) continue
+            unclaimedCount += 1
+            let mtimeMs = null
+            try {
+                mtimeMs = fs.statSync(path.join(verbDir, fileEntry.name)).mtimeMs
+            } catch {
+            }
+            if (mtimeMs === null) continue
+            if (oldestUnclaimedMs === null || mtimeMs < oldestUnclaimedMs) oldestUnclaimedMs = mtimeMs
+            if (myMtimeMs !== null && mtimeMs < myMtimeMs) aheadOfMine += 1
+        }
+    }
+    return {
+        project_claimed_count: claimedCount,
+        project_unclaimed_count: unclaimedCount,
+        oldest_unclaimed_age_ms: oldestUnclaimedMs === null ? null : now - oldestUnclaimedMs,
+        unclaimed_ahead_of_mine: myMtimeMs === null ? null : aheadOfMine,
+        claimed_dispatch_cap: MAX_CLAIMED_DISPATCHES_PER_PROJECT,
+        claim_budget_left: Math.max(0, MAX_CLAIMED_DISPATCHES_PER_PROJECT - claimedCount),
+        cap_saturated: claimedCount >= MAX_CLAIMED_DISPATCHES_PER_PROJECT,
+    }
+}
+
+function queuePressureNote(pressure, queuedPath) {
+    const head = `${queuedPath} is still UNCLAIMED -- measured from the spool: ${pressure.project_claimed_count}/${pressure.claimed_dispatch_cap} dispatches claimed in flight for this project, ${pressure.project_unclaimed_count} unclaimed, ${pressure.unclaimed_ahead_of_mine} of them older than this one, oldest unclaimed waiting ${pressure.oldest_unclaimed_age_ms} ms`
+    return pressure.cap_saturated
+        ? `${head}. THIS PROJECT IS AT ITS CLAIM CAP: the daemon claims nothing new here until one of the ${pressure.project_claimed_count} in-flight dispatches finishes. Wait it out on this same dispatch with resume_task -- re-dispatching adds to the ${pressure.project_unclaimed_count} already queued and cannot be claimed any sooner.`
+        : `${head}. Not cap saturation (${pressure.claim_budget_left} claim slot(s) free): the daemon is between sweeps of this project or busy elsewhere -- see daemon.daemon_active_projects and daemon.gm_processor_capacity for how many projects share it. Keep waiting on this dispatch with resume_task; nothing here is wedged.`
 }
 
 const FINAL_OUT_RECHECK_WINDOW_MS = 2500
@@ -609,6 +676,13 @@ function resumeDisclosure(task, landedAtMs, callStartedAtMs) {
 function carriedNoFailure(out) {
     return Boolean(out) && typeof out === 'object' && !Array.isArray(out)
         && out.error === undefined && out.timed_out !== true && out.ok !== false
+}
+
+const DISPATCH_WAIT_DISCLOSED_AT_MS = 5000
+
+function withDispatchWait(out, waitedMs) {
+    if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !out || typeof out !== 'object' || Array.isArray(out)) return out
+    return { ...out, dispatch_waited_ms: waitedMs }
 }
 
 function withResumeDisclosure(out, disclosure) {
@@ -742,6 +816,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
             }
             if (!full_response && carriedNoFailure(out)) out = compactWireResponse(out, outPath)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
+            else out = withDispatchWait(out, Date.now() - callStartedAtMs)
             if (out && typeof out === 'object' && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
                 out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
             }
