@@ -1,6 +1,6 @@
 {
   "name": "gm-mcp",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "description": "MCP server exposing gm's spool dispatch cycle (write, poll, cleaned response) to any MCP client",
   "type": "module",
   "main": "src/index.js",
@@ -13,8 +13,8 @@
   ],
   "scripts": {
     "build": "esbuild src/cli.js --bundle --platform=node --format=esm --outfile=bin/gm-mcp-server.js --external:node:* --preserve-symlinks --banner:js=\"#!/usr/bin/env node\"",
-    "test": "node --test",
-    "verify-build": "node scripts/check-bin-drift.mjs",
+      "verify-build": "node scripts/check-bin-drift.mjs",
+    "test": "node test/response-compact.test.mjs && node test/runner-recovery.test.mjs && node test/daemon-preflight.test.mjs",
     "postinstall": "node scripts/install-hooks.mjs"
   },
   "dependencies": {},
