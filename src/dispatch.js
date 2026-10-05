@@ -208,6 +208,44 @@ export function liveDaemonSweepsProject(spoolDir) {
     return alive !== false
 }
 
+const GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'spool-launch.lock')
+
+function readLauncherLock() {
+    try {
+        const [pid, ts] = fs.readFileSync(GLOBAL_LAUNCHER_LOCK_PATH, 'utf8').trim().split(/\s+/).map(Number)
+        return { pid, ts }
+    } catch {
+        return null
+    }
+}
+
+function claimGlobalLauncher() {
+    fs.mkdirSync(AGENTPLUG_DIR, { recursive: true })
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${process.pid} ${Date.now()}`, { flag: 'wx', mode: 0o600 })
+            return true
+        } catch (error) {
+            if (error?.code !== 'EEXIST') return false
+        }
+        const held = readLauncherLock()
+        const heldAgeMs = held?.ts ? Date.now() - held.ts : Number.POSITIVE_INFINITY
+        if (held && heldAgeMs < ENSURE_CHILD_MAX_AGE_MS && pidAlive(held.pid) !== false) return false
+        if (held && pidAlive(held.pid) === true && held.pid !== process.pid) {
+            try {
+                process.kill(held.pid)
+            } catch {
+            }
+        }
+        try {
+            fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH)
+        } catch {
+            return false
+        }
+    }
+    return false
+}
+
 function claimRunnerEnsure(root) {
     const lockPath = path.join(root, '.gm', 'exec-spool', '.runner-ensure.lock')
     const claim = () => {
@@ -292,6 +330,7 @@ function ensureSpoolRunnerRunning(root) {
     const failures = consecutiveFailedEnsuresByRoot.get(root) || 0
     lastEnsuredAtByRoot.set(root, now + Math.min(ENSURE_BACKOFF_CEILING_MS, ENSURE_INTERVAL_MS * (2 ** failures)) - ENSURE_INTERVAL_MS)
     if (!claimRunnerEnsure(root)) return
+    if (!claimGlobalLauncher()) return
     consecutiveFailedEnsuresByRoot.set(root, failures + 1)
     let child
     try {
@@ -303,7 +342,15 @@ function ensureSpoolRunnerRunning(root) {
             windowsHide: true,
         })
     } catch {
+        try {
+            fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH)
+        } catch {
+        }
         return
+    }
+    try {
+        fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${child.pid} ${now}`, 'utf8')
+    } catch {
     }
     const entry = { pid: child.pid, spawnedAtMs: now, exitCode: null }
     const settle = (code) => {
