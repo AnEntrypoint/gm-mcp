@@ -580,13 +580,17 @@ const TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS)
 
 const TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/
 
-const TIMEOUT_MS_PREFIX_VALUE = /^\s*timeout(?:Ms|_ms)=(\d+)/
+const TIMEOUT_MS_PREFIX_VALUE = /^\s*timeout(?:Ms|_ms)=([0-9]+)[ \t]*(?:\r?\n|$)/
 
 const DEFAULT_TIMEOUT_SECONDS = 120
 
 const EXEC_DEFAULT_LIMIT_SECONDS = 300
 
 const POLL_MARGIN_PAST_EXEC_TIMEOUT_MS = 5000
+
+const MAX_TIMER_TIMEOUT_MS = 2_147_483_647
+
+const MAX_EXEC_TIMEOUT_MS = MAX_TIMER_TIMEOUT_MS - POLL_MARGIN_PAST_EXEC_TIMEOUT_MS
 
 function unpackExecOutputEnvelope(verb, parsed) {
     if (!EXEC_FAMILY_VERBS.includes(verb) || !parsed || typeof parsed.data !== 'string') return parsed
@@ -598,17 +602,54 @@ function unpackExecOutputEnvelope(verb, parsed) {
     }
 }
 
+function timeoutMilliseconds(timeout_seconds, fallbackSeconds) {
+    const seconds = Number(timeout_seconds)
+    if (!Number.isFinite(seconds) || seconds <= 0) return fallbackSeconds * 1000
+    return Math.min(MAX_TIMER_TIMEOUT_MS, Math.max(1, Math.round(seconds * 1000)))
+}
+
+function timeoutSecondsDiagnostic(timeout_seconds) {
+    if (timeout_seconds === undefined || timeout_seconds === null || timeout_seconds === '') return undefined
+    const seconds = Number(timeout_seconds)
+    if (!Number.isFinite(seconds)) return 'timeout_seconds must be a finite number of seconds'
+    if (seconds <= 0) return undefined
+    const milliseconds = seconds * 1000
+    if (!Number.isSafeInteger(milliseconds) || milliseconds > MAX_TIMER_TIMEOUT_MS) {
+        return `timeout_seconds must not exceed ${MAX_TIMER_TIMEOUT_MS / 1000} seconds`
+    }
+    return undefined
+}
+
+function timeoutDirectiveDiagnostic(verb, raw_body) {
+    if (!TIMEOUT_MS_PREFIX_VERBS.has(verb) || typeof raw_body !== 'string' || !TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return undefined
+    const bodyPrefix = TIMEOUT_MS_PREFIX_VALUE.exec(raw_body)
+    if (!bodyPrefix) return 'timeoutMs must be a decimal millisecond value on its own first line'
+    const milliseconds = Number(bodyPrefix[1])
+    if (!Number.isSafeInteger(milliseconds) || milliseconds > MAX_EXEC_TIMEOUT_MS) {
+        return `timeoutMs must not exceed ${MAX_EXEC_TIMEOUT_MS} milliseconds`
+    }
+    return undefined
+}
+
+function timeoutInputDiagnostic(verb, raw_body, timeout_seconds) {
+    return timeoutSecondsDiagnostic(timeout_seconds) || timeoutDirectiveDiagnostic(verb, raw_body)
+}
+
 export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
-    const explicitSeconds = Number(timeout_seconds)
-    if (explicitSeconds > 0) return explicitSeconds * 1000
+    const explicitMs = timeoutMilliseconds(timeout_seconds, 0)
+    if (explicitMs > 0) return explicitMs
     const bodyPrefix = TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === 'string' ? TIMEOUT_MS_PREFIX_VALUE.exec(raw_body) : null
-    if (bodyPrefix) return Math.max(DEFAULT_TIMEOUT_SECONDS * 1000, Number(bodyPrefix[1]) + POLL_MARGIN_PAST_EXEC_TIMEOUT_MS)
+    if (bodyPrefix) {
+        const milliseconds = Number(bodyPrefix[1])
+        if (Number.isSafeInteger(milliseconds) && milliseconds <= MAX_EXEC_TIMEOUT_MS) {
+            return Math.max(DEFAULT_TIMEOUT_SECONDS * 1000, milliseconds + POLL_MARGIN_PAST_EXEC_TIMEOUT_MS)
+        }
+    }
     return DEFAULT_TIMEOUT_SECONDS * 1000
 }
 
 function timeoutMsFor(timeout_seconds) {
-    const seconds = Number(timeout_seconds)
-    return Math.max(100, Math.round((seconds > 0 ? seconds : EXEC_DEFAULT_LIMIT_SECONDS) * 1000))
+    return Math.max(100, timeoutMilliseconds(timeout_seconds, EXEC_DEFAULT_LIMIT_SECONDS))
 }
 
 export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
@@ -932,6 +973,9 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         }
     }
 
+    const timeoutDiagnostic = timeoutInputDiagnostic(verb, raw_body, timeout_seconds)
+    if (timeoutDiagnostic) return `error: ${timeoutDiagnostic}`
+
     let normalizedBody
     if (!resume_task && !isPlainText) {
         const normalized = normalizedObjectBody(verb, body)
@@ -976,7 +1020,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         }
     }
 
-    const timeoutMs = resume_task ? Math.max(0, (Number(timeout_seconds) || DEFAULT_TIMEOUT_SECONDS) * 1000) : pollTimeoutMs(verb, raw_body, timeout_seconds)
+    const timeoutMs = resume_task ? timeoutMilliseconds(timeout_seconds, DEFAULT_TIMEOUT_SECONDS) : pollTimeoutMs(verb, raw_body, timeout_seconds)
     const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1000)
     const deadline = Date.now() + timeoutMs
 
