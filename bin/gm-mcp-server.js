@@ -38636,10 +38636,20 @@ function nextN(sessionId) {
   return `${sessionId}-${process.pid}-${Date.now()}-${counter}`;
 }
 var UNEXPANDED_INTERPOLATION = /\$\{[^}]*\}|\$\(|\$env:|\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%|`/i;
+var SPOOL_COMPONENT_BYTE_LIMITS = {
+  verb: 255,
+  session_id: 150,
+  task: 200
+};
 function unsafeSpoolName(role, value) {
   if (typeof value !== "string" || !value) return null;
   if (value.includes("\0") || value === "." || value === ".." || value.includes("/") || value.includes("\\")) {
     return `${role} ${JSON.stringify(value)} is not a single spool name component: it carries a NUL byte, a path separator, or is a dot component`;
+  }
+  const byteLimit = SPOOL_COMPONENT_BYTE_LIMITS[role];
+  const byteLength = Buffer.byteLength(value);
+  if (byteLength > byteLimit) {
+    return `${role} is ${byteLength} UTF-8 bytes, exceeding its ${byteLimit}-byte spool component limit`;
   }
   const found = UNEXPANDED_INTERPOLATION.exec(value);
   if (!found) return null;
