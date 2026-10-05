@@ -10,6 +10,7 @@ const committedPath = path.join(repoRoot, 'bin', 'gm-mcp-server.js')
 const result = await esbuild.build({
     entryPoints: [path.join(repoRoot, 'src', 'cli.js')],
     bundle: true,
+    minify: true,
     platform: 'node',
     format: 'esm',
     external: ['node:*'],

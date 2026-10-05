@@ -100,9 +100,18 @@ systemd unit and no long-lived launcher to check.
 Restart it by hand for one project with the same command the server uses --
 the `spool` launcher detaches `agentplug-runner daemon` for that root:
 
+On Windows:
+
+```powershell
+cd C:/dev/mc-420
+& "$HOME/.gm-tools/agentplug-runner.exe" spool
+```
+
+On Unix:
+
 ```bash
-cd C:/dev/mc-420 && "$HOME/.gm-tools/agentplug-runner.exe" spool   # Windows
-cd ~/my/project && ~/.gm-tools/agentplug-runner spool               # Unix
+cd ~/my/project
+~/.gm-tools/agentplug-runner spool
 ```
 
 A cold start compiles wasm for tens of seconds before it claims its first
@@ -132,9 +141,12 @@ out with `GM_MCP_DAEMON_PREFLIGHT=0`.
 `bin/gm-mcp-server.js` is a committed build artifact, not hand-edited source --
 edit `src/index.js`/`src/dispatch.js`/`src/cli.js` instead, then rebuild:
 
+Install development dependencies, then bundle `src/cli.js` into the committed
+runtime artifact:
+
 ```bash
-npm install   # pulls the real deps into devDependencies for the build only
-npm run build # bundles src/cli.js -> bin/gm-mcp-server.js, no runtime deps left
+npm install
+npm run build
 ```
 
 Rebuilding is not cosmetic: the bundle carries the tool's `inputSchema`, and
