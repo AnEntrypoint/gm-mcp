@@ -4,7 +4,6 @@ import { inflightDispatchCount } from './dispatch.js'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 
 const CLIENT_GONE_EXIT_RECHECK_MS = 15_000
-const CLIENT_GONE_EXIT_RECHECK_LIMIT = 240
 
 // A JSON-RPC frame is always a single JSON object terminated by a newline.
 // Testing the first byte before parsing keeps this off the hot path: a
@@ -55,25 +54,35 @@ export function keepServingOnAsyncFailure() {
     })
 }
 
-export function exitWhenClientGone() {
-    let pending = 0
-    const exitIfIdle = (reason, error) => {
-        if (inflightDispatchCount() > 0) {
-            appendDiagnostic('exit-deferred-dispatch-inflight', {
-                reason,
-                error: error ? describeError(error) : null,
-                dispatches_inflight: inflightDispatchCount(),
-                recheck_ms: CLIENT_GONE_EXIT_RECHECK_MS,
-            })
-            if (pending >= CLIENT_GONE_EXIT_RECHECK_LIMIT) return
-            pending += 1
-            setTimeout(() => exitIfIdle(reason, error), CLIENT_GONE_EXIT_RECHECK_MS).unref?.()
-            return
-        }
-        appendDiagnostic('exit', { reason, error: error ? describeError(error) : null })
-        process.exit(0)
+// A stdio server is killed more often than it chooses to die, and the default
+// handlers leave no trace. Name the signal on the way out, then behave exactly
+// as node would have.
+export function logSignalExits() {
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+        process.on(signal, () => {
+            appendDiagnostic('exit', { reason: 'signal', signal, dispatches_inflight: inflightDispatchCount() })
+            process.exit(0)
+        })
     }
-    process.stdout.on('error', (error) => exitIfIdle('stdout-pipe-gone', error))
+}
+
+// A dead pipe is not a reason to die. Claude Code owns this process's stdin
+// and stdout; once it stops reading, exiting here would trade a recoverable
+// stall for a guaranteed "MCP server has disconnected" that lasts the rest of
+// the session. Stay up, say so once per error kind, and let the client decide.
+export function surviveClientGone() {
+    const reported = new Set()
+    process.stdout.on('error', (error) => {
+        const code = error?.code || 'unknown'
+        if (reported.has(code)) return
+        reported.add(code)
+        appendDiagnostic('stdout-pipe-gone', {
+            code,
+            error: describeError(error),
+            note: 'client stopped reading -- server stays up so a reconnect finds it alive',
+            dispatches_inflight: inflightDispatchCount(),
+        })
+    })
     process.stdin.on('end', () => {
         appendDiagnostic('stdin-ended', { note: 'client disconnect or platform pipe quirk -- server stays up' })
     })
@@ -81,8 +90,9 @@ export function exitWhenClientGone() {
 
 export function installStdioGuards() {
     keepServingOnAsyncFailure()
+    logSignalExits()
     reserveStdoutForJsonRpc()
-    exitWhenClientGone()
+    surviveClientGone()
     appendDiagnostic('start', {
         bundle_version: BUNDLE_VERSION,
         argv: process.argv.slice(1),

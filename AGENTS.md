@@ -30,7 +30,28 @@ what README does not.
   session from leaking an orphan server into the next one. A *failed dispatch*
   is the opposite case and must never reach it: both `gm` and `gm_instruction`
   wrap `gmDispatch` and return `failedDispatchResult` (`isError: true`) so a
-  throwing dispatch keeps the transport serving.
+  throwing dispatch keeps the transport serving. Rule (3) was itself wrong and
+  is now reversed: `exitWhenClientGone` is gone, replaced by `surviveClientGone`,
+  which logs the EPIPE once per error kind and keeps serving. Exiting cannot
+  make a dead pipe live again, and it guarantees the one outcome that is
+  unrecoverable -- a session whose `mcp__gm__gm` is gone until it is restarted.
+  `logSignalExits()` names SIGINT/SIGTERM/SIGHUP/SIGBREAK on the way out so a
+  client-driven kill leaves a record instead of a silent disappearance.
+- **The durable transport is stateless HTTP; stdio is the one that can be
+  lost.** A stdio MCP server is a child process the client owns on a pipe, and
+  when that pipe goes there is nothing to re-attach: not the server, and not
+  the client until it restarts. `src/http-transport.js` therefore serves
+  streamable HTTP on `127.0.0.1:8787/mcp` with a `/health` route, stateless
+  (no session id) so a client that vanishes and returns is just another
+  request. `src/singleton.js` keeps one per machine -- health probe first,
+  spawn detached only when nothing answers, never by pid alone, since a state
+  file naming a live pid says nothing about who holds the port -- and a stdio
+  server seeds it on start so the durable transport is up before anything asks
+  for it. **One shared stateless transport answers its first request and then
+  500s every later one**, so `startHttpServer` builds a fresh `McpServer` and
+  `StreamableHTTPServerTransport` per request; do not hoist them back out to
+  save a millisecond. Registering it is `claude mcp add --transport http gm
+  http://127.0.0.1:8787/mcp -s user`.
 - **Runner recovery.** The daemon exits on purpose and depends on this file to
   bring it back: it self-recycles when idle or over its wasm memory ceiling
   (`self-recycling after 3600000ms fully idle ... next real dispatch spawns a
