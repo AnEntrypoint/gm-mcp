@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased - the MCP shim survives an async fault, and no gm-mcp server signals another process
+
+A Claude Code session lost its `gm` MCP connection mid-session (2026-10-05, cwd
+`C:\dev\train`): two parallel `codesearch` dispatches answered "No such tool available:
+mcp__gm__gm. Its MCP server 'gm' has disconnected" while the server process was still
+alive and idle, and the only record of what happened went to stderr, which the host
+discards. Two defects made that possible and neither is recoverable by hand.
+
+`main()` installed `uncaughtException`/`unhandledRejection` handlers that called
+`process.exit(1)`, so any async fault anywhere in the process took the whole stdio
+transport down with it. `src/transport-guard.js` now absorbs those into a log line and
+keeps serving, and defers even the one legitimate exit -- a broken stdout pipe, i.e. a
+client that is really gone -- until no dispatch is in flight.
+
+`claimGlobalLauncher()` in `src/dispatch.js` killed the pid named in the shared
+`~/.agentplug/spool-launch.lock` once that lock was older than
+`ENSURE_CHILD_MAX_AGE_MS`, with no check that the pid was the runner it had spawned. The
+lock is written with the claiming server's own pid first and only overwritten with the
+child's pid afterwards, so a contended write or pid reuse leaves another session's live
+gm-mcp server in it -- and that session loses its MCP connection. The lock now records a
+`role` (`server` or `runner`) and is only ever stolen, never signalled; a wedged runner
+is already bounded by the max-age rule and the per-root in-flight guard.
+
+Every event above is appended to `~/.gm-tools/gm-mcp-server.log` (one JSON line each,
+4 MB cap, `GM_MCP_LOG_PATH` to move it), so the next drop names its own cause instead of
+leaving a dead connection and a discarded stderr.
+
 ## Unreleased - glob filters forwarded as documented, and a slow dispatch discloses its wait
 
 Glob filters no longer reject a leading `!` or brace lists: the wasm already excludes, merges aliases and expands braces, so the wrapper only validates types and blanks. `exclude_glob`/`exclude_globs` are validated the same way. Replies that waited 5 s or more carry `dispatch_waited_ms`. `timeout_ms` coerces from a numeric string like the other codesearch integers.

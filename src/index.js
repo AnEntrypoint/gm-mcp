@@ -3,15 +3,17 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { gmDispatch } from './dispatch.js'
 import { installStdioGuards } from './transport-guard.js'
+import { appendDiagnostic, describeError } from './server-log.js'
 import { refreshStaleDeployedBundleInBackground } from './self-update.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 
 const numberLike = z.union([z.number(), z.string()])
 const booleanLike = z.union([z.boolean(), z.string()])
 
-function failedDispatchResult(error) {
-    const detail = error instanceof Error ? (error.stack || error.message) : String(error)
-    return { content: [{ type: 'text', text: `gm-mcp: dispatch threw, stdio transport stays up -- ${detail}` }], isError: true }
+function failedDispatchResult(verb, error) {
+    const detail = describeError(error)
+    appendDiagnostic('dispatch-threw', { verb, error: detail })
+    return { content: [{ type: 'text', text: `gm-mcp: ${verb} dispatch threw, stdio transport stays up -- ${detail}` }], isError: true }
 }
 
 export function createServer() {
@@ -54,7 +56,7 @@ export function createServer() {
                 }, extra?.signal)
                 return { content: [{ type: 'text', text }] }
             } catch (error) {
-                return failedDispatchResult(error)
+                return failedDispatchResult('instruction', error)
             }
         }
     )
@@ -82,7 +84,7 @@ export function createServer() {
                 const text = await gmDispatch(args, extra?.signal)
                 return { content: [{ type: 'text', text }] }
             } catch (error) {
-                return failedDispatchResult(error)
+                return failedDispatchResult(args?.verb ?? 'unknown', error)
             }
         }
     )

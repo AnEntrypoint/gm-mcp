@@ -5,6 +5,8 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BUNDLE_VERSION } from './bundle-version.js'
+import { appendDiagnostic } from './server-log.js'
+import { inflightDispatchCount } from './dispatch.js'
 
 const DEPLOYED_BUNDLE_FILE_NAME = 'gm-mcp-server.mjs'
 const DEFAULT_BUNDLE_URL = 'https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js'
@@ -211,6 +213,7 @@ export async function refreshStaleDeployedBundle() {
     if (!isRunningFromDeployedBundle(deployedPath)) return { outcome: 'not-deployed-copy' }
     const refuse = (code, reason) => {
         console.error(`gm-mcp: refusing deployed bundle self-update (${code}) -- ${reason}`)
+        appendDiagnostic('self-update-refused', { code, reason, deployed_bundle: deployedPath })
         return { outcome: 'refused', code, reason, deployed_bundle: deployedPath }
     }
     const frozen = selfUpdateFreezeReason()
@@ -233,6 +236,11 @@ export async function refreshStaleDeployedBundle() {
     const version = versionGuardReason(freshBytes)
     if (version.code) return refuse(version.code, version.reason)
 
+    // The swap only replaces the file the next connect reads, but a dispatch
+    // in flight is the one thing this process must not be doing housework
+    // around: a failure there is indistinguishable from a network stall.
+    if (inflightDispatchCount() > 0) return { outcome: 'deferred-dispatch-inflight', dispatches_inflight: inflightDispatchCount() }
+
     replaceDeployedBundle(deployedPath, freshBytes)
     touch(stampPath)
     return { outcome: 'refreshed', from: deployedHash, to: freshHash, url, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
@@ -241,11 +249,13 @@ export async function refreshStaleDeployedBundle() {
 export function refreshStaleDeployedBundleInBackground() {
     refreshStaleDeployedBundle()
         .then((result) => {
+            appendDiagnostic('self-update-check', result)
             if (result.outcome === 'refreshed') {
                 console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} (${result.version}) from ${result.url}; takes effect on next connect (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`)
             }
         })
         .catch((error) => {
+            appendDiagnostic('self-update-failed', { error: error?.message ? String(error.message) : String(error) })
             console.error(`gm-mcp: bundle staleness check failed (${error.message}); keeping the deployed copy`)
         })
 }
