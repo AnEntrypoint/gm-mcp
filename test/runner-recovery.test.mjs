@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { liveDaemonSweepsProject, pidAlive, recordRunnerEnsureInflight, runnerEnsureInFlight } from '../src/dispatch.js'
+import { launcherLockMayBeReclaimed, liveDaemonSweepsProject, pidAlive, recordRunnerEnsureInflight, runnerEnsureInFlight } from '../src/dispatch.js'
 
 let passed = 0
 function test(name, fn) {
@@ -63,6 +63,14 @@ test('a status.json without a pid falls back to the heartbeat', () => {
     assert.equal(liveDaemonSweepsProject(dir), true)
     writeStatus(dir, { ts: Date.now() - 60_000 })
     assert.equal(liveDaemonSweepsProject(dir), false)
+})
+
+test('a stale launcher lock held by a live process is never reclaimed', () => {
+    assert.equal(launcherLockMayBeReclaimed({ pid: process.pid, ts: Date.now() - 121_000 }), false)
+})
+
+test('a launcher lock held by an exited process is reclaimable', () => {
+    assert.equal(launcherLockMayBeReclaimed({ pid: exitedPid, ts: Date.now() }), true)
 })
 
 test('no runner ensure recorded is not in flight', () => {
