@@ -571,11 +571,11 @@ export function readSpoolDispatchState(spoolDir, verb, task) {
     const pressure = scanSpoolQueue(spoolDir, queuedPath)
     const stall = claimSweepStall(pressure, queued)
     const note = claimed
-        ? `the daemon HAS claimed this dispatch (${claimedPath} exists) and has not written its out-file yet -- it is still running, not lost. Re-dispatch with resume_task set to this response's task to keep waiting on the SAME request instead of starting a duplicate`
+        ? `the daemon HAS claimed this dispatch (${claimedPath} exists) and has not written its out-file yet -- it is still running, not lost. Do NOT re-dispatch: call again with the same verb and cwd, resume_task set to this response's task and no body, to keep waiting on the SAME request`
         : queued && pressure
             ? queuePressureNote(pressure, queuedPath, stall)
             : queued
-                ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet; it claims every settled ticket on each tick, so wait with resume_task set to this response's task; writing a second dispatch only deepens the queue`
+                ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet; it claims every settled ticket on each tick, so do NOT re-dispatch: call again with the same verb and cwd, resume_task set to this response's task and no body; writing a second dispatch only deepens the queue`
                 : 'neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id'
     return { state, claimed, queued, ...(stall ?? {}), ...(pressure ?? {}), note }
 }
