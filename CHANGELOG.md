@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased - a timed-out dispatch now reports what it is waiting on
+
+An `instruction` dispatch on `C:\dev\mc-420` (2026-10-06) timed out at 120 s and
+again at 300 s with no answer and no clue why. The cause was a cold
+codeinsight pass, not a hang: the daemon's own log shows
+`codeinsight_symbols_synced` running 63 765 ms with `files_deferred: 179` and
+`complete: false`, and once that index warms the same verb answers in 5.6 s.
+Nothing told the caller any of this.
+
+A timed-out dispatch already carried `dispatch_state` (claimed vs queued) and
+`daemon` liveness, but no stage, so the only message available was "still
+running". The timeout reply now also carries `progress`:
+`readDispatchWaitProgress()` reads the daemon's `.dispatch-wait.json` and
+returns the row for this task -- `state`, `stage_age_ms`, `file_age_ms`, the
+serial `lane`, and the admission gate -- with a note saying to resume rather
+than re-dispatch. When the daemon has published no ledger the field says so
+instead of going missing, so the caller can tell "no finer-grained progress
+exists" from "this dispatch is stuck".
+
+On the daemon side `refresh_dispatch_wait_ledger()` no longer deletes a ledger
+another live daemon published: it only removes the file when the `daemon_pid`
+inside it is this process or its `ts` is older than
+`DISPATCH_WAIT_LEDGER_STALE_MS`. Several runners share one spool, and each was
+deleting the ledger the others had just written, so the file was absent exactly
+when a caller needed it.
+
 ## Unreleased - gm-mcp also serves streamable HTTP, so a lost connection is no longer permanent
 
 A Claude Code session lost its `gm` MCP connection mid-session (2026-10-05, cwd
