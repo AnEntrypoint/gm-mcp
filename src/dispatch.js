@@ -472,6 +472,8 @@ const EXEC_DEFAULT_LIMIT_SECONDS = 300
 
 const POLL_MARGIN_PAST_EXEC_TIMEOUT_MS = 5000
 
+const CLIENT_DEADLINE_MARGIN_MS = 1500
+
 function unpackExecOutputEnvelope(verb, parsed) {
     if (!EXEC_FAMILY_VERBS.includes(verb) || !parsed || typeof parsed.data !== 'string') return parsed
     try {
@@ -484,7 +486,7 @@ function unpackExecOutputEnvelope(verb, parsed) {
 
 export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
     const explicitSeconds = Number(timeout_seconds)
-    if (explicitSeconds > 0) return explicitSeconds * 1000
+    if (explicitSeconds > 0) return Math.max(1000, explicitSeconds * 1000 - CLIENT_DEADLINE_MARGIN_MS)
     const bodyPrefix = TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === 'string' ? TIMEOUT_MS_PREFIX_VALUE.exec(raw_body) : null
     if (bodyPrefix) return Math.max(DEFAULT_TIMEOUT_SECONDS * 1000, Number(bodyPrefix[1]) + POLL_MARGIN_PAST_EXEC_TIMEOUT_MS)
     return DEFAULT_TIMEOUT_SECONDS * 1000
