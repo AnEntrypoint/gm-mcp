@@ -1,4 +1,5 @@
 import { createServer as createHttpServer } from 'node:http'
+import { SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { createServer } from './mcp-server.js'
 import { keepServingOnAsyncFailure, logSignalExits } from './transport-guard.js'
@@ -25,6 +26,30 @@ export function httpListenOptions() {
     return { port: Number.isInteger(port) && port > 0 ? port : DEFAULT_PORT, host: host || DEFAULT_HOST }
 }
 
+// MCP says a server that cannot serve the version a client asks for answers in
+// the version it does. The bundled SDK does the opposite: `initialize` is exempt
+// from its `mcp-protocol-version` check, but every later POST -- notifications,
+// tools/list, tools/call -- is rejected 400 when the header names a version
+// newer than the SDK knows (2026-07-28 is what current Claude Code sends). The
+// client therefore connects, then reads as dead: no tool call is ever served.
+// Speak the newest version we do support instead of refusing the request.
+const SERVED_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
+
+function normalizeProtocolVersion(req) {
+    const requested = req.headers['mcp-protocol-version']
+    if (typeof requested !== 'string' || SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) return
+    req.headers['mcp-protocol-version'] = SERVED_PROTOCOL_VERSION
+    // The web Request the SDK sees is built from `rawHeaders`, not from the
+    // parsed `headers` map, so both have to carry the served version.
+    const raw = req.rawHeaders
+    if (Array.isArray(raw)) {
+        for (let i = 0; i + 1 < raw.length; i += 2) {
+            if (typeof raw[i] === 'string' && raw[i].toLowerCase() === 'mcp-protocol-version') raw[i + 1] = SERVED_PROTOCOL_VERSION
+        }
+    }
+    appendDiagnostic('http-protocol-version-normalized', { requested, served: SERVED_PROTOCOL_VERSION })
+}
+
 function rejectOversizedBody(req, res) {
     if (Number(req.headers['content-length'] || 0) <= MAX_BODY_BYTES) return false
     sendJson(res, 413, { error: `request body exceeds the ${MAX_BODY_BYTES} byte cap` })
@@ -42,6 +67,7 @@ async function serveMcpRequest(req, res) {
         return
     }
     if (rejectOversizedBody(req, res)) return
+    normalizeProtocolVersion(req)
     const mcp = createServer()
     const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
