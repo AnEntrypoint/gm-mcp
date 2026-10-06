@@ -660,6 +660,32 @@ export function readSpoolDispatchState(spoolDir, verb, task) {
     return { state, claimed, queued, ...(stall ?? {}), ...(pressure ?? {}), note }
 }
 
+export function readDispatchWaitProgress(spoolDir, verb, task) {
+    const ledgerPath = path.join(spoolDir, '.dispatch-wait.json')
+    const ledger = readJsonFile(ledgerPath)
+    if (!ledger || !Array.isArray(ledger.requests)) {
+        return {
+            ledger_path: ledgerPath,
+            published: false,
+            note: 'the daemon has not published a dispatch-wait ledger for this project, so there is no finer-grained progress than claimed/unclaimed to report',
+        }
+    }
+    const mine = ledger.requests.find((r) => r.verb === verb && r.task === task) ?? null
+    return {
+        ledger_path: ledgerPath,
+        published: true,
+        ledger_age_ms: typeof ledger.ts === 'number' ? Date.now() - ledger.ts : null,
+        daemon_pid: ledger.daemon_pid ?? null,
+        project_in_flight: ledger.project_in_flight ?? null,
+        project_in_flight_cap: ledger.project_in_flight_cap ?? null,
+        waiting_requests: ledger.requests.length,
+        mine,
+        note: mine
+            ? `the daemon (pid ${ledger.daemon_pid ?? 'unknown'}) reports this dispatch as "${mine.state}" for ${mine.stage_age_ms} ms, ${mine.file_age_ms} ms after it was written${mine.lane ? `, serial lane "${mine.lane}"` : ''}${mine.admission_kind ? `, admission gate "${mine.admission_kind}" (${mine.admission_in_flight}/${mine.admission_limit} busy)` : ''} -- it IS progressing, so resume rather than re-dispatch`
+            : `the daemon has published a wait ledger with ${ledger.requests.length} waiting request(s) but no row for this task, so this dispatch has no recorded stage yet`,
+    }
+}
+
 // A live daemon with free claim slots claims a settled ticket on its next pass
 // over the project's spool. Past this age an unclaimed ticket is not ordinary
 // queueing: the pass that claims is not reaching this project (it walks the whole
@@ -999,6 +1025,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 out_path: outPath,
                 final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
                 dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
+                progress: readDispatchWaitProgress(spoolDir, verb, n),
                 daemon: readDaemonLiveness(spoolDir),
             })
         }
