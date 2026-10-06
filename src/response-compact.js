@@ -352,3 +352,11 @@ export function compactWireResponse(response, outPath) {
     })
     return out
 }
+
+export const VERBATIM_TEXT_MARKER = '--- data (verbatim, no indentation added) ---'
+
+export function renderVerbatimFileText(out, toYaml) {
+    if (!out || typeof out !== 'object' || Array.isArray(out) || typeof out.data !== 'string') return undefined
+    const { data, ...rest } = out
+    return `${toYaml(rest)}${VERBATIM_TEXT_MARKER}\n${data}`
+}
