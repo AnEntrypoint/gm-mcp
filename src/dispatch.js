@@ -247,9 +247,12 @@ export function daemonBootGraceActive() {
 export function liveDaemonSweepsProject(spoolDir) {
     const status = readJsonFile(path.join(spoolDir, '.status.json'))
     if (!status) return false
-    if (!(Date.now() - (status.ts || 0) < DAEMON_HEARTBEAT_STALE_MS)) return false
-    const alive = pidAlive(status.pid)
-    return alive !== false
+    if (pidAlive(status.pid) === false) return false
+    if (Date.now() - (status.ts || 0) < DAEMON_HEARTBEAT_STALE_MS) return true
+    const shared = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    if (typeof shared?.ts !== 'number') return false
+    if (Date.now() - shared.ts >= DAEMON_HEARTBEAT_STALE_MS) return false
+    return pidAlive(shared.pid ?? status.pid) !== false
 }
 
 const GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'spool-launch.lock')
@@ -529,14 +532,6 @@ export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
     return DEFAULT_TIMEOUT_SECONDS * 1000
 }
 
-// The client's own tool-call deadline bounds only the budget nobody named. A
-// caller that passes timeout_seconds is stating how long it will wait for this
-// one call, and that is worth more than a measured average: the 60 s default
-// came from watching one client, and clipping a caller that asked for 240 s
-// down to 58.5 s is what turns an 83 s dispatch into a timed_out whose reply
-// lands in out_path 20 s after gm stopped looking. An operator who sets
-// GM_MCP_CLIENT_DEADLINE_SECONDS explicitly still caps everything, because
-// then it is a fact about the client rather than a default guess.
 const CLIENT_DEADLINE_DEFAULT_SECONDS = 60
 
 function clientDeadline() {
@@ -549,8 +544,7 @@ export function applyClientDeadline(requestedMs, callerExplicit = false) {
     const { seconds, operator_set } = clientDeadline()
     const base = { client_deadline_seconds: seconds, requested_ms: requestedMs, caller_timeout_explicit: Boolean(callerExplicit) }
     if (seconds <= 0) return { ms: requestedMs, clamped: false, ...base }
-    if (callerExplicit && !operator_set) return { ms: requestedMs, clamped: false, ...base }
-    const ceilingMs = seconds * 1000 - CLIENT_DEADLINE_MARGIN_MS
+    const ceilingMs = seconds * 1000 - CLIENT_DEADLINE_MARGIN_MS - FINAL_OUT_RECHECK_WINDOW_MS
     if (ceilingMs <= 0 || requestedMs <= ceilingMs) {
         return { ms: requestedMs, clamped: false, ...base }
     }
@@ -598,6 +592,21 @@ function projectRootOfSpool(spoolDir) {
     return path.resolve(spoolDir, '..', '..')
 }
 
+const MUTATING_VERB_PREFIXES = ['git_', 'prd-', 'mutable-', 'memorize-']
+const MUTATING_VERBS = new Set(['fs_write', 'transition'])
+
+function verbMutatesState(verb) {
+    return MUTATING_VERBS.has(verb) || MUTATING_VERB_PREFIXES.some((prefix) => verb.startsWith(prefix))
+}
+
+function stateChangingNote(verb) {
+    if (!verbMutatesState(verb)) return {}
+    return {
+        state_changing: true,
+        state_changing_note: 'this verb changes state, so a caller that stopped waiting cannot tell applied from not-applied: read out_path or the project state before acting, and never re-dispatch it -- a second ' + verb + ' repeats the change. Resume this task to collect the result already on its way',
+    }
+}
+
 function heartbeatAgeMs(spoolDir) {
     const status = readJsonFile(path.join(spoolDir, '.status.json'))
     return status && typeof status.ts === 'number' ? Date.now() - status.ts : null
@@ -632,9 +641,16 @@ export function readDaemonLiveness(spoolDir) {
     const heartbeatAgeMs = typeof status.ts === 'number' ? now - status.ts : null
     const pid = typeof status.pid === 'number' ? status.pid : Number(status.pid) || null
     const pidAliveFlag = pidAlive(pid)
-    const alive = pidAliveFlag === false
-        ? false
-        : heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS
+    const sharedStatus = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    const sharedHeartbeatAgeMs = typeof sharedStatus?.ts === 'number' ? now - sharedStatus.ts : null
+    const sharedDaemonFresh = pidAliveFlag === true
+        && sharedHeartbeatAgeMs !== null
+        && sharedHeartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS
+    const projectHeartbeatFresh = heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS
+    const alive = pidAliveFlag === false ? false : (projectHeartbeatFresh || sharedDaemonFresh)
+    const holder = typeof status.sweep_holder_root === 'string'
+        ? ` -- the shared daemon is currently inside its "${status.sweep_holder_phase}" pass holding ${status.sweep_holder_root} for ${status.sweep_holder_ms} ms`
+        : ''
     const busyForMs = typeof status.busy_until === 'number' ? status.busy_until - now : null
     const busy = busyForMs !== null && busyForMs > 0
     const note = !alive
@@ -642,11 +658,18 @@ export function readDaemonLiveness(spoolDir) {
             ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed`
             : pidAliveFlag === false
                 ? `the daemon process that last swept this project (pid ${pid}) is gone -- the daemon recycles itself on idle/memory pressure and on a runner version handoff, and is restarted on demand; this call already asked for a replacement, so a dispatch submitted now waits for its cold start (wasm compile, tens of seconds) instead of for a queue`
-                : `daemon heartbeat is ${heartbeatAgeMs} ms stale (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) -- it is down, hung, or has not registered this project; its own log is ${GLOBAL_DAEMON_LOG_PATH} (this project's spool log is ${path.join(spoolDir, '.watcher.log')}) and it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}; this is not necessarily this dispatch's fault`
-        : busy
-            ? 'daemon is alive and still actively working on this project'
-            : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that'
+                : `the shared daemon process (pid ${pid}) is alive but its OWN heartbeat is ${sharedHeartbeatAgeMs} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms), so the daemon is wedged rather than merely behind on this project${holder}. Its log is ${GLOBAL_DAEMON_LOG_PATH}; it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}`
+        : projectHeartbeatFresh
+            ? (busy
+                ? 'daemon is alive and still actively working on this project'
+                : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that')
+            : `this project's heartbeat is ${heartbeatAgeMs} ms old, past the ${DAEMON_HEARTBEAT_STALE_MS} ms bound, but the shared daemon process (pid ${pid}) is alive with a ${sharedHeartbeatAgeMs} ms-old heartbeat, so the daemon is UP and only this project's heartbeat is late -- that heartbeat is refreshed by a ticker walking every registered root on a budget, so a large registry delays it${holder}. Dispatching is safe; dispatch_state is the authority on whether a request was claimed.`
     const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note }
+    if (sharedHeartbeatAgeMs !== null) liveness.shared_heartbeat_age_ms = sharedHeartbeatAgeMs
+    if (!projectHeartbeatFresh && sharedDaemonFresh) liveness.project_heartbeat_stale_ms = heartbeatAgeMs
+    if (typeof status.sweep_holder_root === 'string') liveness.sweep_holder_root = status.sweep_holder_root
+    if (typeof status.sweep_holder_phase === 'string') liveness.sweep_holder_phase = status.sweep_holder_phase
+    if (typeof status.sweep_holder_ms === 'number') liveness.sweep_holder_ms = status.sweep_holder_ms
     if (pid !== null) liveness.pid = pid
     if (pidAliveFlag !== null) liveness.pid_alive = pidAliveFlag
     if (status.runtime) liveness.runtime = status.runtime
@@ -1138,6 +1161,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         root_source: resolvedRoot.root_source,
         in_path: inPath,
         out_path: outPath,
+                ...stateChangingNote(verb),
         aborted_after_ms: Date.now() - callStartedAtMs,
         request_withdrawn_before_claim: withdrawUnclaimedRequest(),
         note: `the caller stopped waiting after ${Date.now() - callStartedAtMs}ms; the dispatch itself was NOT cancelled${resume_task ? '' : ' once the daemon claimed it'} and its result still lands in out_path once the daemon finishes. Re-poll the SAME dispatch with resume_task set to this response's task (same verb and cwd, no body) instead of dispatching again -- a re-dispatch queues a second copy of the same work.`,
