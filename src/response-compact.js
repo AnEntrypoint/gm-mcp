@@ -156,6 +156,7 @@ const WIRE_HITS_INLINE_MAX = 4
 const WIRE_CONFIG_CHANGED_INLINE_MAX = 1
 
 const WIRE_CONFIG_CHANGED_KEYS_INLINE_MAX = 3
+const WIRE_PHASE_HISTORY_INLINE_MAX = 5
 
 const WIRE_FULL_PAYLOAD_VIA = 'dispatch with {"full_response": true}'
 
@@ -243,6 +244,10 @@ function compactConfigChanged(rows) {
     })
 }
 
+function compactPhaseHistory(rows) {
+    return Array.isArray(rows) ? rows.slice(-WIRE_PHASE_HISTORY_INLINE_MAX) : rows
+}
+
 const WIRE_SCAN_WARNINGS_INLINE_MAX = 8
 
 function compactSupplyChainScan(scan) {
@@ -287,6 +292,7 @@ const WIRE_FIELD_COMPACTORS = new Map([
     ['codeinsight_overview', compactCodeinsightOverview],
     ['codeinsight_start', compactCodeinsightStart],
     ['config_changed', compactConfigChanged],
+    ['phase_history', compactPhaseHistory],
     ['supply_chain_scan', compactSupplyChainScan],
     ['dream_rsi_strategy', compactDreamRsiStrategy],
     ['dream_rsi_replay', compactDreamRsiReplay],
