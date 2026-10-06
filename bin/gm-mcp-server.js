@@ -38500,6 +38500,29 @@ function readSpoolDispatchState(spoolDir, verb, task) {
   const note = claimed ? `the daemon HAS claimed this dispatch (${claimedPath} exists) and has not written its out-file yet -- it is still running, not lost. Do NOT re-dispatch: call again with the same verb and cwd, resume_task set to this response's task and no body, to keep waiting on the SAME request` : queued && pressure ? queuePressureNote(pressure, queuedPath, stall) : queued ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet; it claims every settled ticket on each tick, so do NOT re-dispatch: call again with the same verb and cwd, resume_task set to this response's task and no body; writing a second dispatch only deepens the queue` : "neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id";
   return { state, claimed, queued, ...stall ?? {}, ...pressure ?? {}, note };
 }
+function readDispatchWaitProgress(spoolDir, verb, task) {
+  const ledgerPath = path2.join(spoolDir, ".dispatch-wait.json");
+  const ledger = readJsonFile(ledgerPath);
+  if (!ledger || !Array.isArray(ledger.requests)) {
+    return {
+      ledger_path: ledgerPath,
+      published: false,
+      note: "the daemon has not published a dispatch-wait ledger for this project, so there is no finer-grained progress than claimed/unclaimed to report"
+    };
+  }
+  const mine = ledger.requests.find((r) => r.verb === verb && r.task === task) ?? null;
+  return {
+    ledger_path: ledgerPath,
+    published: true,
+    ledger_age_ms: typeof ledger.ts === "number" ? Date.now() - ledger.ts : null,
+    daemon_pid: ledger.daemon_pid ?? null,
+    project_in_flight: ledger.project_in_flight ?? null,
+    project_in_flight_cap: ledger.project_in_flight_cap ?? null,
+    waiting_requests: ledger.requests.length,
+    mine,
+    note: mine ? `the daemon (pid ${ledger.daemon_pid ?? "unknown"}) reports this dispatch as "${mine.state}" for ${mine.stage_age_ms} ms, ${mine.file_age_ms} ms after it was written${mine.lane ? `, serial lane "${mine.lane}"` : ""}${mine.admission_kind ? `, admission gate "${mine.admission_kind}" (${mine.admission_in_flight}/${mine.admission_limit} busy)` : ""} -- it IS progressing, so resume rather than re-dispatch` : `the daemon has published a wait ledger with ${ledger.requests.length} waiting request(s) but no row for this task, so this dispatch has no recorded stage yet`
+  };
+}
 var CLAIM_SWEEP_STALL_MS = 3e4;
 function claimSweepStall(pressure, queued) {
   const oldestMs = queued && pressure ? pressure.oldest_unclaimed_age_ms : null;
@@ -38784,6 +38807,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         out_path: outPath,
         final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
         dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
+        progress: readDispatchWaitProgress(spoolDir, verb, n),
         daemon: readDaemonLiveness(spoolDir)
       });
     }
@@ -38854,7 +38878,7 @@ function createServer() {
     {
       description: "Run the whole gm spool write-then-poll-for-response cycle for one verb dispatch in a single call, instead of writing the input file, polling for the output file, and reading it as three separate steps. Writes .gm/exec-spool/in/<verb>/<N>.txt, polls .gm/exec-spool/out/<verb>-<N>.json until it appears (or the timeout elapses), and returns its contents as flat YAML text, auto-cleaned for readability: opaque internal ids (dispatch_id, request_fingerprint) stripped, the redundant response/data nesting levels flattened up to the top (unless a field name would collide), long text fields (e.g. instruction phase prose) truncated with a pointer naming the on-disk file to read for the full text, hit-array ranking internals (cos/recency in recall_hits/bm25_hits/vector_hits/commits) dropped, score retained as ranked evidence, byte-identical object rows repeated inside one array collapsed to the first copy, and empty/null/empty-string fields removed at every level (an empty result list such as edges/reachable/matches/definitions stays as [] so nothing-found reads as an answer) along with a false on a flag that only ever means the absence of a problem (session_mismatch, instruction_unchanged, instruction_suppressible_by_asserting_hash, recall_embed_failed, should_residual_scan, fsm_graph_rejected). On top of that cleaning the response is compacted for the wire by default: low-signal telemetry (route_hint, orient_nouns, reply_hash, an all-clear supply_chain_scan, codeinsight detail, dream_rsi evidence rows) is dropped, config_changed keeps only the newest transition, recall_hits keep key/title/score plus a 160-char excerpt, and a `wire_compacted` block names every field dropped or shortened plus the on-disk file holding the full payload; pass full_response=true for every field verbatim. A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look. For plain-text-body verbs (exec_js and every language stem it backs, serp, browser, cdp), pass raw_body instead of body -- these verbs reject a JSON object outright.",
       inputSchema: {
-        verb: external_exports.string().describe(`gm spool verb name, e.g. instruction, prd-add, git_status, exec_js, fs_read. Only verbs the running build registers are dispatchable; anything else answers error_code: unknown_verb. There is no fs_list (use fs_readdir), no fs_glob and no glob (use grep or codesearch with a body "glob" filter), and no exec_bash (use bash or exec_js with raw_body). Dispatch health for the build's own verb inventory.`),
+        verb: external_exports.string().describe(`gm spool verb name, e.g. instruction, prd-add, git_status, exec_js, fs_read. Only verbs the running build registers are dispatchable; anything else answers error_code: unknown_verb. There is no fs_list (use fs_readdir), no fs_glob and no glob (use grep or codesearch with a body "glob" filter), and no exec_bash (use bash or exec_js with raw_body). grep is more than a pattern scan: {"mode":"comments"} sweeps comment spans with no "pattern" needed, and {"help":true} as the verb body prints every mode and parameter grep accepts -- dispatch that instead of guessing field names. Dispatch health for the build's own verb inventory.`),
         body: external_exports.union([external_exports.record(external_exports.string(), external_exports.unknown()), external_exports.string()]).optional().describe(`JSON body for the dispatch (an object, or a string holding a JSON object). session_id is added automatically if not present. Not valid for plain-text-body verbs (exec_js and its language stems, serp, browser, cdp) -- use raw_body for those instead. Search verbs take a project directory in the body: codesearch/grep/codeinsight accept "root" (aliases "projectPath", "cwd") to search another project than the one this dispatch's cwd selected, with "path" relative to it.`),
         raw_body: external_exports.string().optional().describe('Literal text body for a plain-text-body verb (exec_js/bash/python/etc, serp, browser, cdp) -- sent exactly as given, no JSON wrapping. Mutually exclusive with body. The server writes these bytes to the spool input file with no escaping, so the shell sees them verbatim -- but this argument is itself a JSON string, so a backslash you write as \\ reaches the shell as ; write \\\\ to make bash receive \\. Inside bash double quotes one backslash is then removed again, and \\$ is a literal dollar sign, so "C:\\dir\\${V}" never expands ${V} -- prefer forward slashes ("C:/dir/${V}.bat") for Windows paths.'),
         session_id: external_exports.string().describe("gm SESSION_ID for this dispatch (required by gm on every body)"),
