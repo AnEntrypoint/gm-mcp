@@ -495,7 +495,9 @@ const EXEC_FAMILY_VERBS = ['exec_js', 'nodejs', 'javascript', 'node', 'js', 'bas
 
 const PLAIN_TEXT_BODY_VERBS = new Set([...EXEC_FAMILY_VERBS, ...BROWSER_PLAIN_TEXT_VERBS])
 
-const TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS)
+const DEADLINE_AWARE_JSON_VERBS = ['codesearch', 'codeinsight', 'instruction', 'recall']
+
+const TIMEOUT_MS_PREFIX_VERBS = new Set([...EXEC_FAMILY_VERBS, ...DEADLINE_AWARE_JSON_VERBS])
 
 const TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/
 
@@ -580,7 +582,10 @@ function timeoutMsFor(timeout_seconds) {
 export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
     if (!TIMEOUT_MS_PREFIX_VERBS.has(verb)) return raw_body
     if (TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return raw_body
-    return `timeoutMs=${timeoutMsFor(timeout_seconds)}\n${raw_body}`
+    const prefixMs = EXEC_FAMILY_VERBS.includes(verb)
+        ? timeoutMsFor(timeout_seconds)
+        : applyClientDeadline(pollTimeoutMs(verb, raw_body, timeout_seconds)).ms
+    return `timeoutMs=${prefixMs}\n${raw_body}`
 }
 
 const DAEMON_HEARTBEAT_STALE_MS = 20000
