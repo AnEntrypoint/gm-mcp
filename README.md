@@ -185,7 +185,7 @@ at launch time.
 | `body` | object | no | JSON body for the dispatch (not valid for plain-text-body verbs) |
 | `raw_body` | string | no | Literal text body for a plain-text-body verb, mutually exclusive with `body` |
 | `cwd` | string | no | Project root containing `.gm/exec-spool` -- defaults to `process.cwd()` |
-| `timeout_seconds` | number | no | Give up polling and return `timed_out:true` after this many seconds. Default 120, or for an exec-family `raw_body` that starts with `timeoutMs=<ms>`, that value plus 5 s. An explicit value always wins. |
+| `timeout_seconds` | number | no | Requested poll budget. Default 120, or an exec-family `timeoutMs` prefix plus 5 s. Explicit values override that request; every call is capped at 240 s and returns a resumable task if still pending. |
 | `poll_interval_seconds` | number | no | Fallback response check interval when filesystem events are unavailable (default 0.25) |
 | `include_timing` | boolean | no | Include MCP submission-to-response timing and the last response wakeup source |
 | `resume_task` | string | no | The `task` field from a previous `timed_out`/aborted response -- keep polling that SAME dispatch instead of writing a new one |
@@ -282,11 +282,13 @@ For these verbs the server adds the line itself when `raw_body` lacks one:
 - `serp`, `browser` and `cdp` are not touched; they take a `timeout=<ms>`
   line and carry their own default
 
-The prefix is the process budget the daemon enforces; `timeout_seconds` is how
-long this wrapper polls. When only the prefix is given, the wrapper polls for
-the prefix plus 5 s, so a `timeoutMs=240000` body is awaited for 245 s. When
-both are given, `timeout_seconds` wins for the poll: a shorter value returns
-`timed_out:true` with a `task` to `resume_task`, a longer one just waits. Because
+The prefix is the process budget the daemon enforces; `timeout_seconds` requests
+the wrapper's poll budget. Without an explicit poll value, an exec prefix requests
+its duration plus 5 s, with a 120 s minimum. Every initial or resume call is capped
+at 240 s so it can return before a 300 s client transport deadline. A pending reply
+reports `poll_timeout_ms`, `requested_poll_timeout_ms`, `poll_timeout_capped`,
+and the original `task` and spool paths. Resume that same task without a body;
+poll expiration neither stops execution nor queues another dispatch. Because
 the daemon kills the child at `timeoutMs`, an abandoned call never leaves a
 runaway process: it ends at the limit. An aborted call also withdraws its
 request from the spool when the daemon has not claimed it yet
