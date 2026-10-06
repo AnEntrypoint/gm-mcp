@@ -619,6 +619,8 @@ const EXEC_DEFAULT_LIMIT_SECONDS = 300
 
 const POLL_MARGIN_PAST_EXEC_TIMEOUT_MS = 5000
 
+const MCP_POLL_TIMEOUT_CEILING_MS = 240000
+
 const MAX_TIMER_TIMEOUT_MS = 2_147_483_647
 
 const MAX_EXEC_TIMEOUT_MS = MAX_TIMER_TIMEOUT_MS - POLL_MARGIN_PAST_EXEC_TIMEOUT_MS
@@ -1062,7 +1064,8 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         }
     }
 
-    const timeoutMs = resume_task ? timeoutMilliseconds(timeout_seconds, DEFAULT_TIMEOUT_SECONDS) : pollTimeoutMs(verb, raw_body, timeout_seconds)
+    const requestedPollTimeoutMs = resume_task ? timeoutMilliseconds(timeout_seconds, DEFAULT_TIMEOUT_SECONDS) : pollTimeoutMs(verb, raw_body, timeout_seconds)
+    const timeoutMs = Math.min(requestedPollTimeoutMs, MCP_POLL_TIMEOUT_CEILING_MS)
     const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1000)
     const deadline = Date.now() + timeoutMs
 
@@ -1146,6 +1149,9 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
             return toYaml({
                 timed_out: true,
                 task: n,
+                poll_timeout_ms: timeoutMs,
+                requested_poll_timeout_ms: requestedPollTimeoutMs,
+                poll_timeout_capped: requestedPollTimeoutMs > timeoutMs,
                 resume_task_supported: true,
                 resumed_this_call: Boolean(resume_task),
                 in_path: inPath,

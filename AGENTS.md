@@ -54,14 +54,17 @@ what README does not.
   only and keyed on session as well as root: a restarted server (a new agent
   session) must see the prose again rather than inherit an assertion it
   cannot honor.
-- `pollTimeoutMs` is how long the wrapper polls, not what the daemon enforces.
+- `pollTimeoutMs` computes the requested poll budget, not what the daemon enforces.
   An explicit `timeout_seconds` wins; otherwise an exec-family body that starts
-  with `timeoutMs=<ms>` is awaited for that value plus 5 s (never less than 120 s),
+  with `timeoutMs=<ms>` requests that value plus 5 s (never less than 120 s),
   because the daemon enforces `timeoutMs` as a wall-clock limit and kills the
   child tree at expiry, answering with `exec_timeout` at that point. The prefix the
   wrapper injects when the body has none is 300000 (`EXEC_DEFAULT_LIMIT_SECONDS`),
   the daemon default, while the poll without a prefix stays 120 s. A `resume_task` poll sends no body, so it only has
-  `timeout_seconds` to go on.
+  `timeout_seconds` to go on. Every initial or resume poll is capped at 240 s,
+  leaving time for bounded preflight and final recheck before a 300 s client
+  transport deadline. A poll timeout reports requested/applied budgets and the
+  original spool task and paths; it neither cancels nor republishes execution.
 - `unpackExecOutputEnvelope` parses the exec family's `data` JSON string into an
   object before cleaning, so `stdout`, `stderr` and `result` keep their own
   16000-character cap (`EXEC_OUTPUT_FIELD_TRUNCATE_AT`) instead of sharing the
