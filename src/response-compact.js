@@ -302,8 +302,22 @@ function unchangedByCompaction(before, after) {
     return JSON.stringify(before) === JSON.stringify(after)
 }
 
-export function compactWireResponse(response, outPath) {
+const WIRE_GIT_COMMIT_VERBS = new Set(['git_commit', 'git_finalize'])
+const WIRE_GIT_EXCLUSION_KEYS = new Set(['excluded', 'excluded_but_dirty'])
+const WIRE_GIT_EXCLUSIONS_INLINE_MAX = 5
+
+function gitReceiptCarriesNoFailure(response) {
+    return response.error === undefined && response.error_code === undefined
+        && response.ok !== false && response.timed_out !== true
+        && response.refused !== true && response.status !== 'refused'
+        && response.outcome !== 'refused'
+}
+
+export function compactWireResponse(response, outPath, receiptVerb = response?.verb) {
     if (!response || typeof response !== 'object' || Array.isArray(response)) return response
+    const gitReceiptContext = WIRE_GIT_COMMIT_VERBS.has(receiptVerb)
+        && gitReceiptCarriesNoFailure(response)
+    const committedGitReceipt = gitReceiptContext && response.committed === true
     const omitted = []
     const shortened = []
     const out = {}
@@ -330,8 +344,9 @@ export function compactWireResponse(response, outPath) {
         if (fieldCompactor) next = fieldCompactor(next)
         else if (WIRE_HIT_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_HITS_INLINE_MAX).map(excerptRow)
         else if (WIRE_ROW_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.map(excerptRow)
+        else if (committedGitReceipt && WIRE_GIT_EXCLUSION_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_GIT_EXCLUSIONS_INLINE_MAX)
         if (key === 'data' && next && typeof next === 'object' && !Array.isArray(next)) {
-            const inner = compactWireResponse(next, outPath)
+            const inner = compactWireResponse(next, outPath, gitReceiptContext ? receiptVerb : null)
             if (inner !== next) {
                 const { wire_compacted: innerWire, ...innerRest } = inner
                 if (innerWire?.omitted) omitted.push(`data.${innerWire.omitted}`)

@@ -1,26 +1,23 @@
 #!/usr/bin/env node
-import * as esbuild from 'esbuild'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildBundle } from './build.mjs'
+import { BUNDLE_VERSION } from '../src/bundle-version.js'
+import { parseBundleVersion } from '../src/self-update.js'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const committedPath = path.join(repoRoot, 'bin', 'gm-mcp-server.js')
 
-const result = await esbuild.build({
-    entryPoints: [path.join(repoRoot, 'src', 'cli.js')],
-    bundle: true,
-    minify: true,
-    platform: 'node',
-    format: 'esm',
-    external: ['node:*'],
-    banner: { js: '#!/usr/bin/env node' },
-    preserveSymlinks: true,
-    write: false,
-})
+const result = await buildBundle(false)
 
 const committed = readFileSync(committedPath, 'utf8')
 const fresh = result.outputFiles[0].text
+
+if (parseBundleVersion(fresh) !== BUNDLE_VERSION) {
+    console.error(`fresh bundle is missing the source BUNDLE_VERSION ${BUNDLE_VERSION} recognized by the updater`)
+    process.exit(1)
+}
 
 if (committed === fresh) {
     console.log(`bin/gm-mcp-server.js matches a fresh build of src/ (${fresh.length} bytes) -- no drift`)
