@@ -14,13 +14,48 @@ export function inflightDispatchCount() {
     return inflightDispatches
 }
 
+function gitToplevel(dir) {
+    try {
+        const top = execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim()
+        return top ? path.resolve(top) : null
+    } catch {
+        return null
+    }
+}
+
 function projectRootFor(dir) {
     const resolved = path.resolve(dir)
-    try {
-        const top = execFileSync('git', ['-C', resolved, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim()
-        return top ? path.resolve(top) : resolved
-    } catch {
-        return resolved
+    return gitToplevel(resolved) || resolved
+}
+
+const DEFAULT_CWD_ENV_VARS = ['GM_MCP_DEFAULT_CWD', 'CLAUDE_PROJECT_DIR']
+
+// A cwd-less dispatch used to resolve against this server's own process.cwd().
+// One shared HTTP gm-mcp server serves every project (138 measured) and was
+// started from the user's home directory, which is not a git repo -- so every
+// cwd-less dispatch silently registered and ran in $HOME/.gm: instruction
+// state, PRD rows and last-instruction-hash files all landed in the wrong
+// project while the caller's own spool stayed empty, which reads exactly like
+// "the daemon never answered". An explicit root, or a loud refusal.
+function resolveDispatchRoot(cwd) {
+    if (typeof cwd === 'string' && cwd.trim()) return { root: projectRootFor(cwd.trim()), root_source: 'cwd' }
+    for (const name of DEFAULT_CWD_ENV_VARS) {
+        const value = process.env[name]
+        if (typeof value === 'string' && value.trim()) return { root: projectRootFor(value.trim()), root_source: `env:${name}` }
+    }
+    const launched = path.resolve(process.cwd())
+    if (process.env.GM_MCP_ALLOW_PROCESS_CWD === '1') return { root: projectRootFor(launched), root_source: 'process_cwd' }
+    const top = gitToplevel(launched)
+    if (top && top === launched) return { root: launched, root_source: 'process_cwd' }
+    return {
+        error: 'cwd-required',
+        refused_root: launched,
+        root_source: 'process_cwd',
+        refused_reason: top
+            ? `process.cwd() is ${launched}, inside git repository ${top} but not at its root`
+            : `process.cwd() is ${launched}, which is not inside a git repository`,
+        note: `this dispatch named no project, and this gm-mcp server is a shared one whose own cwd is not a project root, so the old behaviour would have run it in ${launched}/.gm -- the wrong project, with its instruction state, PRD rows and spool files written there and nothing appearing in yours. Pass cwd (the project root containing .gm/exec-spool) on every dispatch, or set GM_MCP_DEFAULT_CWD to one explicit root for cwd-less calls. GM_MCP_ALLOW_PROCESS_CWD=1 restores the silent fallback.`,
+        accepted_fields: ['cwd'],
     }
 }
 
@@ -492,6 +527,51 @@ export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
     return DEFAULT_TIMEOUT_SECONDS * 1000
 }
 
+// The MCP client kills the tool call on its own schedule -- 60 s measured
+// repeatedly (59998/60033 ms) -- long before gm's own 120 s poll budget runs
+// out. Polling past it is pure loss: the reply is thrown away and the caller
+// sees a bare transport timeout with no task id, no dispatch_state and no
+// resume handle. Poll to the client's deadline instead and return a structured
+// timed_out with everything needed to resume.
+const CLIENT_DEADLINE_DEFAULT_SECONDS = 60
+
+function clientDeadlineSeconds() {
+    const raw = Number(process.env.GM_MCP_CLIENT_DEADLINE_SECONDS)
+    if (!Number.isFinite(raw) || raw < 0) return CLIENT_DEADLINE_DEFAULT_SECONDS
+    return raw
+}
+
+export function applyClientDeadline(requestedMs) {
+    const seconds = clientDeadlineSeconds()
+    if (seconds <= 0) return { ms: requestedMs, clamped: false, client_deadline_seconds: 0, requested_ms: requestedMs }
+    const ceilingMs = seconds * 1000 - CLIENT_DEADLINE_MARGIN_MS
+    if (ceilingMs <= 0 || requestedMs <= ceilingMs) {
+        return { ms: requestedMs, clamped: false, client_deadline_seconds: seconds, requested_ms: requestedMs }
+    }
+    return { ms: ceilingMs, clamped: true, client_deadline_seconds: seconds, requested_ms: requestedMs }
+}
+
+function pollBudgetDisclosure(budget, waitedMs) {
+    const base = {
+        requested_ms: budget.requested_ms,
+        effective_ms: budget.ms,
+        clamped_to_client_deadline: budget.clamped,
+        client_deadline_seconds: budget.client_deadline_seconds,
+        waited_ms: waitedMs,
+    }
+    return budget.clamped
+        ? {
+            ...base,
+            reason: `the MCP client cuts this tool call off at ${budget.client_deadline_seconds}s, so gm stopped polling ${CLIENT_DEADLINE_MARGIN_MS}ms early rather than let the reply be discarded -- the dispatch is NOT cancelled and its result still lands in out_path. Re-poll the SAME dispatch with resume_task set to this response's task (same verb and cwd), and raise GM_MCP_CLIENT_DEADLINE_SECONDS if your client really waits longer.`,
+        }
+        : {
+            ...base,
+            reason: budget.requested_ms > budget.client_deadline_seconds * 1000 && budget.client_deadline_seconds > 0
+                ? `this dispatch did not finish within the requested ${budget.requested_ms}ms poll budget; note the MCP client's own deadline is ${budget.client_deadline_seconds}s, so a slower dispatch needs resume_task rather than a longer timeout_seconds`
+                : `this dispatch did not finish within the requested ${budget.requested_ms}ms poll budget`,
+        }
+}
+
 function timeoutMsFor(timeout_seconds) {
     const seconds = Number(timeout_seconds)
     return Math.max(100, Math.round((seconds > 0 ? seconds : EXEC_DEFAULT_LIMIT_SECONDS) * 1000))
@@ -871,14 +951,22 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const n = resume_task || nextN(session_id)
     const unsafeName = unsafeSpoolName('verb', verb) || unsafeSpoolName('session_id', session_id) || unsafeSpoolName('task', n)
     if (unsafeName) return `error: ${unsafeName} -- nothing was written to the spool, so no dispatch was queued`
-    const root = projectRootFor(cwd || process.cwd())
+    const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })
+    const resolvedRoot = resolveDispatchRoot(cwd)
+    if (resolvedRoot.error) {
+        appendDiagnostic('dispatch-root-refused', { verb, root: resolvedRoot.refused_root, reason: resolvedRoot.refused_reason })
+        return toYaml(resolvedRoot)
+    }
+    if (resolvedRoot.root_source !== 'cwd') {
+        appendDiagnostic('dispatch-root-defaulted', { verb, root: resolvedRoot.root, source: resolvedRoot.root_source })
+    }
+    const root = resolvedRoot.root
     const spoolDir = path.join(root, '.gm', 'exec-spool')
     const inDir = path.join(spoolDir, 'in', verb)
     const outDir = path.join(spoolDir, 'out')
     fs.mkdirSync(outDir, { recursive: true })
     const callStartedAtMs = Date.now()
     let lastWakeSource = 'initial_check'
-    const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })
 
     const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === 'string'
     if (!resume_task && isPlainText && typeof raw_body !== 'string') {
@@ -932,7 +1020,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         }
     }
 
-    const timeoutMs = resume_task ? Math.max(0, (Number(timeout_seconds) || DEFAULT_TIMEOUT_SECONDS) * 1000) : pollTimeoutMs(verb, raw_body, timeout_seconds)
+    const requestedTimeoutMs = resume_task ? Math.max(0, (Number(timeout_seconds) || DEFAULT_TIMEOUT_SECONDS) * 1000) : pollTimeoutMs(verb, raw_body, timeout_seconds)
+    const budget = applyClientDeadline(requestedTimeoutMs)
+    const timeoutMs = budget.ms
     const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1000)
     const deadline = Date.now() + timeoutMs
 
@@ -992,9 +1082,13 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const abortedReply = () => toYaml({
         error: 'aborted',
         task: n,
+        dispatch_root: root,
+        root_source: resolvedRoot.root_source,
         in_path: inPath,
         out_path: outPath,
+        aborted_after_ms: Date.now() - callStartedAtMs,
         request_withdrawn_before_claim: withdrawUnclaimedRequest(),
+        note: `the caller stopped waiting after ${Date.now() - callStartedAtMs}ms; the dispatch itself was NOT cancelled${resume_task ? '' : ' once the daemon claimed it'} and its result still lands in out_path once the daemon finishes. Re-poll the SAME dispatch with resume_task set to this response's task (same verb and cwd, no body) instead of dispatching again -- a re-dispatch queues a second copy of the same work.`,
     })
 
     while (true) {
@@ -1023,9 +1117,12 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 task: n,
                 resume_task_supported: true,
                 resumed_this_call: Boolean(resume_task),
+                dispatch_root: root,
+                root_source: resolvedRoot.root_source,
                 in_path: inPath,
                 out_path: outPath,
                 final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
+                poll_budget: pollBudgetDisclosure(budget, Date.now() - callStartedAtMs),
                 dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
                 progress: readDispatchWaitProgress(spoolDir, verb, n),
                 daemon: readDaemonLiveness(spoolDir),
