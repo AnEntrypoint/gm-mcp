@@ -120,6 +120,12 @@ what README does not.
   only when the policy hash moved, and then it is the thing to read), and every
   count field, because a count is already the smallest honest form.
 
+- `phase_history` is historical context, not the current phase or gate decision.
+  The wire retains its newest five transitions in source order and records
+  retained/total counts with the existing full-payload pointer. Failure responses
+  and `full_response: true` bypass this compaction; current phase, session mismatch,
+  and pending-work counts remain authoritative and unshortened.
+
 - Measured on real `instruction` out-files (`scripts/measure-wire-size.mjs`):
   7839 -> 3737, 8766 -> 5306, 9507 -> 4959 bytes, and one payload left
   byte-identical because it had nothing worth compacting. Live on this repo's

@@ -213,6 +213,11 @@ Long prose is cut to a 160-char excerpt ending in `...+<n>`, so an abbreviated
 field always says how much is missing. `full_response: true` returns the
 pre-compaction payload byte for byte.
 
+`phase_history` retains the newest five transitions in its existing order. The
+`wire_compacted.shortened` entry records retained/total counts and points to the
+unchanged out-file. Current phase, gate decisions, session mismatch, PRD counts,
+and failure payloads are not shortened. Use `full_response: true` for all history.
+
 ### Long text inline limits
 
 Two env vars set how much of a long text field comes back inline before it is
