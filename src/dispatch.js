@@ -872,6 +872,49 @@ function queuePressureNote(pressure, queuedPath, stall) {
 const FINAL_OUT_RECHECK_WINDOW_MS = 2500
 const FINAL_OUT_RECHECK_INTERVAL_MS = 150
 
+const STALE_CHROME_SCAN_TIMEOUT_MS = 3000
+
+// A completed dispatch that still reads as a timeout is nearly always a starved
+// daemon, and the starvation is nearly always gm's own headless Chrome piling
+// up: every orphan makes the reaper's process scan slower, a slow scan trips the
+// reaper's circuit breaker, and a blind reaper reaps nothing -- so the count
+// climbs on its own. Naming the count turns a bare "timed out" into the one
+// action that clears it.
+function staleChromeCount() {
+    if (process.platform !== 'win32') return null
+    try {
+        const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq chrome.exe', '/FO', 'CSV', '/NH'], {
+            timeout: STALE_CHROME_SCAN_TIMEOUT_MS,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+            windowsHide: true,
+        })
+        const n = String(out).split('\n').filter(l => l.toLowerCase().includes('chrome.exe')).length
+        return Number.isFinite(n) ? n : null
+    } catch {
+        return null
+    }
+}
+
+function staleChromeTimeoutNote(verb) {
+    const isBrowserVerb = verb === 'browser' || verb === 'cdp'
+    const count = staleChromeCount()
+    // The count is a bonus, never a gate: if the scan cannot answer, the browser
+    // verbs still get the actionable note, because that is exactly the starved
+    // machine where it matters and where a scan is least likely to answer.
+    if (count === null && !isBrowserVerb) return {}
+    const observed = count === null
+        ? 'A process scan could not count them just now'
+        : `${count} chrome.exe process(es) are running`
+    const reap = 'Dispatch `browser` with body `session close-all`, then `session list` to confirm none remain.'
+    return {
+        ...(count === null ? {} : { stale_chrome_processes: count }),
+        timeout_note: isBrowserVerb
+            ? `${observed}. gm-spawned headless Chrome that is never closed accumulates, and the orphan reaper cannot see any of it while its own process scan is failing -- so the pile grows on its own and every later dispatch, browser or not, waits behind it. ${reap} Then re-poll THIS dispatch with resume_task rather than dispatching it again.`
+            : `${observed}. Accumulated gm headless Chrome starves the daemon and delays unrelated verbs like \`${verb}\`, so this dispatch is more likely still queued than lost. Re-poll it with resume_task (same verb and cwd, no body); if it keeps timing out, ${reap}`,
+    }
+}
+
 function resumeDisclosure(task, landedAtMs, callStartedAtMs) {
     const resultPredatesResume = typeof landedAtMs === 'number' && landedAtMs < callStartedAtMs
     return {
@@ -1131,6 +1174,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
                 progress: readDispatchWaitProgress(spoolDir, verb, n),
                 daemon: readDaemonLiveness(spoolDir),
+                ...staleChromeTimeoutNote(verb),
             })
         }
         try {
