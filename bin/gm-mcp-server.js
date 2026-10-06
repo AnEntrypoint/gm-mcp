@@ -37962,14 +37962,37 @@ var inflightDispatches = 0;
 function inflightDispatchCount() {
   return inflightDispatches;
 }
+function gitToplevel(dir) {
+  try {
+    const top = execFileSync("git", ["-C", dir, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }).trim();
+    return top ? path2.resolve(top) : null;
+  } catch {
+    return null;
+  }
+}
 function projectRootFor(dir) {
   const resolved = path2.resolve(dir);
-  try {
-    const top = execFileSync("git", ["-C", resolved, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }).trim();
-    return top ? path2.resolve(top) : resolved;
-  } catch {
-    return resolved;
+  return gitToplevel(resolved) || resolved;
+}
+var DEFAULT_CWD_ENV_VARS = ["GM_MCP_DEFAULT_CWD", "CLAUDE_PROJECT_DIR"];
+function resolveDispatchRoot(cwd) {
+  if (typeof cwd === "string" && cwd.trim()) return { root: projectRootFor(cwd.trim()), root_source: "cwd" };
+  for (const name of DEFAULT_CWD_ENV_VARS) {
+    const value = process.env[name];
+    if (typeof value === "string" && value.trim()) return { root: projectRootFor(value.trim()), root_source: `env:${name}` };
   }
+  const launched = path2.resolve(process.cwd());
+  if (process.env.GM_MCP_ALLOW_PROCESS_CWD === "1") return { root: projectRootFor(launched), root_source: "process_cwd" };
+  const top = gitToplevel(launched);
+  if (top && top === launched) return { root: launched, root_source: "process_cwd" };
+  return {
+    error: "cwd-required",
+    refused_root: launched,
+    root_source: "process_cwd",
+    refused_reason: top ? `process.cwd() is ${launched}, inside git repository ${top} but not at its root` : `process.cwd() is ${launched}, which is not inside a git repository`,
+    note: `this dispatch named no project, and this gm-mcp server is a shared one whose own cwd is not a project root, so the old behaviour would have run it in ${launched}/.gm -- the wrong project, with its instruction state, PRD rows and spool files written there and nothing appearing in yours. Pass cwd (the project root containing .gm/exec-spool) on every dispatch, or set GM_MCP_DEFAULT_CWD to one explicit root for cwd-less calls. GM_MCP_ALLOW_PROCESS_CWD=1 restores the silent fallback.`,
+    accepted_fields: ["cwd"]
+  };
 }
 function inlineMaxForVerb({ verb, isPlainText, fullResponse, maxChars }) {
   const requested = Number(maxChars);
@@ -38357,6 +38380,7 @@ var TIMEOUT_MS_PREFIX_VALUE = /^\s*timeout(?:Ms|_ms)=(\d+)/;
 var DEFAULT_TIMEOUT_SECONDS = 120;
 var EXEC_DEFAULT_LIMIT_SECONDS = 300;
 var POLL_MARGIN_PAST_EXEC_TIMEOUT_MS = 5e3;
+var CLIENT_DEADLINE_MARGIN_MS = 1500;
 function unpackExecOutputEnvelope(verb, parsed) {
   if (!EXEC_FAMILY_VERBS.includes(verb) || !parsed || typeof parsed.data !== "string") return parsed;
   try {
@@ -38368,10 +38392,41 @@ function unpackExecOutputEnvelope(verb, parsed) {
 }
 function pollTimeoutMs(verb, raw_body, timeout_seconds) {
   const explicitSeconds = Number(timeout_seconds);
-  if (explicitSeconds > 0) return explicitSeconds * 1e3;
+  if (explicitSeconds > 0) return Math.max(1e3, explicitSeconds * 1e3 - CLIENT_DEADLINE_MARGIN_MS);
   const bodyPrefix = TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === "string" ? TIMEOUT_MS_PREFIX_VALUE.exec(raw_body) : null;
   if (bodyPrefix) return Math.max(DEFAULT_TIMEOUT_SECONDS * 1e3, Number(bodyPrefix[1]) + POLL_MARGIN_PAST_EXEC_TIMEOUT_MS);
   return DEFAULT_TIMEOUT_SECONDS * 1e3;
+}
+var CLIENT_DEADLINE_DEFAULT_SECONDS = 60;
+function clientDeadlineSeconds() {
+  const raw = Number(process.env.GM_MCP_CLIENT_DEADLINE_SECONDS);
+  if (!Number.isFinite(raw) || raw < 0) return CLIENT_DEADLINE_DEFAULT_SECONDS;
+  return raw;
+}
+function applyClientDeadline(requestedMs) {
+  const seconds = clientDeadlineSeconds();
+  if (seconds <= 0) return { ms: requestedMs, clamped: false, client_deadline_seconds: 0, requested_ms: requestedMs };
+  const ceilingMs = seconds * 1e3 - CLIENT_DEADLINE_MARGIN_MS;
+  if (ceilingMs <= 0 || requestedMs <= ceilingMs) {
+    return { ms: requestedMs, clamped: false, client_deadline_seconds: seconds, requested_ms: requestedMs };
+  }
+  return { ms: ceilingMs, clamped: true, client_deadline_seconds: seconds, requested_ms: requestedMs };
+}
+function pollBudgetDisclosure(budget, waitedMs) {
+  const base = {
+    requested_ms: budget.requested_ms,
+    effective_ms: budget.ms,
+    clamped_to_client_deadline: budget.clamped,
+    client_deadline_seconds: budget.client_deadline_seconds,
+    waited_ms: waitedMs
+  };
+  return budget.clamped ? {
+    ...base,
+    reason: `the MCP client cuts this tool call off at ${budget.client_deadline_seconds}s, so gm stopped polling ${CLIENT_DEADLINE_MARGIN_MS}ms early rather than let the reply be discarded -- the dispatch is NOT cancelled and its result still lands in out_path. Re-poll the SAME dispatch with resume_task set to this response's task (same verb and cwd), and raise GM_MCP_CLIENT_DEADLINE_SECONDS if your client really waits longer.`
+  } : {
+    ...base,
+    reason: budget.requested_ms > budget.client_deadline_seconds * 1e3 && budget.client_deadline_seconds > 0 ? `this dispatch did not finish within the requested ${budget.requested_ms}ms poll budget; note the MCP client's own deadline is ${budget.client_deadline_seconds}s, so a slower dispatch needs resume_task rather than a longer timeout_seconds` : `this dispatch did not finish within the requested ${budget.requested_ms}ms poll budget`
+  };
 }
 function timeoutMsFor(timeout_seconds) {
   const seconds = Number(timeout_seconds);
@@ -38666,14 +38721,22 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
   const n = resume_task || nextN(session_id);
   const unsafeName = unsafeSpoolName("verb", verb) || unsafeSpoolName("session_id", session_id) || unsafeSpoolName("task", n);
   if (unsafeName) return `error: ${unsafeName} -- nothing was written to the spool, so no dispatch was queued`;
-  const root = projectRootFor(cwd || process.cwd());
+  const toYaml = (obj) => dump(obj, { lineWidth: 100 });
+  const resolvedRoot = resolveDispatchRoot(cwd);
+  if (resolvedRoot.error) {
+    appendDiagnostic("dispatch-root-refused", { verb, root: resolvedRoot.refused_root, reason: resolvedRoot.refused_reason });
+    return toYaml(resolvedRoot);
+  }
+  if (resolvedRoot.root_source !== "cwd") {
+    appendDiagnostic("dispatch-root-defaulted", { verb, root: resolvedRoot.root, source: resolvedRoot.root_source });
+  }
+  const root = resolvedRoot.root;
   const spoolDir = path2.join(root, ".gm", "exec-spool");
   const inDir = path2.join(spoolDir, "in", verb);
   const outDir = path2.join(spoolDir, "out");
   fs.mkdirSync(outDir, { recursive: true });
   const callStartedAtMs = Date.now();
   let lastWakeSource = "initial_check";
-  const toYaml = (obj) => dump(obj, { lineWidth: 100 });
   const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === "string";
   if (!resume_task && isPlainText && typeof raw_body !== "string") {
     raw_body = plainTextFromBody(body);
@@ -38721,7 +38784,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
       publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody));
     }
   }
-  const timeoutMs = resume_task ? Math.max(0, (Number(timeout_seconds) || DEFAULT_TIMEOUT_SECONDS) * 1e3) : pollTimeoutMs(verb, raw_body, timeout_seconds);
+  const requestedTimeoutMs = resume_task ? Math.max(0, (Number(timeout_seconds) || DEFAULT_TIMEOUT_SECONDS) * 1e3) : pollTimeoutMs(verb, raw_body, timeout_seconds);
+  const budget = applyClientDeadline(requestedTimeoutMs);
+  const timeoutMs = budget.ms;
   const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1e3);
   const deadline = Date.now() + timeoutMs;
   const readLandedOutFile = () => {
@@ -38778,9 +38843,13 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
   const abortedReply = () => toYaml({
     error: "aborted",
     task: n,
+    dispatch_root: root,
+    root_source: resolvedRoot.root_source,
     in_path: inPath,
     out_path: outPath,
-    request_withdrawn_before_claim: withdrawUnclaimedRequest()
+    aborted_after_ms: Date.now() - callStartedAtMs,
+    request_withdrawn_before_claim: withdrawUnclaimedRequest(),
+    note: `the caller stopped waiting after ${Date.now() - callStartedAtMs}ms; the dispatch itself was NOT cancelled${resume_task ? "" : " once the daemon claimed it"} and its result still lands in out_path once the daemon finishes. Re-poll the SAME dispatch with resume_task set to this response's task (same verb and cwd, no body) instead of dispatching again -- a re-dispatch queues a second copy of the same work.`
   });
   while (true) {
     if (signal?.aborted) return abortedReply();
@@ -38803,9 +38872,12 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         task: n,
         resume_task_supported: true,
         resumed_this_call: Boolean(resume_task),
+        dispatch_root: root,
+        root_source: resolvedRoot.root_source,
         in_path: inPath,
         out_path: outPath,
         final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
+        poll_budget: pollBudgetDisclosure(budget, Date.now() - callStartedAtMs),
         dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
         progress: readDispatchWaitProgress(spoolDir, verb, n),
         daemon: readDaemonLiveness(spoolDir)
@@ -38840,8 +38912,8 @@ function createServer() {
       inputSchema: {
         prompt: external_exports.string().optional().describe("Current task prompt. An omitted prompt is dispatched as an empty string."),
         session_id: external_exports.string().optional().describe("Optional gm session id. A stable server-local id is used when omitted."),
-        cwd: external_exports.string().optional().describe("Project root containing .gm/exec-spool -- defaults to process.cwd(). It picks which project's daemon handles the dispatch, so it is how you aim a dispatch at a project other than the one the server started in."),
-        timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120)."),
+        cwd: external_exports.string().optional().describe("Project root containing .gm/exec-spool. It picks which project's daemon handles the dispatch, so it is how you aim a dispatch at a project other than the one the server started in -- pass it on every call. Omitting it used to fall back to this server's own process.cwd(), which on a shared HTTP gm-mcp server is not a project at all: the dispatch ran in that directory's .gm and nothing appeared in yours. Now an omitted cwd resolves from GM_MCP_DEFAULT_CWD / CLAUDE_PROJECT_DIR, else from process.cwd() only when that is a git toplevel, else the dispatch is refused with error cwd-required."),
+        timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120). It is capped by GM_MCP_CLIENT_DEADLINE_SECONDS (default 60, the deadline the MCP client itself cuts the tool call at), because polling past the client's deadline discards the reply: gm instead stops ~1.5s early and returns a structured timed_out carrying task, dispatch_state and poll_budget, so the same dispatch can be re-polled with resume_task."),
         poll_interval_seconds: numberLike.optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)."),
         include_timing: booleanLike.optional().describe("Include MCP submission-to-response timing and the last response wakeup source."),
         resume_task: external_exports.string().optional().describe("Resume a previous instruction dispatch without writing a new request."),
@@ -38860,7 +38932,7 @@ function createServer() {
             ...args.git_root_override ? { git_root_override: args.git_root_override } : {}
           },
           session_id: args.session_id || instructionSessionId,
-          cwd: args.cwd,
+          cwd: args.cwd || args.git_root_override,
           timeout_seconds: args.timeout_seconds,
           poll_interval_seconds: args.poll_interval_seconds,
           include_timing: args.include_timing,
@@ -38882,8 +38954,8 @@ function createServer() {
         body: external_exports.union([external_exports.record(external_exports.string(), external_exports.unknown()), external_exports.string()]).optional().describe(`JSON body for the dispatch (an object, or a string holding a JSON object). session_id is added automatically if not present. Not valid for plain-text-body verbs (exec_js and its language stems, serp, browser, cdp) -- use raw_body for those instead. Search verbs take a project directory in the body: codesearch/grep/codeinsight accept "root" (aliases "projectPath", "cwd") to search another project than the one this dispatch's cwd selected, with "path" relative to it.`),
         raw_body: external_exports.string().optional().describe('Literal text body for a plain-text-body verb (exec_js/bash/python/etc, serp, browser, cdp) -- sent exactly as given, no JSON wrapping. Mutually exclusive with body. The server writes these bytes to the spool input file with no escaping, so the shell sees them verbatim -- but this argument is itself a JSON string, so a backslash you write as \\ reaches the shell as ; write \\\\ to make bash receive \\. Inside bash double quotes one backslash is then removed again, and \\$ is a literal dollar sign, so "C:\\dir\\${V}" never expands ${V} -- prefer forward slashes ("C:/dir/${V}.bat") for Windows paths.'),
         session_id: external_exports.string().describe("gm SESSION_ID for this dispatch (required by gm on every body)"),
-        cwd: external_exports.string().optional().describe(`Project root containing .gm/exec-spool -- defaults to process.cwd(). It picks which project's daemon handles the dispatch, and so which project a verb like codesearch searches; it is not forwarded into the verb body, so to point a single dispatch at another project pass "root" (aliases "projectPath", "cwd") inside body.`),
-        timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120)"),
+        cwd: external_exports.string().optional().describe(`Project root containing .gm/exec-spool -- pass it on every call. It picks which project's daemon handles the dispatch, and so which project a verb like codesearch searches; it is not forwarded into the verb body, so to point a single dispatch at another project pass "root" (aliases "projectPath", "cwd") inside body. Omitting it no longer falls back to this server's process.cwd(): a shared HTTP server started outside a git toplevel refuses the dispatch (error cwd-required) rather than run it in the wrong project. GM_MCP_DEFAULT_CWD sets one explicit root for cwd-less calls.`),
+        timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120). Capped by GM_MCP_CLIENT_DEADLINE_SECONDS (default 60 -- the MCP client's own tool-call deadline); past it gm returns early with task, dispatch_state and poll_budget instead of letting the client discard the reply, and the same dispatch is re-polled with resume_task."),
         poll_interval_seconds: numberLike.optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)"),
         include_timing: booleanLike.optional().describe("Include MCP submission-to-response timing and the last response wakeup source"),
         resume_task: external_exports.string().optional().describe("Pass the `task` field from a previous timed_out/aborted response to keep polling that SAME dispatch instead of writing a new one -- a first-time cold index/embed pass on a large repo can legitimately outrun a short timeout_seconds, and re-dispatching from scratch discards a result that may already be in flight or done. A resume sends NO body: omit body/raw_body entirely (they are ignored if passed), since the dispatch being resumed already carries its own. It still needs `verb` and `cwd` to match the original call exactly -- those two plus the task name are how the dispatch is addressed on disk -- and `session_id` remains required by this tool for every call, though a resume never writes a new spool file with it. If that triple matches no dispatch in the project spool, the call returns an immediate error naming the three paths it checked instead of polling a task that cannot arrive. A resumed result carries a `resumed` block stating that this call sent no body and whether the result predates it, so a stored error from the ORIGINAL dispatch is never misread as a verdict on the resume call. Before any timeout is reported the out-file is re-checked past the deadline, so a result that lands moments late comes back as the ordinary success it is. A genuine timed_out response carries `resume_task_supported: true` (absent on older server builds, which silently drop this argument), a `dispatch_state` block read from the spool itself (claimed_still_in_flight / queued_not_yet_claimed / no_input_file_left) plus a `daemon` liveness block (alive/heartbeat age/runtime/queue wait) -- dispatch_state is the per-dispatch authority, daemon.busy is project-scoped and says nothing about your own request."),
