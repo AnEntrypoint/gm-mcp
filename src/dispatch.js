@@ -188,10 +188,26 @@ function objectBodyDiagnostic(verb, body) {
 
 const RUNNER_DIR = path.join(os.homedir(), '.gm-tools')
 const RUNNER_PATH = path.join(RUNNER_DIR, process.platform === 'win32' ? 'agentplug-runner.exe' : 'agentplug-runner')
-const AGENTPLUG_DIR = path.join(os.homedir(), '.agentplug')
-const GLOBAL_DAEMON_STATUS_PATH = path.join(AGENTPLUG_DIR, 'daemon-status.json')
-const GLOBAL_DAEMON_OWNER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'daemon-owner.lock')
-const GLOBAL_DAEMON_LOG_PATH = path.join(AGENTPLUG_DIR, 'daemon.log')
+function agentplugDir() {
+    const override = process.env.GM_MCP_AGENTPLUG_DIR
+    return override ? override : path.join(os.homedir(), '.agentplug')
+}
+
+function globalDaemonStatusPath() {
+    return path.join(agentplugDir(), 'daemon-status.json')
+}
+
+function globalDaemonOwnerLockPath() {
+    return path.join(agentplugDir(), 'daemon-owner.lock')
+}
+
+function globalDaemonLogPath() {
+    return path.join(agentplugDir(), 'daemon.log')
+}
+
+function globalLauncherLockPath() {
+    return path.join(agentplugDir(), 'spool-launch.lock')
+}
 
 // Recovery windows for a daemon that exits on purpose and is restarted from
 // here -- see AGENTS.md ("Runner recovery").
@@ -226,10 +242,10 @@ export function pidAlive(pid) {
 }
 
 function globalDaemonPid() {
-    const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    const status = readJsonFile(globalDaemonStatusPath())
     if (pidAlive(status?.pid) === true) return status.pid
     try {
-        const owner = Number.parseInt(fs.readFileSync(GLOBAL_DAEMON_OWNER_LOCK_PATH, 'utf8').trim(), 10)
+        const owner = Number.parseInt(fs.readFileSync(globalDaemonOwnerLockPath(), 'utf8').trim(), 10)
         if (pidAlive(owner) === true) return owner
     } catch {
     }
@@ -237,7 +253,7 @@ function globalDaemonPid() {
 }
 
 export function daemonBootGraceActive() {
-    const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    const status = readJsonFile(globalDaemonStatusPath())
     const bootTs = status?.daemon_boot_ts
     if (typeof bootTs !== 'number') return false
     if (Date.now() - bootTs >= ENSURE_BOOT_GRACE_MS) return false
@@ -249,17 +265,15 @@ export function liveDaemonSweepsProject(spoolDir) {
     if (!status) return false
     if (pidAlive(status.pid) === false) return false
     if (Date.now() - (status.ts || 0) < DAEMON_HEARTBEAT_STALE_MS) return true
-    const shared = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    const shared = readJsonFile(globalDaemonStatusPath())
     if (typeof shared?.ts !== 'number') return false
     if (Date.now() - shared.ts >= DAEMON_HEARTBEAT_STALE_MS) return false
     return pidAlive(shared.pid ?? status.pid) !== false
 }
 
-const GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'spool-launch.lock')
-
 function readLauncherLock() {
     try {
-        const [pid, ts, role] = fs.readFileSync(GLOBAL_LAUNCHER_LOCK_PATH, 'utf8').trim().split(/\s+/)
+        const [pid, ts, role] = fs.readFileSync(globalLauncherLockPath(), 'utf8').trim().split(/\s+/)
         return { pid: Number(pid), ts: Number(ts), role: role || null }
     } catch {
         return null
@@ -275,10 +289,10 @@ function readLauncherLock() {
 // ENSURE_CHILD_MAX_AGE_MS and the per-root in-flight guard, and a fresh
 // `agentplug-runner spool` against a live daemon only registers and exits.
 function claimGlobalLauncher() {
-    fs.mkdirSync(AGENTPLUG_DIR, { recursive: true })
+    fs.mkdirSync(agentplugDir(), { recursive: true })
     for (let attempt = 0; attempt < 2; attempt++) {
         try {
-            fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${process.pid} ${Date.now()} server`, { flag: 'wx', mode: 0o600 })
+            fs.writeFileSync(globalLauncherLockPath(), `${process.pid} ${Date.now()} server`, { flag: 'wx', mode: 0o600 })
             return true
         } catch (error) {
             if (error?.code !== 'EEXIST') return false
@@ -287,14 +301,14 @@ function claimGlobalLauncher() {
         const heldAgeMs = held?.ts ? Date.now() - held.ts : Number.POSITIVE_INFINITY
         if (held && heldAgeMs < ENSURE_CHILD_MAX_AGE_MS && pidAlive(held.pid) !== false) return false
         appendDiagnostic('launcher-lock-stolen', {
-            lock: GLOBAL_LAUNCHER_LOCK_PATH,
+            lock: globalLauncherLockPath(),
             held_pid: held?.pid ?? null,
             held_role: held?.role ?? null,
             held_age_ms: Number.isFinite(heldAgeMs) ? Math.round(heldAgeMs) : null,
             held_pid_alive: pidAlive(held?.pid),
         })
         try {
-            fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH)
+            fs.unlinkSync(globalLauncherLockPath())
         } catch {
             return false
         }
@@ -396,13 +410,13 @@ function ensureSpoolRunnerRunning(root) {
     } catch (error) {
         appendDiagnostic('runner-spawn-failed', { root, runner: RUNNER_PATH, error: String(error?.message || error) })
         try {
-            fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH)
+            fs.unlinkSync(globalLauncherLockPath())
         } catch {
         }
         return
     }
     try {
-        fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${child.pid} ${now} runner`, 'utf8')
+        fs.writeFileSync(globalLauncherLockPath(), `${child.pid} ${now} runner`, 'utf8')
     } catch {
     }
     const entry = { pid: child.pid, spawnedAtMs: now, exitCode: null }
@@ -544,6 +558,8 @@ export function applyClientDeadline(requestedMs, callerExplicit = false) {
     const { seconds, operator_set } = clientDeadline()
     const base = { client_deadline_seconds: seconds, requested_ms: requestedMs, caller_timeout_explicit: Boolean(callerExplicit) }
     if (seconds <= 0) return { ms: requestedMs, clamped: false, ...base }
+    // An operator-set GM_MCP_CLIENT_DEADLINE_SECONDS is still honoured, so it caps unnamed and named budgets alike.
+    if (callerExplicit && !operator_set) return { ms: requestedMs, clamped: false, ...base }
     const ceilingMs = seconds * 1000 - CLIENT_DEADLINE_MARGIN_MS - FINAL_OUT_RECHECK_WINDOW_MS
     if (ceilingMs <= 0 || requestedMs <= ceilingMs) {
         return { ms: requestedMs, clamped: false, ...base }
@@ -617,7 +633,7 @@ function daemonRestartCommand(root) {
 }
 
 function coldProjectLiveness() {
-    const shared = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    const shared = readJsonFile(globalDaemonStatusPath())
     const sharedPid = globalDaemonPid()
     if (sharedPid === null) {
         return { alive: null, note: 'no .status.json heartbeat found for this project yet and no shared daemon process is running -- nothing has swept this project; start one with the restart command for this project' }
@@ -641,7 +657,7 @@ export function readDaemonLiveness(spoolDir) {
     const heartbeatAgeMs = typeof status.ts === 'number' ? now - status.ts : null
     const pid = typeof status.pid === 'number' ? status.pid : Number(status.pid) || null
     const pidAliveFlag = pidAlive(pid)
-    const sharedStatus = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    const sharedStatus = readJsonFile(globalDaemonStatusPath())
     const sharedHeartbeatAgeMs = typeof sharedStatus?.ts === 'number' ? now - sharedStatus.ts : null
     const sharedDaemonFresh = pidAliveFlag === true
         && sharedHeartbeatAgeMs !== null
@@ -658,7 +674,7 @@ export function readDaemonLiveness(spoolDir) {
             ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed`
             : pidAliveFlag === false
                 ? `the daemon process that last swept this project (pid ${pid}) is gone -- the daemon recycles itself on idle/memory pressure and on a runner version handoff, and is restarted on demand; this call already asked for a replacement, so a dispatch submitted now waits for its cold start (wasm compile, tens of seconds) instead of for a queue`
-                : `the shared daemon process (pid ${pid}) is alive but its OWN heartbeat is ${sharedHeartbeatAgeMs} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms), so the daemon is wedged rather than merely behind on this project${holder}. Its log is ${GLOBAL_DAEMON_LOG_PATH}; it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}`
+                : `the shared daemon process (pid ${pid}) is alive but its OWN heartbeat is ${sharedHeartbeatAgeMs} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms), so the daemon is wedged rather than merely behind on this project${holder}. Its log is ${globalDaemonLogPath()}; it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}`
         : projectHeartbeatFresh
             ? (busy
                 ? 'daemon is alive and still actively working on this project'
@@ -680,7 +696,7 @@ export function readDaemonLiveness(spoolDir) {
     if (typeof status.claimed_step_count === 'number') liveness.claimed_step_count = status.claimed_step_count
     if (typeof status.queued_step_count === 'number') liveness.queued_step_count = status.queued_step_count
     if (typeof status.gm_processor_capacity === 'number') liveness.gm_processor_capacity = status.gm_processor_capacity
-    const sharedProjects = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)?.active_projects
+    const sharedProjects = readJsonFile(globalDaemonStatusPath())?.active_projects
     if (typeof sharedProjects === 'number') liveness.daemon_active_projects = sharedProjects
     if (status.runner_update_in_progress) {
         liveness.runner_update_in_progress = true
@@ -751,7 +767,7 @@ export async function daemonNotRunning(root, spoolDir, signal) {
         waited_for_start_ms: DAEMON_START_GRACE_MS,
         note: `this project's daemon heartbeat is ${staleFor} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) and did not come back within ${DAEMON_START_GRACE_MS} ms of asking for a runner, so no dispatch was written -- it would sit queued_not_yet_claimed and only fail at the poll timeout. Restart it and dispatch again: ${daemonRestartCommand(root)}`,
         checked_status_file: path.join(spoolDir, '.status.json'),
-        daemon_log: GLOBAL_DAEMON_LOG_PATH,
+        daemon_log: globalDaemonLogPath(),
         spool_log: path.join(spoolDir, '.watcher.log'),
     }
 }
