@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased - an unsupported `mcp-protocol-version` is answered, not refused
+
+Current Claude Code advertises protocol version `2026-07-28`. The bundled SDK
+exempts `initialize` from its `mcp-protocol-version` check but rejects every
+other POST outright when the header names a version newer than it knows, so a
+client connected and then had `notifications/initialized`, `tools/list` and
+every `tools/call` answered `400 Bad Request: Unsupported protocol version`.
+Nothing but a fresh `initialize` ever worked, which is why one dispatch
+succeeded and the next failed with `ECONNRESET` while the server stayed up and
+logged nothing.
+
+MCP says a server that cannot serve the version a client asks for answers in
+the version it does, so `serveMcpRequest` now rewrites an unsupported
+`mcp-protocol-version` to the newest one `SUPPORTED_PROTOCOL_VERSIONS` lists
+before the SDK sees the request. Both `req.headers` and `req.rawHeaders` are
+rewritten: the web Request the SDK reads is materialised from `rawHeaders`, so
+patching only the parsed map had no effect. A supported version is left alone
+and the rewrite is recorded as `http-protocol-version-normalized`.
+
 ## Unreleased - an explicit `timeout_seconds` is honoured instead of clipped to 60 s
 
 A `mutable-add` dispatch on `C:\dev\mc-420` (2026-10-06, session `eac6e6be`)
