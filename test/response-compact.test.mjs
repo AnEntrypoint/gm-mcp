@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import * as yaml from 'js-yaml'
-import { cleanResponse, compactWireResponse } from '../src/response-compact.js'
+import { cleanResponse, compactWireResponse, renderVerbatimFileText, VERBATIM_TEXT_MARKER } from '../src/response-compact.js'
 
 const OUT_PATH = 'C:/proj/.gm/exec-spool/out/instruction-task-1-2-3.json'
 
@@ -238,6 +238,16 @@ test('a vector_hits list carrying rows that hits does not is kept whole', () => 
 test('a payload with nothing to compact is returned untouched', () => {
     const bare = { ok: true, verb: 'git_status', output: 'clean' }
     assert.equal(compactWireResponse(bare, OUT_PATH), bare)
+})
+
+test('fs_read text is rendered byte-verbatim: tabs, deep and odd indentation, trailing spaces, long lines', () => {
+    const file = 'a:\n\tb\n  \t  c\n        deep\n\t\t\t\tx  \n    ' + 'x '.repeat(80) + '\n    tail\n'
+    const rendered = renderVerbatimFileText({ ok: true, verb: 'fs_read', data: file }, (o) => yaml.dump(o, { lineWidth: 100 }))
+    assert.equal(rendered.slice(rendered.indexOf(VERBATIM_TEXT_MARKER) + VERBATIM_TEXT_MARKER.length + 1), file)
+})
+
+test('verbatim rendering declines payloads without a string data field', () => {
+    assert.equal(renderVerbatimFileText({ ok: false, error: 'x' }, () => ''), undefined)
 })
 
 console.log(`\n${passed} passed, ${process.exitCode ? 'FAILED' : '0 failed'}`)
