@@ -15,7 +15,7 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
   - hit-array ranking internals (`cos`/`recency` in `recall_hits`/`bm25_hits`/`vector_hits`/`commits`) dropped, `score` retained as ranked evidence
   - byte-identical object rows repeated inside one array collapsed to the first copy
   - empty/null/empty-string fields removed at every level, except an empty result list (`edges`, `reachable`, `reached`, `callees`, `functions`, `matches`, `definitions`, `references`), which stays as `[]` so "nothing found" reads as an answer rather than a missing field; and a `false` on a flag whose only meaning is the absence of a problem (`session_mismatch`, `instruction_unchanged`, `instruction_suppressible_by_asserting_hash`, `recall_embed_failed`, `should_residual_scan`, `fsm_graph_rejected`)
-- A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look
+- Spool paths appear on timeout/abort/error or when compaction points to the original payload; other successful responses omit them (the caller already knows verb/cwd).
 - Supports plain-text-body verbs (`exec_js` and every language stem it backs, `serp`, `browser`, `cdp`) via a `raw_body` string parameter (a string `body`, or a `body` object with exactly one string field among `code`/`script`/`command`/`source`/`text`, is accepted as the same text), since these verbs reject a JSON-object body outright
 - Adds a `timeoutMs=<ms>` first line to an exec-family `raw_body` that has none, derived from `timeout_seconds` (see "Exec-family timeout prefix" below)
 
@@ -159,9 +159,11 @@ written with an empty body, and the caller got the resumed verb's own
 body-validation error (`query required`) with nothing pointing at the stale
 bundle. Rebuild in the same commit as any `src/` change.
 
-`npm run verify-build` rebuilds `src/` into a scratch buffer and fails if it
-differs from the committed `bin/gm-mcp-server.js`, naming the byte-count
-mismatch. `npm install` points this checkout's git hooks at `.githooks/`
+`npm run build` and `verify-build` share `scripts/build.mjs`, whose version banner
+comes from `src/bundle-version.js` and remains readable by the updater after
+minification. `verify-build` rebuilds into memory, checks that production parser
+against the source version, and fails on committed-bundle byte drift.
+`npm install` points this checkout's git hooks at `.githooks/`
 (`core.hooksPath`, local to this checkout, never committed) so `pre-push` runs
 it automatically and blocks a push carrying a stale bundle.
 
@@ -217,6 +219,14 @@ pre-compaction payload byte for byte.
 `wire_compacted.shortened` entry records retained/total counts and points to the
 unchanged out-file. Current phase, gate decisions, session mismatch, PRD counts,
 and failure payloads are not shortened. Use `full_response: true` for all history.
+
+Committed `git_commit` and `git_finalize` successes retain at most five received
+examples in `excluded` and `excluded_but_dirty`. Metadata records received-array
+counts, not repository totals: five of 50 examples remains `5/50` even when
+`excluded_count` is 193. Native totals, truncation counts, requested paths, commit
+SHA and authors stay unchanged. The original out-file and `full_response: true`
+recover all received examples; failures, refusals and uncommitted receipts bypass
+this shortening.
 
 ### Long text inline limits
 
