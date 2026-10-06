@@ -38399,19 +38399,21 @@ function pollTimeoutMs(verb, raw_body, timeout_seconds) {
   return DEFAULT_TIMEOUT_SECONDS * 1e3;
 }
 var CLIENT_DEADLINE_DEFAULT_SECONDS = 60;
-function clientDeadlineSeconds() {
+function clientDeadline() {
   const raw = Number(process.env.GM_MCP_CLIENT_DEADLINE_SECONDS);
-  if (!Number.isFinite(raw) || raw < 0) return CLIENT_DEADLINE_DEFAULT_SECONDS;
-  return raw;
+  if (!Number.isFinite(raw) || raw < 0) return { seconds: CLIENT_DEADLINE_DEFAULT_SECONDS, operator_set: false };
+  return { seconds: raw, operator_set: true };
 }
-function applyClientDeadline(requestedMs) {
-  const seconds = clientDeadlineSeconds();
-  if (seconds <= 0) return { ms: requestedMs, clamped: false, client_deadline_seconds: 0, requested_ms: requestedMs };
+function applyClientDeadline(requestedMs, callerExplicit = false) {
+  const { seconds, operator_set } = clientDeadline();
+  const base = { client_deadline_seconds: seconds, requested_ms: requestedMs, caller_timeout_explicit: Boolean(callerExplicit) };
+  if (seconds <= 0) return { ms: requestedMs, clamped: false, ...base };
+  if (callerExplicit && !operator_set) return { ms: requestedMs, clamped: false, ...base };
   const ceilingMs = seconds * 1e3 - CLIENT_DEADLINE_MARGIN_MS;
   if (ceilingMs <= 0 || requestedMs <= ceilingMs) {
-    return { ms: requestedMs, clamped: false, client_deadline_seconds: seconds, requested_ms: requestedMs };
+    return { ms: requestedMs, clamped: false, ...base };
   }
-  return { ms: ceilingMs, clamped: true, client_deadline_seconds: seconds, requested_ms: requestedMs };
+  return { ms: ceilingMs, clamped: true, ...base };
 }
 function pollBudgetDisclosure(budget, waitedMs) {
   const base = {
@@ -38426,7 +38428,7 @@ function pollBudgetDisclosure(budget, waitedMs) {
     reason: `the MCP client cuts this tool call off at ${budget.client_deadline_seconds}s, so gm stopped polling ${CLIENT_DEADLINE_MARGIN_MS}ms early rather than let the reply be discarded -- the dispatch is NOT cancelled and its result still lands in out_path. Re-poll the SAME dispatch with resume_task set to this response's task (same verb and cwd), and raise GM_MCP_CLIENT_DEADLINE_SECONDS if your client really waits longer.`
   } : {
     ...base,
-    reason: budget.requested_ms > budget.client_deadline_seconds * 1e3 && budget.client_deadline_seconds > 0 ? `this dispatch did not finish within the requested ${budget.requested_ms}ms poll budget; note the MCP client's own deadline is ${budget.client_deadline_seconds}s, so a slower dispatch needs resume_task rather than a longer timeout_seconds` : `this dispatch did not finish within the requested ${budget.requested_ms}ms poll budget`
+    reason: !budget.caller_timeout_explicit && budget.client_deadline_seconds > 0 && budget.requested_ms > budget.client_deadline_seconds * 1e3 ? `this dispatch did not finish within the requested ${budget.requested_ms}ms poll budget; note the MCP client's own deadline is ${budget.client_deadline_seconds}s, so a slower dispatch needs resume_task rather than a longer timeout_seconds` : `this dispatch did not finish within the requested ${budget.requested_ms}ms poll budget`
   };
 }
 function timeoutMsFor(timeout_seconds) {
@@ -38436,7 +38438,7 @@ function timeoutMsFor(timeout_seconds) {
 function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
   if (!TIMEOUT_MS_PREFIX_VERBS.has(verb)) return raw_body;
   if (TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return raw_body;
-  const prefixMs = EXEC_FAMILY_VERBS.includes(verb) ? timeoutMsFor(timeout_seconds) : applyClientDeadline(pollTimeoutMs(verb, raw_body, timeout_seconds)).ms;
+  const prefixMs = EXEC_FAMILY_VERBS.includes(verb) ? timeoutMsFor(timeout_seconds) : applyClientDeadline(pollTimeoutMs(verb, raw_body, timeout_seconds), Number(timeout_seconds) > 0).ms;
   return `timeoutMs=${prefixMs}
 ${raw_body}`;
 }
@@ -38653,6 +38655,33 @@ function queuePressureNote(pressure, queuedPath, stall) {
 }
 var FINAL_OUT_RECHECK_WINDOW_MS = 2500;
 var FINAL_OUT_RECHECK_INTERVAL_MS = 150;
+var STALE_CHROME_SCAN_TIMEOUT_MS = 3e3;
+function staleChromeCount() {
+  if (process.platform !== "win32") return null;
+  try {
+    const out = execFileSync("tasklist", ["/FI", "IMAGENAME eq chrome.exe", "/FO", "CSV", "/NH"], {
+      timeout: STALE_CHROME_SCAN_TIMEOUT_MS,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true
+    });
+    const n = String(out).split("\n").filter((l) => l.toLowerCase().includes("chrome.exe")).length;
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+function staleChromeTimeoutNote(verb) {
+  const isBrowserVerb = verb === "browser" || verb === "cdp";
+  const count = staleChromeCount();
+  if (count === null && !isBrowserVerb) return {};
+  const observed = count === null ? "A process scan could not count them just now" : `${count} chrome.exe process(es) are running`;
+  const reap = "Dispatch `browser` with body `session close-all`, then `session list` to confirm none remain.";
+  return {
+    ...count === null ? {} : { stale_chrome_processes: count },
+    timeout_note: isBrowserVerb ? `${observed}. gm-spawned headless Chrome that is never closed accumulates, and the orphan reaper cannot see any of it while its own process scan is failing -- so the pile grows on its own and every later dispatch, browser or not, waits behind it. ${reap} Then re-poll THIS dispatch with resume_task rather than dispatching it again.` : `${observed}. Accumulated gm headless Chrome starves the daemon and delays unrelated verbs like \`${verb}\`, so this dispatch is more likely still queued than lost. Re-poll it with resume_task (same verb and cwd, no body); if it keeps timing out, ${reap}`
+  };
+}
 function resumeDisclosure(task, landedAtMs, callStartedAtMs) {
   const resultPredatesResume = typeof landedAtMs === "number" && landedAtMs < callStartedAtMs;
   return {
@@ -38787,7 +38816,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     }
   }
   const requestedTimeoutMs = resume_task ? Math.max(0, (Number(timeout_seconds) || DEFAULT_TIMEOUT_SECONDS) * 1e3) : pollTimeoutMs(verb, raw_body, timeout_seconds);
-  const budget = applyClientDeadline(requestedTimeoutMs);
+  const budget = applyClientDeadline(requestedTimeoutMs, Number(timeout_seconds) > 0);
   const timeoutMs = budget.ms;
   const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1e3);
   const deadline = Date.now() + timeoutMs;
@@ -38860,14 +38889,16 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     if (landed !== void 0) return landed;
     if (Date.now() >= deadline) {
       const finalRecheckDeadline = Date.now() + FINAL_OUT_RECHECK_WINDOW_MS;
-      while (Date.now() < finalRecheckDeadline) {
+      while (true) {
+        const landedLate = readLandedOutFile();
+        if (landedLate !== void 0) return landedLate;
+        if (signal?.aborted) return abortedReply();
+        if (Date.now() >= finalRecheckDeadline) break;
         try {
           await sleep(FINAL_OUT_RECHECK_INTERVAL_MS, signal);
         } catch {
-          break;
+          return abortedReply();
         }
-        const landedLate = readLandedOutFile();
-        if (landedLate !== void 0) return landedLate;
       }
       return toYaml({
         timed_out: true,
@@ -38882,7 +38913,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         poll_budget: pollBudgetDisclosure(budget, Date.now() - callStartedAtMs),
         dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
         progress: readDispatchWaitProgress(spoolDir, verb, n),
-        daemon: readDaemonLiveness(spoolDir)
+        daemon: readDaemonLiveness(spoolDir),
+        ...staleChromeTimeoutNote(verb)
       });
     }
     try {
@@ -38915,7 +38947,7 @@ function createServer() {
         prompt: external_exports.string().optional().describe("Current task prompt. An omitted prompt is dispatched as an empty string."),
         session_id: external_exports.string().optional().describe("Optional gm session id. A stable server-local id is used when omitted."),
         cwd: external_exports.string().optional().describe("Project root containing .gm/exec-spool. It picks which project's daemon handles the dispatch, so it is how you aim a dispatch at a project other than the one the server started in -- pass it on every call. Omitting it used to fall back to this server's own process.cwd(), which on a shared HTTP gm-mcp server is not a project at all: the dispatch ran in that directory's .gm and nothing appeared in yours. Now an omitted cwd resolves from GM_MCP_DEFAULT_CWD / CLAUDE_PROJECT_DIR, else from process.cwd() only when that is a git toplevel, else the dispatch is refused with error cwd-required."),
-        timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120). It is capped by GM_MCP_CLIENT_DEADLINE_SECONDS (default 60, the deadline the MCP client itself cuts the tool call at), because polling past the client's deadline discards the reply: gm instead stops ~1.5s early and returns a structured timed_out carrying task, dispatch_state and poll_budget, so the same dispatch can be re-polled with resume_task."),
+        timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120). An explicit value is honoured as-is: it is how long you will wait for this call, so it is NOT clipped to GM_MCP_CLIENT_DEADLINE_SECONDS (default 60 -- a measured guess at the MCP client's own tool-call deadline), which now bounds only the budget of a call that names no timeout_seconds. Pass the time you are actually willing to wait; on a genuine timeout gm returns task, dispatch_state and poll_budget so the same dispatch can be re-polled with resume_task."),
         poll_interval_seconds: numberLike.optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)."),
         include_timing: booleanLike.optional().describe("Include MCP submission-to-response timing and the last response wakeup source."),
         resume_task: external_exports.string().optional().describe("Resume a previous instruction dispatch without writing a new request."),
@@ -38957,7 +38989,7 @@ function createServer() {
         raw_body: external_exports.string().optional().describe('Literal text body for a plain-text-body verb (exec_js/bash/python/etc, serp, browser, cdp) -- sent exactly as given, no JSON wrapping. Mutually exclusive with body. The server writes these bytes to the spool input file with no escaping, so the shell sees them verbatim -- but this argument is itself a JSON string, so a backslash you write as \\ reaches the shell as ; write \\\\ to make bash receive \\. Inside bash double quotes one backslash is then removed again, and \\$ is a literal dollar sign, so "C:\\dir\\${V}" never expands ${V} -- prefer forward slashes ("C:/dir/${V}.bat") for Windows paths.'),
         session_id: external_exports.string().describe("gm SESSION_ID for this dispatch (required by gm on every body)"),
         cwd: external_exports.string().optional().describe(`Project root containing .gm/exec-spool -- pass it on every call. It picks which project's daemon handles the dispatch, and so which project a verb like codesearch searches; it is not forwarded into the verb body, so to point a single dispatch at another project pass "root" (aliases "projectPath", "cwd") inside body. Omitting it no longer falls back to this server's process.cwd(): a shared HTTP server started outside a git toplevel refuses the dispatch (error cwd-required) rather than run it in the wrong project. GM_MCP_DEFAULT_CWD sets one explicit root for cwd-less calls.`),
-        timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120). Capped by GM_MCP_CLIENT_DEADLINE_SECONDS (default 60 -- the MCP client's own tool-call deadline); past it gm returns early with task, dispatch_state and poll_budget instead of letting the client discard the reply, and the same dispatch is re-polled with resume_task."),
+        timeout_seconds: numberLike.optional().describe("Give up and return timed_out:true after this many seconds (default 120). An explicit value is honoured as-is and is NOT clipped to GM_MCP_CLIENT_DEADLINE_SECONDS (default 60 -- a measured guess at the MCP client's own tool-call deadline); that ceiling now bounds only a call that names no timeout_seconds. On a genuine timeout gm returns task, dispatch_state and poll_budget instead of letting the client discard the reply, and the same dispatch is re-polled with resume_task."),
         poll_interval_seconds: numberLike.optional().describe("Fallback response check interval in seconds when filesystem events are unavailable (default 0.25)"),
         include_timing: booleanLike.optional().describe("Include MCP submission-to-response timing and the last response wakeup source"),
         resume_task: external_exports.string().optional().describe("Pass the `task` field from a previous timed_out/aborted response to keep polling that SAME dispatch instead of writing a new one -- a first-time cold index/embed pass on a large repo can legitimately outrun a short timeout_seconds, and re-dispatching from scratch discards a result that may already be in flight or done. A resume sends NO body: omit body/raw_body entirely (they are ignored if passed), since the dispatch being resumed already carries its own. It still needs `verb` and `cwd` to match the original call exactly -- those two plus the task name are how the dispatch is addressed on disk -- and `session_id` remains required by this tool for every call, though a resume never writes a new spool file with it. If that triple matches no dispatch in the project spool, the call returns an immediate error naming the three paths it checked instead of polling a task that cannot arrive. A resumed result carries a `resumed` block stating that this call sent no body and whether the result predates it, so a stored error from the ORIGINAL dispatch is never misread as a verdict on the resume call. Before any timeout is reported the out-file is re-checked past the deadline, so a result that lands moments late comes back as the ordinary success it is. A genuine timed_out response carries `resume_task_supported: true` (absent on older server builds, which silently drop this argument), a `dispatch_state` block read from the spool itself (claimed_still_in_flight / queued_not_yet_claimed / no_input_file_left) plus a `daemon` liveness block (alive/heartbeat age/runtime/queue wait) -- dispatch_state is the per-dispatch authority, daemon.busy is project-scoped and says nothing about your own request."),

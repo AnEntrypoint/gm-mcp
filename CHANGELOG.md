@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased - an explicit `timeout_seconds` is honoured instead of clipped to 60 s
+
+A `mutable-add` dispatch on `C:\dev\mc-420` (2026-10-06, session `eac6e6be`)
+was sent with `timeout_seconds: 240` and answered "timed out" after 61.5 s,
+while its reply landed in the spool 82.8 s after dispatch and sat there
+unread. The poll budget had been clamped: `applyClientDeadline` cut every
+request down to `GM_MCP_CLIENT_DEADLINE_SECONDS` (default 60) minus
+`CLIENT_DEADLINE_MARGIN_MS`, so 240 s became 58.5 s. That 60 s was a
+measurement of one client, and this client plainly waited longer -- it
+received gm's reply at 61.5 s -- so the clamp turned a dispatch that was
+always going to succeed into a timeout that then needed `resume_task`.
+
+A caller that names `timeout_seconds` is stating how long *it* will wait for
+*this* call, so an explicit value is no longer clamped. The ceiling still
+bounds the budget nobody named (the 120 s default and the exec-family
+`timeoutMs` prefix), and a `GM_MCP_CLIENT_DEADLINE_SECONDS` that an operator
+set explicitly still caps everything, since then it is a fact about the
+client rather than a default guess. `poll_budget` now carries
+`caller_timeout_explicit`, and its `reason` no longer advises `resume_task`
+over a longer `timeout_seconds` when the caller did name one.
+
+The deadline re-check also reads before it sleeps rather than after, and
+returns the abort reply instead of a timeout when the caller's signal fires
+inside the window: a reply that is already on disk always beats reporting a
+timeout.
+
 ## Unreleased - a timed-out dispatch now reports what it is waiting on
 
 An `instruction` dispatch on `C:\dev\mc-420` (2026-10-06) timed out at 120 s and

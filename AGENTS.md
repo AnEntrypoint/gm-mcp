@@ -111,7 +111,15 @@ what README does not.
   child tree at expiry, answering with `exec_timeout` at that point. The prefix the
   wrapper injects when the body has none is 300000 (`EXEC_DEFAULT_LIMIT_SECONDS`),
   the daemon default, while the poll without a prefix stays 120 s. A `resume_task` poll sends no body, so it only has
-  `timeout_seconds` to go on.
+  `timeout_seconds` to go on. "Wins" means it also beats the client-deadline
+  ceiling: `applyClientDeadline` clamps an unnamed budget to
+  `GM_MCP_CLIENT_DEADLINE_SECONDS` (default 60, a measurement of one client)
+  minus `CLIENT_DEADLINE_MARGIN_MS`, but never clamps a budget the caller named,
+  so `timeout_seconds: 240` really polls for 240 s -- clipping it to 58.5 s is
+  what made an 83 s `mutable-add` answer `timed_out` while its reply landed in
+  `out_path` 20 s after gm stopped looking. An operator-set
+  `GM_MCP_CLIENT_DEADLINE_SECONDS` (set, not defaulted) still caps everything,
+  since then it is a fact about the client rather than a guess.
 - `unpackExecOutputEnvelope` parses the exec family's `data` JSON string into an
   object before cleaning, so `stdout`, `stderr` and `result` keep their own
   16000-character cap (`EXEC_OUTPUT_FIELD_TRUNCATE_AT`) instead of sharing the

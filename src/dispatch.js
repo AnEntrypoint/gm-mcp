@@ -529,28 +529,32 @@ export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
     return DEFAULT_TIMEOUT_SECONDS * 1000
 }
 
-// The MCP client kills the tool call on its own schedule -- 60 s measured
-// repeatedly (59998/60033 ms) -- long before gm's own 120 s poll budget runs
-// out. Polling past it is pure loss: the reply is thrown away and the caller
-// sees a bare transport timeout with no task id, no dispatch_state and no
-// resume handle. Poll to the client's deadline instead and return a structured
-// timed_out with everything needed to resume.
+// The client's own tool-call deadline bounds only the budget nobody named. A
+// caller that passes timeout_seconds is stating how long it will wait for this
+// one call, and that is worth more than a measured average: the 60 s default
+// came from watching one client, and clipping a caller that asked for 240 s
+// down to 58.5 s is what turns an 83 s dispatch into a timed_out whose reply
+// lands in out_path 20 s after gm stopped looking. An operator who sets
+// GM_MCP_CLIENT_DEADLINE_SECONDS explicitly still caps everything, because
+// then it is a fact about the client rather than a default guess.
 const CLIENT_DEADLINE_DEFAULT_SECONDS = 60
 
-function clientDeadlineSeconds() {
+function clientDeadline() {
     const raw = Number(process.env.GM_MCP_CLIENT_DEADLINE_SECONDS)
-    if (!Number.isFinite(raw) || raw < 0) return CLIENT_DEADLINE_DEFAULT_SECONDS
-    return raw
+    if (!Number.isFinite(raw) || raw < 0) return { seconds: CLIENT_DEADLINE_DEFAULT_SECONDS, operator_set: false }
+    return { seconds: raw, operator_set: true }
 }
 
-export function applyClientDeadline(requestedMs) {
-    const seconds = clientDeadlineSeconds()
-    if (seconds <= 0) return { ms: requestedMs, clamped: false, client_deadline_seconds: 0, requested_ms: requestedMs }
+export function applyClientDeadline(requestedMs, callerExplicit = false) {
+    const { seconds, operator_set } = clientDeadline()
+    const base = { client_deadline_seconds: seconds, requested_ms: requestedMs, caller_timeout_explicit: Boolean(callerExplicit) }
+    if (seconds <= 0) return { ms: requestedMs, clamped: false, ...base }
+    if (callerExplicit && !operator_set) return { ms: requestedMs, clamped: false, ...base }
     const ceilingMs = seconds * 1000 - CLIENT_DEADLINE_MARGIN_MS
     if (ceilingMs <= 0 || requestedMs <= ceilingMs) {
-        return { ms: requestedMs, clamped: false, client_deadline_seconds: seconds, requested_ms: requestedMs }
+        return { ms: requestedMs, clamped: false, ...base }
     }
-    return { ms: ceilingMs, clamped: true, client_deadline_seconds: seconds, requested_ms: requestedMs }
+    return { ms: ceilingMs, clamped: true, ...base }
 }
 
 function pollBudgetDisclosure(budget, waitedMs) {
@@ -568,7 +572,7 @@ function pollBudgetDisclosure(budget, waitedMs) {
         }
         : {
             ...base,
-            reason: budget.requested_ms > budget.client_deadline_seconds * 1000 && budget.client_deadline_seconds > 0
+            reason: !budget.caller_timeout_explicit && budget.client_deadline_seconds > 0 && budget.requested_ms > budget.client_deadline_seconds * 1000
                 ? `this dispatch did not finish within the requested ${budget.requested_ms}ms poll budget; note the MCP client's own deadline is ${budget.client_deadline_seconds}s, so a slower dispatch needs resume_task rather than a longer timeout_seconds`
                 : `this dispatch did not finish within the requested ${budget.requested_ms}ms poll budget`,
         }
@@ -584,7 +588,7 @@ export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
     if (TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return raw_body
     const prefixMs = EXEC_FAMILY_VERBS.includes(verb)
         ? timeoutMsFor(timeout_seconds)
-        : applyClientDeadline(pollTimeoutMs(verb, raw_body, timeout_seconds)).ms
+        : applyClientDeadline(pollTimeoutMs(verb, raw_body, timeout_seconds), Number(timeout_seconds) > 0).ms
     return `timeoutMs=${prefixMs}\n${raw_body}`
 }
 
@@ -1069,7 +1073,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     }
 
     const requestedTimeoutMs = resume_task ? Math.max(0, (Number(timeout_seconds) || DEFAULT_TIMEOUT_SECONDS) * 1000) : pollTimeoutMs(verb, raw_body, timeout_seconds)
-    const budget = applyClientDeadline(requestedTimeoutMs)
+    const budget = applyClientDeadline(requestedTimeoutMs, Number(timeout_seconds) > 0)
     const timeoutMs = budget.ms
     const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1000)
     const deadline = Date.now() + timeoutMs
@@ -1150,15 +1154,23 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         const landed = readLandedOutFile()
         if (landed !== undefined) return landed
         if (Date.now() >= deadline) {
+            // The daemon writes its reply without knowing anyone stopped
+            // waiting, and this loop's own last check was up to pollMs before
+            // the deadline -- so a reply that landed meanwhile is on disk and
+            // invisible to a bare "deadline passed" test. Read first, then
+            // keep reading through the window: a result that exists always
+            // beats reporting a timeout.
             const finalRecheckDeadline = Date.now() + FINAL_OUT_RECHECK_WINDOW_MS
-            while (Date.now() < finalRecheckDeadline) {
+            while (true) {
+                const landedLate = readLandedOutFile()
+                if (landedLate !== undefined) return landedLate
+                if (signal?.aborted) return abortedReply()
+                if (Date.now() >= finalRecheckDeadline) break
                 try {
                     await sleep(FINAL_OUT_RECHECK_INTERVAL_MS, signal)
                 } catch {
-                    break
+                    return abortedReply()
                 }
-                const landedLate = readLandedOutFile()
-                if (landedLate !== undefined) return landedLate
             }
             return toYaml({
                 timed_out: true,
