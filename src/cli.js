@@ -17,6 +17,8 @@ from a shell (or from an agent host that cannot see the MCP tools) with no MCP i
   --body <json|@file|->   JSON body; @path reads a file, - reads stdin
   --raw  <text|@file|->   plain-text body for serp/browser/cdp style verbs
   --cwd <dir>             project root holding .gm/exec-spool (default: cwd)
+  --no-ignore             include gitignored files: sets body no_ignore for the search verbs
+                          (grep, rg, codesearch, code_search)
   --session-id <id>       gm session id (default: gm-cli-<pid>-<now>)
   --timeout <seconds>     give up after this many seconds (default 120)
   --poll <seconds>        spool poll interval (default 0.25)
@@ -34,6 +36,10 @@ examples:
 (run the same verbs as "node <bundle> dispatch ..." when gm itself is not on PATH)`
 
 const DISPATCH_VALUE_FLAGS = new Set(['body', 'raw', 'cwd', 'session-id', 'timeout', 'poll', 'max-chars', 'resume'])
+
+// The verbs whose scan universe can be widened past .gitignore. "search" is codesearch's own alias
+// but is also the name of other verbs elsewhere, so it is left to the body field.
+const NO_IGNORE_VERBS = new Set(['grep', 'rg', 'codesearch', 'code_search'])
 
 function flagNameOf(arg) {
     const name = arg.slice(2)
@@ -119,6 +125,18 @@ async function dispatchCommand() {
             console.error('gm-mcp dispatch: --body must be a JSON object')
             return 2
         }
+    }
+
+    // --no-ignore is the shell spelling of a scan body's own "no_ignore": one flag rather than a
+    // field a caller has to splice into hand-written JSON. It is refused on the verbs that have no
+    // such field, because a flag that silently does nothing is worse than one that says so.
+    if (argv.includes('--no-ignore')) {
+        if (!NO_IGNORE_VERBS.has(verb)) {
+            console.error(`gm-mcp dispatch: --no-ignore applies to the search verbs (${[...NO_IGNORE_VERBS].join(', ')}), not "${verb}"`)
+            return 2
+        }
+        if (body === undefined) body = {}
+        body.no_ignore = true
     }
 
     const numberOrUndefined = (value) => {

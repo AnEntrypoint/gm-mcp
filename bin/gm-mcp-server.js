@@ -41915,6 +41915,8 @@ from a shell (or from an agent host that cannot see the MCP tools) with no MCP i
   --body <json|@file|->   JSON body; @path reads a file, - reads stdin
   --raw  <text|@file|->   plain-text body for serp/browser/cdp style verbs
   --cwd <dir>             project root holding .gm/exec-spool (default: cwd)
+  --no-ignore             include gitignored files: sets body no_ignore for the search verbs
+                          (grep, rg, codesearch, code_search)
   --session-id <id>       gm session id (default: gm-cli-<pid>-<now>)
   --timeout <seconds>     give up after this many seconds (default 120)
   --poll <seconds>        spool poll interval (default 0.25)
@@ -41931,6 +41933,7 @@ examples:
 
 (run the same verbs as "node <bundle> dispatch ..." when gm itself is not on PATH)`;
 var DISPATCH_VALUE_FLAGS = /* @__PURE__ */ new Set(["body", "raw", "cwd", "session-id", "timeout", "poll", "max-chars", "resume"]);
+var NO_IGNORE_VERBS = /* @__PURE__ */ new Set(["grep", "rg", "codesearch", "code_search"]);
 function flagNameOf(arg) {
   const name = arg.slice(2);
   const eq = name.indexOf("=");
@@ -42006,6 +42009,14 @@ async function dispatchCommand() {
       console.error("gm-mcp dispatch: --body must be a JSON object");
       return 2;
     }
+  }
+  if (argv.includes("--no-ignore")) {
+    if (!NO_IGNORE_VERBS.has(verb)) {
+      console.error(`gm-mcp dispatch: --no-ignore applies to the search verbs (${[...NO_IGNORE_VERBS].join(", ")}), not "${verb}"`);
+      return 2;
+    }
+    if (body === void 0) body = {};
+    body.no_ignore = true;
   }
   const numberOrUndefined = (value) => {
     const parsed = Number(value);
