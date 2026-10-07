@@ -216,6 +216,36 @@ function supervisorRunning(state, now = Date.now()) {
     return typeof state.ts === 'number' && now - state.ts < SUPERVISOR_STATE_STALE_MS
 }
 
+// A supervisor spawned from inside a session is that session's child: a stdio
+// server seeds the shared --http server, that server arms a supervisor, and one
+// tree teardown takes all three. Measured 2026-10-07 on 8787 -- three
+// supervisor + server pairs started inside a caller's tree were all gone within
+// ten minutes, and the pair Task Scheduler started, whose parent is svchost.exe
+// and which no session exit can reach, is the one still serving. So on Windows
+// the supervisor is started through its own task rather than as a child of
+// whoever asked: the scheduler host parents it, and it outlives every session.
+function startSupervisorViaTask({ port }) {
+    if (process.platform !== 'win32') return null
+    if ((process.env.GM_MCP_HTTP_AUTOSTART_TASK || '').trim() === '0') return null
+    const task = supervisorTaskName(port)
+    const query = spawnSync('schtasks', ['/query', '/tn', task], { encoding: 'utf8', windowsHide: true })
+    if (query.error || query.status !== 0) {
+        const created = installHttpScheduledTask({ port })
+        if (!created.installed) return null
+    }
+    const run = spawnSync('schtasks', ['/run', '/tn', task], { encoding: 'utf8', windowsHide: true })
+    if (run.error || run.status !== 0) {
+        const reason = run.error?.message || (run.stderr || '').trim() || `schtasks /run exited ${run.status}`
+        // An instance of this task is `http-supervise`, so a /run that refuses
+        // is itself proof a supervisor holds the port -- measured 0x80070420
+        // while one was up. Spawning anyway would race it.
+        appendDiagnostic('http-supervisor-task-run-refused', { port, task, error: reason })
+        return { port, pid: null, started: false, reason: 'task-already-running' }
+    }
+    appendDiagnostic('http-supervisor-task-run', { port, task })
+    return { port, pid: null, started: true, reason: 'task-run' }
+}
+
 // The server is the only thing that ever starts itself, so a server that dies
 // stays dead: nothing on the http registration's path runs gm at all, and a
 // session whose client connected once never reconnects. This is the daemon
@@ -227,6 +257,8 @@ export async function ensureHttpSupervisor({ port = defaultHttpPort(), intervalM
     if (supervisorRunning(recorded)) {
         return { port, pid: recorded.pid, started: false, reason: 'already-running' }
     }
+    const viaTask = startSupervisorViaTask({ port })
+    if (viaTask) return viaTask
     const child = spawn(process.execPath, [serverEntryPath(), 'http-supervise', '--port', String(port), '--interval', String(Math.round(intervalMs / 1000))], {
         cwd: homedir(),
         detached: true,
@@ -288,12 +320,21 @@ export function installHttpAutostart({ port = defaultHttpPort(), intervalMs = su
 // one restarter outside both families, so it is installed on every supervisor
 // start and idempotently re-written; a run whose port already has a supervisor
 // exits at once, so the task costs one short-lived node per interval.
-const AUTOSTART_TASK_MINUTES = 5
+//
+// One minute, not five. Once a supervisor is started through the task it *is*
+// that task's instance, so the scheduler never fires again while it is healthy
+// and a short interval costs nothing in steady state; it is only the bound on
+// the window after a kill takes server and supervisor together.
+const AUTOSTART_TASK_MINUTES = 1
+
+export function supervisorTaskName(port = defaultHttpPort()) {
+    return `gm-mcp-http-supervise-${port}`
+}
 
 export function installHttpScheduledTask({ port = defaultHttpPort() } = {}) {
     if (process.platform !== 'win32') return { installed: false, reason: 'the task re-arm is a Windows restarter' }
     if ((process.env.GM_MCP_HTTP_AUTOSTART_TASK || '').trim() === '0') return { installed: false, reason: 'disabled by GM_MCP_HTTP_AUTOSTART_TASK=0' }
-    const task = `gm-mcp-http-supervise-${port}`
+    const task = supervisorTaskName(port)
     const entry = serverEntryPath()
     const command = `"${process.execPath}" "${entry}" http-supervise --port ${port} --interval ${Math.round(supervisorIntervalMs() / 1000)}`
     try {
