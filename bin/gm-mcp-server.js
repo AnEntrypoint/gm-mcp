@@ -41316,6 +41316,7 @@ var STATE_FILE_NAME = "gm-mcp-http.json";
 var PROBE_TIMEOUT_MS = 1500;
 var STARTUP_WAIT_MS = 2e4;
 var STARTUP_POLL_MS = 250;
+var SUPERVISOR_INTERVAL_MS = 15e3;
 function agentplugDir2() {
   const override = (process.env.AGENTPLUG_HOME || "").trim();
   return override ? path3.resolve(override) : path3.join(homedir2(), ".agentplug");
@@ -41411,6 +41412,78 @@ async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs = START
   writeSingletonState({ port, pid: health.pid ?? pid, url: httpMcpUrl(port), ts: Date.now(), reused: false });
   appendDiagnostic("http-singleton-started", { port, pid: health.pid ?? pid, entry: serverEntryPath() });
   return { url: httpMcpUrl(port), port, pid: health.pid ?? pid, reused: false, version: health.version ?? null };
+}
+function supervisorStateFilePath(port = defaultHttpPort()) {
+  return path3.join(agentplugDir2(), `gm-mcp-http-supervisor-${port}.json`);
+}
+function supervisorIntervalMs() {
+  const seconds = Number((process.env.GM_MCP_HTTP_SUPERVISOR_INTERVAL_SECONDS || "").trim());
+  return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1e3) : SUPERVISOR_INTERVAL_MS;
+}
+function supervisorEnabled() {
+  return (process.env.GM_MCP_HTTP_SUPERVISOR || "").trim() !== "0";
+}
+function readSupervisorState(port) {
+  try {
+    const state = JSON.parse(readFileSync2(supervisorStateFilePath(port), "utf8"));
+    return state?.port === port ? state : null;
+  } catch {
+    return null;
+  }
+}
+function writeSupervisorState(state) {
+  const file2 = supervisorStateFilePath(state?.port);
+  try {
+    mkdirSync2(path3.dirname(file2), { recursive: true });
+    writeFileSync2(file2, `${JSON.stringify(state, null, 2)}
+`, "utf8");
+  } catch {
+  }
+}
+async function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
+  if (!supervisorEnabled()) return { port, pid: null, started: false, reason: "disabled" };
+  const recorded = readSupervisorState(port);
+  if (recorded?.pid && pidAlive(recorded.pid) === true) {
+    return { port, pid: recorded.pid, started: false, reason: "already-running" };
+  }
+  const child = spawn2(process.execPath, [serverEntryPath(), "http-supervise", "--port", String(port), "--interval", String(Math.round(intervalMs / 1e3))], {
+    cwd: homedir2(),
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    // Inherited by every process this one spawns, so a restarted server
+    // does not seed a second supervisor that would race this one.
+    env: { ...process.env, GM_MCP_TRANSPORT: "http", GM_MCP_HTTP_SUPERVISOR: "0" }
+  });
+  child.on("error", (error61) => {
+    appendDiagnostic("http-supervisor-spawn-error", { port, entry: serverEntryPath(), error: describeError(error61) });
+  });
+  child.unref();
+  appendDiagnostic("http-supervisor-spawned", { port, pid: child.pid ?? null, interval_ms: intervalMs });
+  return { port, pid: child.pid ?? null, started: true, reason: "spawned" };
+}
+async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
+  const recorded = readSupervisorState(port);
+  if (recorded?.pid && recorded.pid !== process.pid && pidAlive(recorded.pid) === true) {
+    appendDiagnostic("http-supervisor-dup-exit", { port, owner_pid: recorded.pid, pid: process.pid });
+    return { port, supervised: false, reason: "another supervisor owns this port" };
+  }
+  keepServingOnAsyncFailure();
+  logSignalExits();
+  writeSupervisorState({ port, pid: process.pid, url: httpMcpUrl(port), ts: Date.now() });
+  appendDiagnostic("http-supervisor-start", { port, pid: process.pid, interval_ms: intervalMs });
+  while (true) {
+    const health = await probeHealth(port);
+    if (!health) {
+      const result = await ensureHttpSingleton({ port });
+      appendDiagnostic(result.url ? "http-supervisor-restarted" : "http-supervisor-restart-failed", {
+        port,
+        pid: result.pid ?? null,
+        error: result.error ?? null
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }
 
 // src/self-update.js
@@ -41637,6 +41710,13 @@ function refreshStaleDeployedBundleInBackground() {
 }
 
 // src/index.js
+function flagValue2(name) {
+  const args = process.argv.slice(2);
+  const index = args.indexOf(`--${name}`);
+  if (index === -1) return void 0;
+  const next = args[index + 1];
+  return next && !next.startsWith("--") ? next : void 0;
+}
 function wantsHttpTransport() {
   if (process.argv.slice(2).includes("--http")) return true;
   return (process.env.GM_MCP_TRANSPORT || "").trim().toLowerCase() === "http";
@@ -41648,9 +41728,14 @@ function seedHttpSingletonInBackground() {
   }).catch(() => {
   });
 }
+function seedHttpSupervisorInBackground(port) {
+  ensureHttpSupervisor({ port }).catch(() => {
+  });
+}
 async function main() {
   if (wantsHttpTransport()) {
-    await startHttpServer(httpListenOptions());
+    const { port } = await startHttpServer(httpListenOptions());
+    seedHttpSupervisorInBackground(port);
     return;
   }
   installStdioGuards();
@@ -41696,6 +41781,14 @@ var COMMANDS = {
     const health = await probeHealth(port);
     console.log(JSON.stringify({ port, url: httpMcpUrl(port), running: Boolean(health), health }, null, 2));
     return 0;
+  },
+  "http-supervise": async () => {
+    const port = Number(flagValue2("port")) || defaultHttpPort();
+    const seconds = Number(flagValue2("interval"));
+    const intervalMs = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1e3) : supervisorIntervalMs();
+    const result = await runHttpSupervisor({ port, intervalMs });
+    console.log(`gm-mcp ${BUNDLE_VERSION}: http-supervise ${port} ended -- ${result.reason ?? "stopped"}`);
+    return 0;
   }
 };
 var command = process.argv[2];
@@ -41709,6 +41802,9 @@ usage:
                                    (stateless, so a dropped client is just another request)
   gm-mcp-server.js ensure-http     start the shared HTTP server if none is listening and print its url
   gm-mcp-server.js http-status     report whether the shared HTTP server is answering
+  gm-mcp-server.js http-supervise [--port N] [--interval S]
+                                   watch the shared HTTP server and restart it when it stops answering
+                                   (a --http server starts one for itself unless ${"GM_MCP_HTTP_SUPERVISOR"}=0)
   gm-mcp-server.js pin-local-build [path]   pin the deployed bundle (default ~/.gm-tools/gm-mcp-server.mjs) so a self-update cannot overwrite it
   gm-mcp-server.js unpin-local-build        clear that pin
   gm-mcp-server.js self-update-status       print freeze state, local-build pin and deployed bundle sha256

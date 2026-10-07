@@ -1,7 +1,7 @@
-import { main } from './index.js'
+import { main, flagValue } from './index.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
-import { defaultHttpPort, ensureHttpSingleton, httpMcpUrl, probeHealth } from './singleton.js'
+import { defaultHttpPort, ensureHttpSingleton, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs } from './singleton.js'
 
 const COMMANDS = {
     'pin-local-build': () => {
@@ -35,6 +35,14 @@ const COMMANDS = {
         console.log(JSON.stringify({ port, url: httpMcpUrl(port), running: Boolean(health), health }, null, 2))
         return 0
     },
+    'http-supervise': async () => {
+        const port = Number(flagValue('port')) || defaultHttpPort()
+        const seconds = Number(flagValue('interval'))
+        const intervalMs = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : supervisorIntervalMs()
+        const result = await runHttpSupervisor({ port, intervalMs })
+        console.log(`gm-mcp ${BUNDLE_VERSION}: http-supervise ${port} ended -- ${result.reason ?? 'stopped'}`)
+        return 0
+    },
 }
 
 const command = process.argv[2]
@@ -49,6 +57,9 @@ usage:
                                    (stateless, so a dropped client is just another request)
   gm-mcp-server.js ensure-http     start the shared HTTP server if none is listening and print its url
   gm-mcp-server.js http-status     report whether the shared HTTP server is answering
+  gm-mcp-server.js http-supervise [--port N] [--interval S]
+                                   watch the shared HTTP server and restart it when it stops answering
+                                   (a --http server starts one for itself unless ${'GM_MCP_HTTP_SUPERVISOR'}=0)
   gm-mcp-server.js pin-local-build [path]   pin the deployed bundle (default ~/.gm-tools/gm-mcp-server.mjs) so a self-update cannot overwrite it
   gm-mcp-server.js unpin-local-build        clear that pin
   gm-mcp-server.js self-update-status       print freeze state, local-build pin and deployed bundle sha256
