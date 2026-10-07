@@ -228,6 +228,12 @@ SHA and authors stay unchanged. The original out-file and `full_response: true`
 recover all received examples; failures, refusals and uncommitted receipts bypass
 this shortening.
 
+Successful exhaustive `output_mode: count` replies omit `output` only when every
+entry exactly repeats its corresponding structured `counts` row as `path:count`.
+All count rows, totals and scan metadata remain unchanged. The original out-file
+and `full_response: true` retain the repeated array; incomplete, failed and
+nonmatching replies keep it.
+
 ### Long text inline limits
 
 Two env vars set how much of a long text field comes back inline before it is

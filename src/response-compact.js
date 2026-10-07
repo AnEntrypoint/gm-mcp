@@ -313,15 +313,34 @@ function gitReceiptCarriesNoFailure(response) {
         && response.outcome !== 'refused'
 }
 
+function countOutputRepeatsStructuredCounts(response) {
+    if (response.ok !== true || response.exhaustive !== true || response.output_mode !== 'count'
+        || response.error !== undefined || response.error_code !== undefined
+        || response.errors !== undefined || response.partial_reason !== undefined
+        || response.partial === true || response.complete === false
+        || response.timed_out === true || response.refused === true
+        || response.status === 'refused' || response.outcome === 'refused') return false
+    const { counts, output } = response
+    return Array.isArray(counts) && counts.length > 0 && Array.isArray(output)
+        && counts.length === output.length && counts.every((row, index) =>
+            row && typeof row.path === 'string' && Number.isSafeInteger(row.count) && row.count >= 0
+            && output[index] === `${row.path}:${row.count}`)
+}
+
 export function compactWireResponse(response, outPath, receiptVerb = response?.verb) {
     if (!response || typeof response !== 'object' || Array.isArray(response)) return response
     const gitReceiptContext = WIRE_GIT_COMMIT_VERBS.has(receiptVerb)
         && gitReceiptCarriesNoFailure(response)
     const committedGitReceipt = gitReceiptContext && response.committed === true
+    const redundantCountOutput = countOutputRepeatsStructuredCounts(response)
     const omitted = []
     const shortened = []
     const out = {}
     for (const [key, value] of Object.entries(response)) {
+        if (key === 'output' && redundantCountOutput) {
+            omitted.push(key)
+            continue
+        }
         if (WIRE_OMITTED_KEYS.has(key)) {
             omitted.push(key)
             continue

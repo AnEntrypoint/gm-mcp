@@ -123,6 +123,12 @@ what README does not.
   only when the policy hash moved, and then it is the thing to read), and every
   count field, because a count is already the smallest honest form.
 
+- Count-mode wire compaction requires explicit `ok: true`, `exhaustive: true`,
+  no failure or partial diagnostics, and same-length exact `path:count` parity
+  between `output` and structured `counts`. Only the derived `output` is omitted;
+  all count rows, totals and scan metadata remain whole, with the existing
+  full-payload pointer and `full_response: true` restoring the received array.
+
 - `phase_history` is historical context, not the current phase or gate decision.
   The wire retains its newest five transitions in source order and records
   retained/total counts with the existing full-payload pointer. Failure responses
