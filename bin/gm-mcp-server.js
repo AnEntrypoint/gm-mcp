@@ -38972,7 +38972,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
 }
 
 // src/bundle-version.js
-var BUNDLE_VERSION = "0.2.6";
+var BUNDLE_VERSION = "0.2.7";
 
 // src/mcp-server.js
 var numberLike = external_exports.union([external_exports.number(), external_exports.string()]);
@@ -41468,8 +41468,8 @@ async function startHttpServer({ port, host } = {}) {
 }
 
 // src/singleton.js
-import { spawn as spawn2 } from "node:child_process";
-import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { spawn as spawn2, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import path3 from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41479,6 +41479,8 @@ var STARTUP_WAIT_MS = 2e4;
 var STARTUP_POLL_MS = 250;
 var SUPERVISOR_INTERVAL_MS = 15e3;
 var SUPERVISOR_WATCH_MS = 1e3;
+var SUPERVISOR_STATE_BEAT_MS = 15e3;
+var SUPERVISOR_STATE_STALE_MS = 6e4;
 function agentplugDir2() {
   const override = (process.env.AGENTPLUG_HOME || "").trim();
   return override ? path3.resolve(override) : path3.join(homedir2(), ".agentplug");
@@ -41537,17 +41539,30 @@ async function waitForHealth(port, timeoutMs) {
   }
   return null;
 }
+function singletonLogFilePath(port) {
+  const log = logFilePath();
+  return path3.join(path3.dirname(log), `gm-mcp-http-${port}.log`);
+}
 function spawnSingleton(port) {
   const entry = serverEntryPath();
+  const log = singletonLogFilePath(port);
+  let fds;
+  try {
+    mkdirSync2(path3.dirname(log), { recursive: true });
+    const fd = openSync(log, "a");
+    fds = [fd, fd];
+  } catch {
+    fds = null;
+  }
   const child = spawn2(process.execPath, [entry, "--http", "--port", String(port)], {
     cwd: homedir2(),
     detached: true,
-    stdio: "ignore",
+    stdio: fds ? ["ignore", fds[0], fds[1]] : "ignore",
     windowsHide: true,
     env: { ...process.env, GM_MCP_TRANSPORT: "http" }
   });
   child.on("error", (error61) => {
-    appendDiagnostic("http-singleton-spawn-error", { port, entry, error: describeError(error61) });
+    appendDiagnostic("http-singleton-spawn-error", { port, entry, log: fds ? log : null, error: describeError(error61) });
   });
   child.unref();
   return child.pid ?? null;
@@ -41608,10 +41623,14 @@ function writeSupervisorState(state) {
   } catch {
   }
 }
+function supervisorRunning(state, now = Date.now()) {
+  if (!state?.pid || pidAlive(state.pid) !== true) return false;
+  return typeof state.ts === "number" && now - state.ts < SUPERVISOR_STATE_STALE_MS;
+}
 async function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
   if (!supervisorEnabled()) return { port, pid: null, started: false, reason: "disabled" };
   const recorded = readSupervisorState(port);
-  if (recorded?.pid && pidAlive(recorded.pid) === true) {
+  if (supervisorRunning(recorded)) {
     return { port, pid: recorded.pid, started: false, reason: "already-running" };
   }
   const child = spawn2(process.execPath, [serverEntryPath(), "http-supervise", "--port", String(port), "--interval", String(Math.round(intervalMs / 1e3))], {
@@ -41658,35 +41677,75 @@ function installHttpAutostart({ port = defaultHttpPort(), intervalMs = superviso
     return { installed: false, reason: describeError(error61) };
   }
 }
+var AUTOSTART_TASK_MINUTES = 5;
+function installHttpScheduledTask({ port = defaultHttpPort() } = {}) {
+  if (process.platform !== "win32") return { installed: false, reason: "the task re-arm is a Windows restarter" };
+  if ((process.env.GM_MCP_HTTP_AUTOSTART_TASK || "").trim() === "0") return { installed: false, reason: "disabled by GM_MCP_HTTP_AUTOSTART_TASK=0" };
+  const task = `gm-mcp-http-supervise-${port}`;
+  const entry = serverEntryPath();
+  const command2 = `"${process.execPath}" "${entry}" http-supervise --port ${port} --interval ${Math.round(supervisorIntervalMs() / 1e3)}`;
+  try {
+    const result = spawnSync("schtasks", ["/create", "/tn", task, "/tr", command2, "/sc", "MINUTE", "/mo", String(AUTOSTART_TASK_MINUTES), "/f"], {
+      encoding: "utf8",
+      windowsHide: true
+    });
+    if (result.error || result.status !== 0) {
+      const reason = result.error?.message || (result.stderr || "").trim() || `schtasks exited ${result.status}`;
+      appendDiagnostic("http-autostart-task-install-failed", { port, task, error: reason });
+      return { installed: false, reason };
+    }
+    appendDiagnostic("http-autostart-task-installed", { port, task, minutes: AUTOSTART_TASK_MINUTES });
+    return { installed: true, task, minutes: AUTOSTART_TASK_MINUTES };
+  } catch (error61) {
+    appendDiagnostic("http-autostart-task-install-failed", { port, task, error: describeError(error61) });
+    return { installed: false, reason: describeError(error61) };
+  }
+}
 async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
   const recorded = readSupervisorState(port);
-  if (recorded?.pid && recorded.pid !== process.pid && pidAlive(recorded.pid) === true) {
+  if (recorded?.pid && recorded.pid !== process.pid && supervisorRunning(recorded)) {
     appendDiagnostic("http-supervisor-dup-exit", { port, owner_pid: recorded.pid, pid: process.pid });
     return { port, supervised: false, reason: "another supervisor owns this port" };
   }
   keepServingOnAsyncFailure();
   logSignalExits();
   installHttpAutostart({ port, intervalMs });
+  installHttpScheduledTask({ port });
   writeSupervisorState({ port, pid: process.pid, url: httpMcpUrl(port), ts: Date.now() });
   appendDiagnostic("http-supervisor-start", { port, pid: process.pid, interval_ms: intervalMs });
   let serverPid = null;
   let nextProbeAt = 0;
+  let lastStateBeatAt = Date.now();
   while (true) {
     const serverExited = serverPid !== null && pidAlive(serverPid) === false;
-    if (Date.now() >= nextProbeAt || serverExited) {
-      const health = await probeHealth(port);
-      if (health) {
-        serverPid = health.pid ?? serverPid;
-      } else {
-        const result = await ensureHttpSingleton({ port });
-        appendDiagnostic(result.url ? "http-supervisor-restarted" : "http-supervisor-restart-failed", {
-          port,
-          pid: result.pid ?? null,
-          error: result.error ?? null,
-          noticed_by: serverExited ? "pid-watch" : "health-probe"
-        });
-        serverPid = result.pid ?? null;
+    try {
+      if (Date.now() >= nextProbeAt || serverExited) {
+        const health = await probeHealth(port);
+        if (health) {
+          serverPid = health.pid ?? serverPid;
+        } else {
+          const result = await ensureHttpSingleton({ port });
+          appendDiagnostic(result.url ? "http-supervisor-restarted" : "http-supervisor-restart-failed", {
+            port,
+            pid: result.pid ?? null,
+            error: result.error ?? null,
+            noticed_by: serverExited ? "pid-watch" : "health-probe"
+          });
+          serverPid = result.pid ?? null;
+        }
+        nextProbeAt = Date.now() + intervalMs;
       }
+      if (Date.now() - lastStateBeatAt >= SUPERVISOR_STATE_BEAT_MS) {
+        const owner = readSupervisorState(port);
+        if (owner?.pid && owner.pid !== process.pid) {
+          appendDiagnostic("http-supervisor-superseded", { port, owner_pid: owner.pid, pid: process.pid });
+          return { port, supervised: false, reason: "another supervisor took this port" };
+        }
+        writeSupervisorState({ port, pid: process.pid, url: httpMcpUrl(port), ts: Date.now() });
+        lastStateBeatAt = Date.now();
+      }
+    } catch (error61) {
+      appendDiagnostic("http-supervisor-round-failed", { port, error: describeError(error61), server_pid: serverPid });
       nextProbeAt = Date.now() + intervalMs;
     }
     await new Promise((resolve) => setTimeout(resolve, SUPERVISOR_WATCH_MS));
@@ -41695,7 +41754,7 @@ async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = superv
 
 // src/self-update.js
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawnSync as spawnSync2 } from "node:child_process";
 import { copyFileSync, existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, realpathSync, renameSync, rmSync, statSync as statSync2, unlinkSync, utimesSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import path4 from "node:path";
@@ -41859,7 +41918,7 @@ async function fetchBundleBytes(url2) {
 function assertLoadableBundle(bytes, candidatePath) {
   if (bytes.length < MIN_PLAUSIBLE_BUNDLE_BYTES) throw new Error(`candidate bundle is only ${bytes.length} bytes`);
   if (!bytes.subarray(0, BUNDLE_SHEBANG.length).toString("utf8").startsWith(BUNDLE_SHEBANG)) throw new Error("candidate bundle has no node shebang");
-  const syntaxCheck = spawnSync(process.execPath, ["--check", candidatePath], { encoding: "utf8", windowsHide: true });
+  const syntaxCheck = spawnSync2(process.execPath, ["--check", candidatePath], { encoding: "utf8", windowsHide: true });
   if (syntaxCheck.status !== 0) throw new Error(`candidate bundle fails node --check: ${syntaxCheck.stderr.trim().split("\n")[0]}`);
 }
 function replaceDeployedBundle(deployedPath, bytes) {
@@ -42127,9 +42186,11 @@ var COMMANDS = {
     }
     const autostart = installHttpAutostart({ port });
     const supervisor = await ensureHttpSupervisor({ port });
+    const task = installHttpScheduledTask({ port });
     console.log(`gm-mcp ${BUNDLE_VERSION}: ${result.reused ? "reusing" : "started"} the shared HTTP server (pid ${result.pid}) -- ${result.url}`);
     console.log(`gm-mcp ${BUNDLE_VERSION}: supervisor ${supervisor.reason} (pid ${supervisor.pid ?? "none"}) -- restarts the server when it stops answering`);
     console.log(`gm-mcp ${BUNDLE_VERSION}: autostart ${autostart.installed ? autostart.changed ? "written" : "already current" : `skipped (${autostart.reason})`} -- ${autostart.path ?? "none"}`);
+    console.log(`gm-mcp ${BUNDLE_VERSION}: task ${task.installed ? `${task.task} every ${task.minutes} min` : `skipped (${task.reason})`} -- restarts the supervisor when nothing else can`);
     return 0;
   },
   "http-status": async () => {
