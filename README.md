@@ -16,7 +16,7 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
   - byte-identical object rows repeated inside one array collapsed to the first copy
   - empty/null/empty-string fields removed at every level, except an empty result list (`edges`, `reachable`, `reached`, `callees`, `functions`, `matches`, `definitions`, `references`), which stays as `[]` so "nothing found" reads as an answer rather than a missing field; and a `false` on a flag whose only meaning is the absence of a problem (`session_mismatch`, `instruction_unchanged`, `instruction_suppressible_by_asserting_hash`, `recall_embed_failed`, `should_residual_scan`, `fsm_graph_rejected`)
 - Spool paths appear on timeout/abort/error or when compaction points to the original payload; other successful responses omit them (the caller already knows verb/cwd).
-- Supports plain-text-body verbs (`exec_js` and every language stem it backs, `serp`, `browser`, `cdp`) via a `raw_body` string parameter (a string `body`, or a `body` object with exactly one string field among `code`/`script`/`command`/`source`/`text`, is accepted as the same text), since these verbs reject a JSON-object body outright
+- Supports plain-text-body verbs (`exec_js` and every language stem it backs) via a `raw_body` string parameter (a string `body`, or a `body` object with exactly one string field among `code`/`script`/`command`/`source`/`text`, is accepted as the same text), since these verbs reject a JSON-object body outright
 - Adds a `timeoutMs=<ms>` first line to an exec-family `raw_body` that has none, derived from `timeout_seconds` (see "Exec-family timeout prefix" below)
 
 ## Usage
@@ -246,7 +246,7 @@ pointer. They are read once at server start, so a host must restart its
 | Env var | Applies to | Default | Ceiling |
 |---|---|---|---|
 | `GM_MCP_LONG_TEXT_INLINE_MAX` | every long text field, including `instruction`'s phase prose | `400` | `1048576` |
-| `GM_MCP_STDOUT_INLINE_MAX` | the whole response of a plain-text-body verb (`exec_js` and every language stem it backs, `serp`, `browser`, `cdp`) | `32768` | `1048576` |
+| `GM_MCP_STDOUT_INLINE_MAX` | the whole response of a plain-text-body verb (`exec_js` and every language stem it backs) | `32768` | `1048576` |
 | `GM_MCP_FILE_READ_INLINE_MAX` | the file body `fs_read` returns | `65536` | `1048576` |
 | `GM_MCP_NO_SELF_UPDATE` | any value but `0`/`false`/`no`/`off` freezes the deployed bundle against every self-update | unset | -- |
 
@@ -297,8 +297,6 @@ For these verbs the server adds the line itself when `raw_body` lacks one:
 - the value is `timeout_seconds * 1000` (default 300000), floored at 100
 - a `raw_body` that already starts with `timeoutMs=<ms>` or `timeout_ms=<ms>`
   (leading whitespace allowed) is sent unchanged -- an explicit line wins
-- `serp`, `browser` and `cdp` are not touched; they take a `timeout=<ms>`
-  line and carry their own default
 
 The prefix is the process budget the daemon enforces; `timeout_seconds` requests
 the wrapper's poll budget. Without an explicit poll value, an exec prefix requests

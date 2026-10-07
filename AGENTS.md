@@ -156,7 +156,7 @@ what README does not.
   `git_root_override`; the timed-out note says so and points at `resume_task`.
 
 - Plain-text ownership uses a byte-zero `gm_session_id=<owner>\n` header before
-  the timeout or browser page directive. The guest advertises
+  the timeout directive. The guest advertises
   `gm_session_header_version: 1`. MCP probes with safe JSON `phase-status` and
   caches only a coherent result bound to project, daemon boot, PID and GM hash;
   every nonempty GM pool slot must agree. A new hash or a mixed pool invalidates
