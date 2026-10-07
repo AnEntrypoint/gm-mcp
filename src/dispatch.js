@@ -3,15 +3,59 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn, execFileSync } from 'node:child_process'
 import * as yaml from 'js-yaml'
+import { appendDiagnostic } from './server-log.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+
+// An exit guard reads this: a process that quits mid-dispatch strands the
+// spool ticket it already wrote and drops the reply nobody else will poll for.
+let inflightDispatches = 0
+
+export function inflightDispatchCount() {
+    return inflightDispatches
+}
+
+function gitToplevel(dir) {
+    try {
+        const top = execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim()
+        return top ? path.resolve(top) : null
+    } catch {
+        return null
+    }
+}
 
 function projectRootFor(dir) {
     const resolved = path.resolve(dir)
-    try {
-        const top = execFileSync('git', ['-C', resolved, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim()
-        return top ? path.resolve(top) : resolved
-    } catch {
-        return resolved
+    return gitToplevel(resolved) || resolved
+}
+
+const DEFAULT_CWD_ENV_VARS = ['GM_MCP_DEFAULT_CWD', 'CLAUDE_PROJECT_DIR']
+
+// A cwd-less dispatch used to resolve against this server's own process.cwd().
+// One shared HTTP gm-mcp server serves every project (138 measured) and was
+// started from the user's home directory, which is not a git repo -- so every
+// cwd-less dispatch silently registered and ran in $HOME/.gm: instruction
+// state, PRD rows and last-instruction-hash files all landed in the wrong
+// project while the caller's own spool stayed empty, which reads exactly like
+// "the daemon never answered". An explicit root, or a loud refusal.
+function resolveDispatchRoot(cwd) {
+    if (typeof cwd === 'string' && cwd.trim()) return { root: projectRootFor(cwd.trim()), root_source: 'cwd' }
+    for (const name of DEFAULT_CWD_ENV_VARS) {
+        const value = process.env[name]
+        if (typeof value === 'string' && value.trim()) return { root: projectRootFor(value.trim()), root_source: `env:${name}` }
+    }
+    const launched = path.resolve(process.cwd())
+    if (process.env.GM_MCP_ALLOW_PROCESS_CWD === '1') return { root: projectRootFor(launched), root_source: 'process_cwd' }
+    const top = gitToplevel(launched)
+    if (top && top === launched) return { root: launched, root_source: 'process_cwd' }
+    return {
+        error: 'cwd-required',
+        refused_root: launched,
+        root_source: 'process_cwd',
+        refused_reason: top
+            ? `process.cwd() is ${launched}, inside git repository ${top} but not at its root`
+            : `process.cwd() is ${launched}, which is not inside a git repository`,
+        note: `this dispatch named no project, and this gm-mcp server is a shared one whose own cwd is not a project root, so the old behaviour would have run it in ${launched}/.gm -- the wrong project, with its instruction state, PRD rows and spool files written there and nothing appearing in yours. Pass cwd (the project root containing .gm/exec-spool) on every dispatch, or set GM_MCP_DEFAULT_CWD to one explicit root for cwd-less calls. GM_MCP_ALLOW_PROCESS_CWD=1 restores the silent fallback.`,
+        accepted_fields: ['cwd'],
     }
 }
 
@@ -1052,14 +1096,37 @@ async function plainTextOwnerTransport(root, sessionId, signal) {
     return transport
 }
 
-export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal, responseValueObserver) {
+export async function gmDispatch(args, signal, responseValueObserver) {
+    inflightDispatches += 1
+    const startedAtMs = Date.now()
+    appendDiagnostic('dispatch-start', { verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
+    try {
+        return await runDispatch(args, signal, responseValueObserver)
+    } catch (error) {
+        appendDiagnostic('dispatch-error', { verb: args?.verb ?? null, error: error?.message ? String(error.message) : String(error) })
+        throw error
+    } finally {
+        appendDiagnostic('dispatch-end', { verb: args?.verb ?? null, ms: Date.now() - startedAtMs, inflight: inflightDispatches - 1 })
+        inflightDispatches -= 1
+    }
+}
+
+async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal, responseValueObserver) {
     if (!verb) return 'error: verb required'
     if (typeof session_id === 'string') session_id = session_id.trim()
     if (!session_id) return 'error: session_id required'
     const n = resume_task || nextN(session_id)
     const unsafeName = unsafeSpoolName('verb', verb) || unsafeSpoolName('session_id', session_id) || unsafeSpoolName('task', n)
     if (unsafeName) return `error: ${unsafeName} -- nothing was written to the spool, so no dispatch was queued`
-    const root = projectRootFor(cwd || process.cwd())
+    const resolvedRoot = resolveDispatchRoot(cwd)
+    if (resolvedRoot.error) {
+        appendDiagnostic('dispatch-root-refused', { verb, root: resolvedRoot.refused_root, reason: resolvedRoot.refused_reason })
+        return yaml.dump(resolvedRoot, { lineWidth: 100 })
+    }
+    if (resolvedRoot.root_source !== 'cwd') {
+        appendDiagnostic('dispatch-root-defaulted', { verb, root: resolvedRoot.root, source: resolvedRoot.root_source })
+    }
+    const root = resolvedRoot.root
     const spoolDir = path.join(root, '.gm', 'exec-spool')
     const inDir = path.join(spoolDir, 'in', verb)
     const outDir = path.join(spoolDir, 'out')

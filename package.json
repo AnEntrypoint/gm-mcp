@@ -14,7 +14,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
       "verify-build": "node scripts/check-bin-drift.mjs",
-    "test": "node test/response-compact.test.mjs && node test/runner-recovery.test.mjs && node test/daemon-preflight.test.mjs && node test/timeout-validation.test.mjs && node test/landed-output.test.mjs && node test/spool-name.test.mjs",
+    "test": "node test/response-compact.test.mjs && node test/runner-recovery.test.mjs && node test/daemon-preflight.test.mjs && node test/timeout-validation.test.mjs && node test/landed-output.test.mjs && node test/spool-name.test.mjs && node test/transport.test.mjs",
     "postinstall": "node scripts/install-hooks.mjs"
   },
   "dependencies": {},
