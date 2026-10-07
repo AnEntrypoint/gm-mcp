@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased - a supervisor that stopped running is replaced, not trusted
+
+Measured 2026-10-07: the shared server on 8787 (pid 18824) stopped logging at
+16:35:10 with no `exit` record, and nothing replaced it for the rest of the
+session -- every `mcp__gm__gm` call answered "MCP server gm is not connected"
+while the port sat empty. The supervisor that was supposed to replace it was
+itself gone, and the server's own 5-minute re-arm had been reporting
+`already-running` the whole time: it trusted `pidAlive` on a pid written hours
+earlier, and Windows hands a freed pid to an unrelated process within minutes,
+so "that pid is taken" was read as "the supervisor is up".
+
+Witnessed before and after on a scratch port with one state file naming a live
+but unrelated pid and a 10-minute-stale `ts`: 0.2.6 answers
+`supervisor already-running (pid 7528)` and spawns nothing; 0.2.7 answers
+`supervisor spawned (pid 22684)`.
+
+- supervisor state is a heartbeat: refreshed every 15 s, trusted within 60 s.
+- a supervisor that finds another pid owning its port exits instead of running
+  in duplicate.
+- one throwing probe used to leave the supervision loop, return from
+  `runHttpSupervisor` and exit the process -- supervision ended because a single
+  fetch rejected. A failed round is now logged and repeated.
+- the detached server's stdout/stderr goes to `gm-mcp-http-<port>.log` instead
+  of `stdio: 'ignore'`. That is why this death had no cause on record: a V8
+  abort skips every exit handler and writes only to stderr.
+- `ensure-http` installs a per-user 5-minute task running `http-supervise`.
+  The logon autostart covers a reboot, not a kill: when a parent teardown takes
+  server and supervisor together, a task is the one restarter outside both.
+  Remove it with `schtasks /delete /tn gm-mcp-http-supervise-8787 /f`, or never
+  install it with `GM_MCP_HTTP_AUTOSTART_TASK=0`.
+
+BUNDLE_VERSION 0.2.7, deployed to `~/.gm-tools/gm-mcp-server.mjs` and pinned.
+
 ## Unreleased - the HTTP transport never drops a client it can still serve
 
 Measured 2026-10-07: a session in `C:\dev\train` called `mcp__gm__gm` at

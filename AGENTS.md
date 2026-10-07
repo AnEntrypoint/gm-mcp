@@ -84,6 +84,17 @@ what README does not.
   `http-singleton-probe-false-negative` when the first probe was wrong. It does
   not kill the live server -- but it is the "is the supervisor killing it?" answer:
   it never kills, it only spawns noisily.
+- **A supervisor is proven alive by its state-file heartbeat, never by `pidAlive`
+  on a recorded pid.** `ensureHttpSupervisor` used to return `already-running`
+  whenever some process held the pid it had written, so one exited supervisor
+  blocked every later re-arm for as long as Windows kept that pid recycled --
+  pid 7528, an unrelated HTTP server, is what the 0.2.6 bundle accepted as the
+  live supervisor for port 8795 while nothing was supervising it. The state file
+  is now refreshed every `SUPERVISOR_STATE_BEAT_MS` (15 s) and trusted only
+  within `SUPERVISOR_STATE_STALE_MS` (60 s); a supervisor that finds another pid
+  owning its port exits (`http-supervisor-superseded`) rather than supervising
+  twice. Consequence: `ensure-http` re-arms a genuinely dead supervisor within
+  one server re-arm tick (5 min) instead of never.
 - **Runner recovery.** The daemon exits on purpose and depends on this file to
   bring it back: it self-recycles when idle or over its wasm memory ceiling
   (`self-recycling after 3600000ms fully idle ... next real dispatch spawns a
