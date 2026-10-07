@@ -4,7 +4,7 @@ import { gmDispatch } from './dispatch.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { setDiagnosticStderrEcho } from './server-log.js'
 import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
-import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs } from './singleton.js'
+import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, installHttpAutostart, probeHealth, runHttpSupervisor, supervisorIntervalMs } from './singleton.js'
 
 const DISPATCH_USAGE = `gm-mcp ${BUNDLE_VERSION} dispatch <verb> [--body <json|@file|->] [--raw <text|@file|->] [payload]
 
@@ -187,9 +187,11 @@ const COMMANDS = {
             console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.error}`)
             return 1
         }
+        const autostart = installHttpAutostart({ port })
         const supervisor = await ensureHttpSupervisor({ port })
         console.log(`gm-mcp ${BUNDLE_VERSION}: ${result.reused ? 'reusing' : 'started'} the shared HTTP server (pid ${result.pid}) -- ${result.url}`)
         console.log(`gm-mcp ${BUNDLE_VERSION}: supervisor ${supervisor.reason} (pid ${supervisor.pid ?? 'none'}) -- restarts the server when it stops answering`)
+        console.log(`gm-mcp ${BUNDLE_VERSION}: autostart ${autostart.installed ? (autostart.changed ? 'written' : 'already current') : `skipped (${autostart.reason})`} -- ${autostart.path ?? 'none'}`)
         return 0
     },
     'http-status': async () => {
