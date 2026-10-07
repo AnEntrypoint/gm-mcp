@@ -38972,7 +38972,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
 }
 
 // src/bundle-version.js
-var BUNDLE_VERSION = "0.2.7";
+var BUNDLE_VERSION = "0.2.8";
 
 // src/mcp-server.js
 var numberLike = external_exports.union([external_exports.number(), external_exports.string()]);
@@ -41627,12 +41627,32 @@ function supervisorRunning(state, now = Date.now()) {
   if (!state?.pid || pidAlive(state.pid) !== true) return false;
   return typeof state.ts === "number" && now - state.ts < SUPERVISOR_STATE_STALE_MS;
 }
+function startSupervisorViaTask({ port }) {
+  if (process.platform !== "win32") return null;
+  if ((process.env.GM_MCP_HTTP_AUTOSTART_TASK || "").trim() === "0") return null;
+  const task = supervisorTaskName(port);
+  const query = spawnSync("schtasks", ["/query", "/tn", task], { encoding: "utf8", windowsHide: true });
+  if (query.error || query.status !== 0) {
+    const created = installHttpScheduledTask({ port });
+    if (!created.installed) return null;
+  }
+  const run = spawnSync("schtasks", ["/run", "/tn", task], { encoding: "utf8", windowsHide: true });
+  if (run.error || run.status !== 0) {
+    const reason = run.error?.message || (run.stderr || "").trim() || `schtasks /run exited ${run.status}`;
+    appendDiagnostic("http-supervisor-task-run-refused", { port, task, error: reason });
+    return { port, pid: null, started: false, reason: "task-already-running" };
+  }
+  appendDiagnostic("http-supervisor-task-run", { port, task });
+  return { port, pid: null, started: true, reason: "task-run" };
+}
 async function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
   if (!supervisorEnabled()) return { port, pid: null, started: false, reason: "disabled" };
   const recorded = readSupervisorState(port);
   if (supervisorRunning(recorded)) {
     return { port, pid: recorded.pid, started: false, reason: "already-running" };
   }
+  const viaTask = startSupervisorViaTask({ port });
+  if (viaTask) return viaTask;
   const child = spawn2(process.execPath, [serverEntryPath(), "http-supervise", "--port", String(port), "--interval", String(Math.round(intervalMs / 1e3))], {
     cwd: homedir2(),
     detached: true,
@@ -41677,11 +41697,14 @@ function installHttpAutostart({ port = defaultHttpPort(), intervalMs = superviso
     return { installed: false, reason: describeError(error61) };
   }
 }
-var AUTOSTART_TASK_MINUTES = 5;
+var AUTOSTART_TASK_MINUTES = 1;
+function supervisorTaskName(port = defaultHttpPort()) {
+  return `gm-mcp-http-supervise-${port}`;
+}
 function installHttpScheduledTask({ port = defaultHttpPort() } = {}) {
   if (process.platform !== "win32") return { installed: false, reason: "the task re-arm is a Windows restarter" };
   if ((process.env.GM_MCP_HTTP_AUTOSTART_TASK || "").trim() === "0") return { installed: false, reason: "disabled by GM_MCP_HTTP_AUTOSTART_TASK=0" };
-  const task = `gm-mcp-http-supervise-${port}`;
+  const task = supervisorTaskName(port);
   const entry = serverEntryPath();
   const command2 = `"${process.execPath}" "${entry}" http-supervise --port ${port} --interval ${Math.round(supervisorIntervalMs() / 1e3)}`;
   try {

@@ -52,6 +52,14 @@ what README does not.
   `StreamableHTTPServerTransport` per request; do not hoist them back out to
   save a millisecond. Registering it is `claude mcp add --transport http gm
   http://127.0.0.1:8787/mcp -s user`.
+- **The supervisor has to be started by Task Scheduler, not by whoever asked
+  for it.** `ensureHttpSupervisor` spawning a detached child still makes that
+  child part of the caller's tree, and a stdio server seeding the singleton, the
+  `--http` server, and the supervisor it arms all die in one teardown -- which
+  leaves the port empty until the next task tick. So on Windows the supervisor
+  is started with `schtasks /run /tn gm-mcp-http-supervise-<port>`: the
+  scheduler host parents it, and no session exit reaches it. Off Windows, and
+  with `GM_MCP_HTTP_AUTOSTART_TASK=0`, it falls back to the detached spawn.
 - **A 202 on `notifications/initialized` is the dropout.** The SDK's HTTP client
   reads 202 for that one notification as "accepted, I will push to you later" and
   then opens a standalone `GET /mcp` SSE stream (`_startOrAuthSse`) and holds it
