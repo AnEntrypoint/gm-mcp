@@ -109,6 +109,34 @@ function isJsonRpcMessage(value) {
     return Boolean(value) && typeof value === 'object' && value.jsonrpc === '2.0'
 }
 
+// A notification is a JSON-RPC message with a `method` and no `id`: the client
+// is not asking for anything and there is no reply to send it.
+function isJsonRpcNotification(value) {
+    if (Array.isArray(value)) return value.length > 0 && value.every(isJsonRpcNotification)
+    return Boolean(value) && typeof value === 'object' && value.jsonrpc === '2.0' && typeof value.method === 'string' && value.id === undefined
+}
+
+// Answering a notification 202 Accepted is what makes an MCP client open a
+// standalone `GET /mcp` SSE stream. The SDK client reads 202 on
+// `notifications/initialized` as "accepted, and I will push to you later" and
+// immediately calls `_startOrAuthSse`, then waits on that stream for the life of
+// the session. This server has nothing to push, so the stream is a bare
+// heartbeat -- and it is the session's only long-lived connection. Every time it
+// ends (a client-side idle timeout, a reaped socket, any abort) the SDK raises
+// `transport.onerror("SSE stream disconnected")` and re-GETs at once; a host
+// that counts those errors exhausts its reconnect budget, marks the server
+// failed, and never dials again -- every later call answering "has disconnected"
+// while this server is provably up and still serving other clients. That is the
+// whole dropout, so the notification that opens the stream is answered 200 with
+// no body instead: the client's `send()` falls into its "no requests in message
+// but got 200 OK" branch, releases the connection, and opens no stream at all.
+// Only the status changes, and only for notifications -- a request still gets
+// its JSON reply exactly as before.
+function answerNotificationsWithOk(res) {
+    const writeHead = res.writeHead.bind(res)
+    res.writeHead = (status, ...rest) => (status === 202 ? writeHead(200, ...rest) : writeHead(status, ...rest))
+}
+
 function bodyPreview(buffer) {
     const text = buffer.toString('utf8')
     return text.length > 400 ? `${text.slice(0, 400)}...` : text
@@ -179,6 +207,10 @@ async function serveMcpRequest(req, res) {
             preview: bodyPreview(buffer),
         })
         return
+    }
+    if (isJsonRpcNotification(parsedBody)) {
+        answerNotificationsWithOk(res)
+        appendDiagnostic('http-notification-answered-ok', { path: MCP_PATH, bytes: buffer.length })
     }
     normalizeProtocolVersion(req)
     const mcp = createServer()
@@ -254,6 +286,10 @@ function serveSseHeartbeat(req, res) {
     }, SSE_HEARTBEAT_MS)
     const lifetime = setTimeout(stop, SSE_MAX_LIFETIME_MS)
     lifetime.unref?.()
+    // A client that does open one anyway is told how long to wait before
+    // coming back: without it a stream that ends is retried immediately, in a
+    // loop, and each retry is another transport error the host is counting.
+    res.write(`retry: ${Math.round(SSE_HEARTBEAT_MS / 1000)}\n\n`)
     res.write(`: gm-mcp ${BUNDLE_VERSION} stateless server; no server-initiated messages\n\n`)
     req.on('close', stop)
     res.on('close', stop)

@@ -114,6 +114,21 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
         return { url: httpMcpUrl(port), port, pid: live.pid ?? null, reused: true, version: live.version ?? null }
     }
 
+    // One probe that times out is not proof of death. This box runs GPU jobs,
+    // index passes and dispatch storms that hold a busy server past the probe's
+    // 1.5 s budget, and the supervisor acts on a null probe as "restart the
+    // server" -- so a busy moment used to spawn a duplicate server that then
+    // died on EADDRINUSE, logged as a restart of a server that never went away.
+    // `http-supervisor-restarted` at 2026-10-07T13:52:44 is one of those: the
+    // pid it reports is the server that had been up the whole time. Confirm
+    // before treating the port as free.
+    const confirmed = await probeHealth(port)
+    if (confirmed) {
+        appendDiagnostic('http-singleton-probe-false-negative', { port, pid: confirmed.pid ?? null })
+        writeSingletonState({ port, pid: confirmed.pid ?? null, url: httpMcpUrl(port), ts: Date.now(), reused: true })
+        return { url: httpMcpUrl(port), port, pid: confirmed.pid ?? null, reused: true, version: confirmed.version ?? null }
+    }
+
     const recorded = readSingletonState(port)
     if (recorded?.pid && pidAlive(recorded.pid) === true) {
         const late = await waitForHealth(port, 5_000)

@@ -52,6 +52,38 @@ what README does not.
   `StreamableHTTPServerTransport` per request; do not hoist them back out to
   save a millisecond. Registering it is `claude mcp add --transport http gm
   http://127.0.0.1:8787/mcp -s user`.
+- **A 202 on `notifications/initialized` is the dropout.** The SDK's HTTP client
+  reads 202 for that one notification as "accepted, I will push to you later" and
+  then opens a standalone `GET /mcp` SSE stream (`_startOrAuthSse`) and holds it
+  for the life of the session. This server has nothing to push, so that stream is
+  a bare heartbeat and is the session's only long-lived connection; every time it
+  ends -- a client-side idle timeout, a reaped socket, any abort -- the SDK raises
+  `transport.onerror("SSE stream disconnected")` and re-GETs immediately. A host
+  that counts those errors exhausts its reconnect budget, marks the server failed,
+  and never dials again: every later `mcp__gm__gm` call answers "has disconnected"
+  while the server is provably up and still serving *other* clients. That is why
+  the failure reads as per-session and lands "after a few dispatches or minutes of
+  idle" -- an idle session's stream dies, a busy one keeps replacing it with
+  POSTs. Measured on this box: the 0.2.5 bundle opened 1 SSE stream per connect,
+  the 0.2.6 bundle opens 0. `src/http-transport.js` therefore answers a JSON-RPC
+  **notification** 200 (not 202) by remapping the SDK's status in
+  `answerNotificationsWithOk`; the client's `send()` then falls into its
+  "no requests in message but got 200 OK" branch, releases the connection and
+  opens no stream. Only the status changes, and only for notifications -- a
+  request still gets its JSON reply. Do not "restore" the 202 for spec tidiness:
+  the standalone stream is pure liability for a server with nothing to push. The
+  `GET /mcp` handler stays for clients that open one anyway, and now sends
+  `retry:` so a stream that ends is not retried in a hot loop.
+- **The supervisor's health probe false-negatives on a busy server.** `probeHealth`
+  gives a request 1.5 s; this box runs GPU jobs and index passes that hold a busy
+  server past that, and the supervisor reads a null probe as "restart the server",
+  spawning a duplicate that then dies on EADDRINUSE and is logged as a restart of
+  a server that never went away (`http-supervisor-restarted` at
+  2026-10-07T13:52:44 names pid 24552, up the whole time). `ensureHttpSingleton`
+  now probes a second time before treating the port as free and logs
+  `http-singleton-probe-false-negative` when the first probe was wrong. It does
+  not kill the live server -- but it is the "is the supervisor killing it?" answer:
+  it never kills, it only spawns noisily.
 - **Runner recovery.** The daemon exits on purpose and depends on this file to
   bring it back: it self-recycles when idle or over its wasm memory ceiling
   (`self-recycling after 3600000ms fully idle ... next real dispatch spawns a
