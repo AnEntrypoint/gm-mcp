@@ -1,10 +1,10 @@
-import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { pidAlive } from './dispatch.js'
-import { appendDiagnostic, describeError } from './server-log.js'
+import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { keepServingOnAsyncFailure, logSignalExits } from './transport-guard.js'
 import { DEFAULT_HOST, DEFAULT_PORT, HEALTH_PATH, MCP_PATH } from './http-transport.js'
 
@@ -18,6 +18,16 @@ const SUPERVISOR_INTERVAL_MS = 15_000
 // to be replaced in about a second, because that is the window in which a
 // client's one and only connect attempt is refused.
 const SUPERVISOR_WATCH_MS = 1_000
+// A supervisor proves it is alive by refreshing its own state file. A pid alone
+// cannot: Windows hands a freed pid to an unrelated process within minutes, so
+// `pidAlive(recorded.pid)` answers "some process holds that number", not "the
+// supervisor is running" -- and a re-arm that trusts it leaves the MCP server
+// watched by nobody while believing it is watched. That is the 2026-10-07
+// outage: the supervisor's pid stayed in its state file after it exited, the
+// server's re-arm saw a live pid and no-opped for the rest of its life, and
+// when the server itself died nothing replaced it.
+const SUPERVISOR_STATE_BEAT_MS = 15_000
+const SUPERVISOR_STATE_STALE_MS = 60_000
 
 function agentplugDir() {
     const override = (process.env.AGENTPLUG_HOME || '').trim()
@@ -88,17 +98,34 @@ async function waitForHealth(port, timeoutMs) {
     return null
 }
 
+function singletonLogFilePath(port) {
+    const log = logFilePath()
+    return path.join(path.dirname(log), `gm-mcp-http-${port}.log`)
+}
+
+// A detached server's stdout and stderr used to be 'ignore', so the one death
+// that matters -- a V8 abort, which skips every exit handler and writes to
+// stderr -- left no trace at all and the post-mortem had no cause to find.
 function spawnSingleton(port) {
     const entry = serverEntryPath()
+    const log = singletonLogFilePath(port)
+    let fds
+    try {
+        mkdirSync(path.dirname(log), { recursive: true })
+        const fd = openSync(log, 'a')
+        fds = [fd, fd]
+    } catch {
+        fds = null
+    }
     const child = spawn(process.execPath, [entry, '--http', '--port', String(port)], {
         cwd: homedir(),
         detached: true,
-        stdio: 'ignore',
+        stdio: fds ? ['ignore', fds[0], fds[1]] : 'ignore',
         windowsHide: true,
         env: { ...process.env, GM_MCP_TRANSPORT: 'http' },
     })
     child.on('error', (error) => {
-        appendDiagnostic('http-singleton-spawn-error', { port, entry, error: describeError(error) })
+        appendDiagnostic('http-singleton-spawn-error', { port, entry, log: fds ? log : null, error: describeError(error) })
     })
     child.unref()
     return child.pid ?? null
@@ -181,6 +208,14 @@ function writeSupervisorState(state) {
     }
 }
 
+// "A live pid owns this port" is only half a liveness test; the other half is
+// that the pid answered recently. Without the beat, one exited supervisor
+// blocks every later re-arm for as long as Windows keeps its pid recycled.
+function supervisorRunning(state, now = Date.now()) {
+    if (!state?.pid || pidAlive(state.pid) !== true) return false
+    return typeof state.ts === 'number' && now - state.ts < SUPERVISOR_STATE_STALE_MS
+}
+
 // The server is the only thing that ever starts itself, so a server that dies
 // stays dead: nothing on the http registration's path runs gm at all, and a
 // session whose client connected once never reconnects. This is the daemon
@@ -189,7 +224,7 @@ function writeSupervisorState(state) {
 export async function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
     if (!supervisorEnabled()) return { port, pid: null, started: false, reason: 'disabled' }
     const recorded = readSupervisorState(port)
-    if (recorded?.pid && pidAlive(recorded.pid) === true) {
+    if (supervisorRunning(recorded)) {
         return { port, pid: recorded.pid, started: false, reason: 'already-running' }
     }
     const child = spawn(process.execPath, [serverEntryPath(), 'http-supervise', '--port', String(port), '--interval', String(Math.round(intervalMs / 1000))], {
@@ -247,19 +282,53 @@ export function installHttpAutostart({ port = defaultHttpPort(), intervalMs = su
     }
 }
 
+// The logon autostart covers a reboot, not a kill: a server and its supervisor
+// taken down together leave nothing alive to re-arm either, and that pair is
+// exactly what a parent process teardown takes with it. A per-user task is the
+// one restarter outside both families, so it is installed on every supervisor
+// start and idempotently re-written; a run whose port already has a supervisor
+// exits at once, so the task costs one short-lived node per interval.
+const AUTOSTART_TASK_MINUTES = 5
+
+export function installHttpScheduledTask({ port = defaultHttpPort() } = {}) {
+    if (process.platform !== 'win32') return { installed: false, reason: 'the task re-arm is a Windows restarter' }
+    if ((process.env.GM_MCP_HTTP_AUTOSTART_TASK || '').trim() === '0') return { installed: false, reason: 'disabled by GM_MCP_HTTP_AUTOSTART_TASK=0' }
+    const task = `gm-mcp-http-supervise-${port}`
+    const entry = serverEntryPath()
+    const command = `"${process.execPath}" "${entry}" http-supervise --port ${port} --interval ${Math.round(supervisorIntervalMs() / 1000)}`
+    try {
+        const result = spawnSync('schtasks', ['/create', '/tn', task, '/tr', command, '/sc', 'MINUTE', '/mo', String(AUTOSTART_TASK_MINUTES), '/f'], {
+            encoding: 'utf8',
+            windowsHide: true,
+        })
+        if (result.error || result.status !== 0) {
+            const reason = result.error?.message || (result.stderr || '').trim() || `schtasks exited ${result.status}`
+            appendDiagnostic('http-autostart-task-install-failed', { port, task, error: reason })
+            return { installed: false, reason }
+        }
+        appendDiagnostic('http-autostart-task-installed', { port, task, minutes: AUTOSTART_TASK_MINUTES })
+        return { installed: true, task, minutes: AUTOSTART_TASK_MINUTES }
+    } catch (error) {
+        appendDiagnostic('http-autostart-task-install-failed', { port, task, error: describeError(error) })
+        return { installed: false, reason: describeError(error) }
+    }
+}
+
 export async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
     const recorded = readSupervisorState(port)
-    if (recorded?.pid && recorded.pid !== process.pid && pidAlive(recorded.pid) === true) {
+    if (recorded?.pid && recorded.pid !== process.pid && supervisorRunning(recorded)) {
         appendDiagnostic('http-supervisor-dup-exit', { port, owner_pid: recorded.pid, pid: process.pid })
         return { port, supervised: false, reason: 'another supervisor owns this port' }
     }
     keepServingOnAsyncFailure()
     logSignalExits()
     installHttpAutostart({ port, intervalMs })
+    installHttpScheduledTask({ port })
     writeSupervisorState({ port, pid: process.pid, url: httpMcpUrl(port), ts: Date.now() })
     appendDiagnostic('http-supervisor-start', { port, pid: process.pid, interval_ms: intervalMs })
     let serverPid = null
     let nextProbeAt = 0
+    let lastStateBeatAt = Date.now()
     while (true) {
         // A server that exits between probes used to stay dead for the rest of
         // the interval, and Claude Code connects to this port exactly once, when
@@ -270,20 +339,38 @@ export async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs =
         // exit is visible at once; the probe still runs on its interval because
         // a server can keep its pid and stop answering.
         const serverExited = serverPid !== null && pidAlive(serverPid) === false
-        if (Date.now() >= nextProbeAt || serverExited) {
-            const health = await probeHealth(port)
-            if (health) {
-                serverPid = health.pid ?? serverPid
-            } else {
-                const result = await ensureHttpSingleton({ port })
-                appendDiagnostic(result.url ? 'http-supervisor-restarted' : 'http-supervisor-restart-failed', {
-                    port,
-                    pid: result.pid ?? null,
-                    error: result.error ?? null,
-                    noticed_by: serverExited ? 'pid-watch' : 'health-probe',
-                })
-                serverPid = result.pid ?? null
+        try {
+            if (Date.now() >= nextProbeAt || serverExited) {
+                const health = await probeHealth(port)
+                if (health) {
+                    serverPid = health.pid ?? serverPid
+                } else {
+                    const result = await ensureHttpSingleton({ port })
+                    appendDiagnostic(result.url ? 'http-supervisor-restarted' : 'http-supervisor-restart-failed', {
+                        port,
+                        pid: result.pid ?? null,
+                        error: result.error ?? null,
+                        noticed_by: serverExited ? 'pid-watch' : 'health-probe',
+                    })
+                    serverPid = result.pid ?? null
+                }
+                nextProbeAt = Date.now() + intervalMs
             }
+            // One throw out of a probe used to leave the loop, return from the
+            // supervisor, and exit the process -- supervision over just because
+            // a single fetch rejected. A supervisor's only job is to outlive
+            // faults, so a round that fails is a round to repeat.
+            if (Date.now() - lastStateBeatAt >= SUPERVISOR_STATE_BEAT_MS) {
+                const owner = readSupervisorState(port)
+                if (owner?.pid && owner.pid !== process.pid) {
+                    appendDiagnostic('http-supervisor-superseded', { port, owner_pid: owner.pid, pid: process.pid })
+                    return { port, supervised: false, reason: 'another supervisor took this port' }
+                }
+                writeSupervisorState({ port, pid: process.pid, url: httpMcpUrl(port), ts: Date.now() })
+                lastStateBeatAt = Date.now()
+            }
+        } catch (error) {
+            appendDiagnostic('http-supervisor-round-failed', { port, error: describeError(error), server_pid: serverPid })
             nextProbeAt = Date.now() + intervalMs
         }
         await new Promise((resolve) => setTimeout(resolve, SUPERVISOR_WATCH_MS))
