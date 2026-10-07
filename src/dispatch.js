@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn, execFileSync } from 'node:child_process'
 import * as yaml from 'js-yaml'
-import { cleanResponse, compactWireResponse, renderVerbatimFileText, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 
 function projectRootFor(dir) {
     const resolved = path.resolve(dir)
@@ -39,9 +39,12 @@ const SPOOL_COMPONENT_BYTE_LIMITS = {
 }
 
 export function unsafeSpoolName(role, value) {
+    if (role === 'session_id' && (typeof value !== 'string' || !/^[A-Za-z0-9_.-]{1,150}$/.test(value) || value === '.' || value === '..')) {
+        return 'session_id must be 1-150 ASCII letters, digits, dots, underscores or hyphens, excluding dot components'
+    }
     if (typeof value !== 'string' || !value) return null
-    if (value.includes('\0') || value === '.' || value === '..' || value.includes('/') || value.includes('\\')) {
-        return `${role} ${JSON.stringify(value)} is not a single spool name component: it carries a NUL byte, a path separator, or is a dot component`
+    if (value.includes('\0') || /[\r\n]/.test(value) || value === '.' || value === '..' || value.includes('/') || value.includes('\\')) {
+        return `${role} ${JSON.stringify(value)} is not a single spool name component: it carries a NUL byte, a line break, a path separator, or is a dot component`
     }
     const byteLimit = SPOOL_COMPONENT_BYTE_LIMITS[role]
     const byteLength = Buffer.byteLength(value)
@@ -946,7 +949,10 @@ function resumeDisclosure(task, landedAtMs, callStartedAtMs) {
 
 function carriedNoFailure(out) {
     return Boolean(out) && typeof out === 'object' && !Array.isArray(out)
-        && out.error === undefined && out.timed_out !== true && out.ok !== false
+        && out.error === undefined && out.error_code === undefined
+        && out.dispatch_ledger_error === undefined && out.dream_rsi_observation_error === undefined
+        && out.timed_out !== true && out.ok !== false
+        && (!out.data || typeof out.data !== 'object' || Array.isArray(out.data) || carriedNoFailure(out.data))
 }
 
 const DISPATCH_WAIT_DISCLOSED_AT_MS = 5000
@@ -994,8 +1000,61 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
     }
 }
 
-export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal) {
+
+const ownerHeaderCapabilityByRuntime = new Map()
+const OWNER_HEADER_CAPABILITY_CACHE_MAX = 64
+
+function ownerHeaderRuntimeIdentity(root) {
+    const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    const hash = status?.loaded_plugin_content_sha256?.gm
+    const slots = status?.shared_pool_slot_content_sha256?.gm
+    if (!status || !Number.isSafeInteger(status.pid) || pidAlive(status.pid) !== true
+        || !isFreshDaemonTimestamp(status.ts, Date.now())
+        || typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)
+        || !Array.isArray(slots) || !slots.some(value => value === hash)
+        || slots.some(value => value !== null && value !== hash)
+        || status.pending_store_swaps?.gm
+        || (Array.isArray(status.mixed_version_pools) && status.mixed_version_pools.length)) return null
+    const project = readJsonFile(path.join(root, '.gm', 'exec-spool', '.status.json'))
+    if (project && (project.pid !== status.pid || !isFreshDaemonTimestamp(project.ts, Date.now()))) return null
+    return JSON.stringify([root, GLOBAL_DAEMON_STATUS_PATH, status.pid, status.daemon_boot_ts, hash])
+}
+
+async function plainTextOwnerTransport(root, sessionId, signal) {
+    const before = ownerHeaderRuntimeIdentity(root)
+    if (before && ownerHeaderCapabilityByRuntime.has(before)) {
+        const cached = await ownerHeaderCapabilityByRuntime.get(before)
+        return ownerHeaderRuntimeIdentity(root) === before ? cached : 'unverified'
+    }
+    const probe = async () => {
+        let response
+        try {
+            await gmDispatch({
+                verb: 'phase-status', body: {}, session_id: sessionId,
+                cwd: root, timeout_seconds: 20, full_response: true,
+            }, signal, value => { response = value })
+        } catch { return 'unverified' }
+        if (!before || ownerHeaderRuntimeIdentity(root) !== before) return 'unverified'
+        if (response?.gm_session_header_version === 1) return 'header-v1'
+        if (response?.ok === true && response.timed_out !== true) return 'legacy-unverified'
+        return 'unverified'
+    }
+    const pending = probe()
+    if (before) {
+        if (ownerHeaderCapabilityByRuntime.size >= OWNER_HEADER_CAPABILITY_CACHE_MAX) {
+            ownerHeaderCapabilityByRuntime.delete(ownerHeaderCapabilityByRuntime.keys().next().value)
+        }
+        ownerHeaderCapabilityByRuntime.set(before, pending)
+    }
+    const transport = await pending
+    if (before && transport === 'unverified'
+        && ownerHeaderCapabilityByRuntime.get(before) === pending) ownerHeaderCapabilityByRuntime.delete(before)
+    return transport
+}
+
+export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal, responseValueObserver) {
     if (!verb) return 'error: verb required'
+    if (typeof session_id === 'string') session_id = session_id.trim()
     if (!session_id) return 'error: session_id required'
     const n = resume_task || nextN(session_id)
     const unsafeName = unsafeSpoolName('verb', verb) || unsafeSpoolName('session_id', session_id) || unsafeSpoolName('task', n)
@@ -1031,6 +1090,7 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, globCoerced.value), root, session_id)
     }
 
+    let ownerTransport
     const inPath = path.join(inDir, `${n}.txt`)
     const outPath = path.join(outDir, `${verb}-${n}.json`)
 
@@ -1057,7 +1117,10 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         ensureSpoolRunnerRunning(root)
         startRunnerWatchdog(root)
         if (isPlainText) {
-            publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds))
+            ownerTransport = await plainTextOwnerTransport(root, session_id, signal)
+            if (signal?.aborted) return toYaml({ error: 'aborted', owner_transport: ownerTransport, wrote_no_new_dispatch: true })
+            const plaintext = withTimeoutMsPrefix(verb, raw_body, timeout_seconds)
+            publishSpoolRequest(inDir, inPath, n, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
         } else {
             const fullBody = { ...normalizedBody, session_id }
             publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody))
@@ -1077,17 +1140,20 @@ export async function gmDispatch({ verb, body, raw_body, session_id, cwd, timeou
         try {
             opened = openSpoolRegularFile(root, outPath)
             landedAtMs = opened.mtimeMs
-            const parsed = unpackExecOutputEnvelope(verb, JSON.parse(readAllBounded(opened.fd, opened.size)))
+            const original = JSON.parse(readAllBounded(opened.fd, opened.size))
+            responseValueObserver?.(original)
+            const parsed = full_response ? original : unpackExecOutputEnvelope(verb, original)
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
-            const cleaned = cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
+            const cleaned = full_response ? parsed : cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
             let out = cleaned
-            if (cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
+            if (!full_response && cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
                 const { data, ...rest } = cleaned
                 const collides = Object.keys(data).some(k => k in rest)
                 if (!collides) out = { ...rest, ...data }
             }
-            if (!full_response && carriedNoFailure(out)) out = compactWireResponse(out, outPath)
+            if (ownerTransport && ownerTransport !== 'header-v1' && out && typeof out === 'object' && !Array.isArray(out)) out = { ...out, owner_transport: ownerTransport }
+            if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
             else out = withDispatchWait(out, Date.now() - callStartedAtMs)
             if (out && typeof out === 'object' && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {

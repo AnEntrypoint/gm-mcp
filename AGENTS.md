@@ -89,19 +89,21 @@ what README does not.
   back as a pointer and callers gave up on the verb and reached for a host
   file-read tool instead, and `fs_read`'s own daemon-side `offset`/`limit`/
   `max_bytes` were never the cause -- they were being cut down again on the way
-  out. `max_chars` is the per-dispatch override of all three and `full_response:
-  true` lifts the cap to `LONG_TEXT_INLINE_MAX_CEILING` (1048576), so "every
-  field verbatim" in the tool description stays true. An exec-family field
+  out. `max_chars` overrides the default limits. `full_response: true` bypasses
+  cleaning, data flattening, native-envelope decoding and wire compaction, so
+  every original guest field and its data layout remain intact. The response
+  file is still bounded by the 4 MiB read limit. An exec-family field
   (`stdout`/`stderr`/`result`) otherwise keeps its own
   `EXEC_OUTPUT_FIELD_TRUNCATE_AT` budget and its `result_file` pointer, so a
   plain dispatch still reads as it did before any of these budgets existed.
-  `compactWireResponse` is the lossy stage and is
-  the one callers can opt out of with `full_response: true`, which must stay
-  byte-identical to the `cleanResponse` output alone -- that identity is the
-  regression test, so any new compaction rule has to keep it. Compaction runs
-  only when the response carries no failure: a payload with `error`,
-  `timed_out`, or `ok: false` is returned whole, because a caller debugging a
-  failure needs every field.
+  Default responses retain actionable `dispatch_id` evidence. The
+  `request_fingerprint` is omitted by default and retained in full responses.
+  Compaction runs
+  only when the response carries no failure. Faults retain diagnostics, except
+  that default responses omit `stdout` when it decodes to a nonempty JSON object
+  whose every field is present and deeply equal on the containing fault object.
+  This removes a repeated serialization without removing unique diagnostics;
+  the response names the original spool file. `full_response: true` retains it.
 
 - Which fields compact, and why, is a judgment the code cannot restate:
   dropped outright are `route_hint`, `reply_hash`, `orient_nouns` (pure
@@ -152,3 +154,11 @@ what README does not.
   because the shared daemon (100+ registered projects) serves a cold project
   only after its other work (`queue_wait_ms` 40-90 s). Non-git cwds need no
   `git_root_override`; the timed-out note says so and points at `resume_task`.
+
+- Plain-text ownership uses a byte-zero `gm_session_id=<owner>\n` header before
+  the timeout or browser page directive. The guest advertises
+  `gm_session_header_version: 1`. MCP probes with safe JSON `phase-status` and
+  caches only a coherent result bound to project, daemon boot, PID and GM hash;
+  every nonempty GM pool slot must agree. A new hash or a mixed pool invalidates
+  the result. Legacy or unverified guests receive the original text with
+  `owner_transport: legacy-unverified` or `unverified`; no execution is retried.
