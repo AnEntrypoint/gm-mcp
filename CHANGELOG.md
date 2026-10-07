@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased - headless-browser verbs removed from the wrapper
+
+`serp`, `browser` and `cdp` are no longer named anywhere in the wrapper: the plain-text-body set is derived from the exec family alone, the tool descriptions and `raw_body`/`body` field descriptions list only the exec-family stems, and the README and AGENTS.md drop the references. Exec-family plain-text handling is unchanged.
+
 ## Unreleased - glob filters forwarded as documented, and a slow dispatch discloses its wait
 
 Glob filters no longer reject a leading `!` or brace lists: the wasm already excludes, merges aliases and expands braces, so the wrapper only validates types and blanks. `exclude_glob`/`exclude_globs` are validated the same way. Replies that waited 5 s or more carry `dispatch_waited_ms`. `timeout_ms` coerces from a numeric string like the other codesearch integers.
