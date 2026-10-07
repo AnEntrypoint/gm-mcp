@@ -154,7 +154,7 @@ client that disappears and comes back is just another request, and it binds
 `127.0.0.1` only. Manage it with:
 
 ```
-node C:\Users\user\.gm-tools\gm-mcp-server.mjs ensure-http          # start if nothing answers, print the url
+node C:\Users\user\.gm-tools\gm-mcp-server.mjs ensure-http          # start if nothing answers, arm the supervisor, print the url
 node C:\Users\user\.gm-tools\gm-mcp-server.mjs http-status          # is it answering
 node C:\Users\user\.gm-tools\gm-mcp-server.mjs --http --port 8787   # run it in the foreground
 ```
@@ -164,6 +164,27 @@ shared HTTP server detached if nothing answers, so the durable transport is up
 before any client asks for it. `GM_MCP_HTTP_SINGLETON=0` opts out,
 `GM_MCP_HTTP_PORT` moves the port. Because no state is carried between requests,
 a restart of the HTTP server never loses an in-flight dispatch.
+
+### Across a reboot
+
+Nothing starts the HTTP server at login, so after a reboot the registration points at a dead port until something runs it. `ensure-http` is that something, and it is idempotent: it health-probes the port, starts the shared server only when nothing answers, arms the supervisor, and prints the url either way. Put it wherever your OS runs things at login -- Startup folder, Task Scheduler, a launchd agent, a systemd user unit:
+
+```bash
+node ~/.gm-tools/gm-mcp-server.mjs ensure-http                     # Unix
+node C:\Users\you\.gm-tools\gm-mcp-server.mjs ensure-http          # Windows
+```
+
+The supervisor is the part that has to survive, not the server. It is a detached `http-supervise` sibling that probes `/health` every 15 s (`GM_MCP_HTTP_SUPERVISOR_INTERVAL_SECONDS` moves it) and runs the same start path when the answer stops coming. `ensure-http` arms it on every run, including a run that found the server already up, so a supervisor that was killed comes back on the next `ensure-http` instead of leaving the durable transport unwatched. A `--http` server arms one for itself on start, and `GM_MCP_HTTP_SUPERVISOR=0` opts out of both -- `ensure-http` then prints `supervisor disabled`.
+
+Run the supervisor directly instead when you would rather supervise than probe once:
+
+```bash
+node ~/.gm-tools/gm-mcp-server.mjs http-supervise [--port N] [--interval S]
+```
+
+It is the same loop in the foreground, so it is also what a service manager wants as its command. Two supervisors never share a port: a second one finds the first one's pid in the state file and exits with `another supervisor owns this port`.
+
+State, both under `~/.agentplug` (`$AGENTPLUG_HOME` moves it): `gm-mcp-http.json` holds the server's pid and url, `gm-mcp-http-supervisor-<port>.json` the supervisor's. The health probe is the authority, so a stale file naming a dead pid never blocks a fresh start.
 
 ## Development
 
