@@ -213,7 +213,9 @@ wire_compacted:
 
 Long prose is cut to a 160-char excerpt ending in `...+<n>`, so an abbreviated
 field always says how much is missing. `full_response: true` returns the
-pre-compaction payload byte for byte.
+original guest fields and data layout, including `dispatch_id` and
+`request_fingerprint`, without cleaning or compaction. MCP wait and resume
+metadata remains separate.
 
 `phase_history` retains the newest five transitions in its existing order. The
 `wire_compacted.shortened` entry records retained/total counts and points to the
@@ -269,9 +271,9 @@ knob in the `mcpServers.gm` entry:
 
 Non-numeric, zero or negative values fall back to the default. `max_chars` is
 the per-dispatch override of all three: it is an MCP argument, so it never
-reaches the verb's own body. `full_response: true` lifts the text cap to the
-ceiling as well as skipping wire compaction, so it really does return every
-field verbatim.
+reaches the verb's own body. `full_response: true` bypasses text caps, cleaning, data flattening and
+wire compaction. The original response file remains subject to the bounded
+4 MiB read limit.
 
 Measure it against any real dispatch:
 

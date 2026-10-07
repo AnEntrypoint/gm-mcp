@@ -1,4 +1,4 @@
-const NOISE_KEYS = new Set(['dispatch_id', 'request_fingerprint'])
+const NOISE_KEYS = new Set(['request_fingerprint'])
 
 function envPositiveInt(name, fallback) {
     const raw = Number(process.env[name])
@@ -15,7 +15,7 @@ const FILE_READ_INLINE_MAX = Math.min(envPositiveInt('GM_MCP_FILE_READ_INLINE_MA
 
 export { PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING }
 
-const NEVER_TRUNCATE_KEYS = new Set(['error', 'reason', 'residuals'])
+const NEVER_TRUNCATE_KEYS = new Set(['error', 'reason', 'residuals', 'dispatch_ledger_error', 'dream_rsi_observation_error', 'detail'])
 
 const NO_KEYS = new Set()
 
@@ -266,12 +266,15 @@ function compactSupplyChainScan(scan) {
 
 function compactDreamRsiStrategy(strategy) {
     if (!strategy || typeof strategy !== 'object') return strategy
+    if (strategy.ok === false || strategy.error !== undefined || strategy.error_code !== undefined) return strategy
     const evidence = Array.isArray(strategy.evidence) ? strategy.evidence : []
     return withoutBlankValues({
         selection: strategy.selection,
         observations: strategy.observation_count,
         succeeded: strategy.successful_dispatch_count,
         failed: strategy.failed_dispatch_count,
+        unverified: strategy.unverified_dispatch_count,
+        unscored: strategy.unscored_dispatch_count,
         gate_drift_failures: strategy.gate_drift_failure_count,
         evidence_rows: evidence.length,
     })
@@ -279,6 +282,7 @@ function compactDreamRsiStrategy(strategy) {
 
 function compactDreamRsiReplay(replay) {
     if (!replay || typeof replay !== 'object') return replay
+    if (replay.ok === false || replay.error !== undefined || replay.error_code !== undefined) return replay
     const replays = Array.isArray(replay.replays) ? replay.replays : []
     return withoutBlankValues({
         ok: replay.ok,
@@ -325,6 +329,51 @@ function countOutputRepeatsStructuredCounts(response) {
         && counts.length === output.length && counts.every((row, index) =>
             row && typeof row.path === 'string' && Number.isSafeInteger(row.count) && row.count >= 0
             && output[index] === `${row.path}:${row.count}`)
+}
+
+
+function equalJsonValues(left, right, depth = 0) {
+    if (left === right) return true
+    if (depth >= 128) return false
+    if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
+    if (Array.isArray(left) !== Array.isArray(right)) return false
+    const keys = Object.keys(left)
+    return keys.length === Object.keys(right).length
+        && keys.every(key => Object.hasOwn(right, key) && equalJsonValues(left[key], right[key], depth + 1))
+}
+
+export function omitRepeatedFaultStdout(response, outPath) {
+    if (!response || typeof response !== 'object' || Array.isArray(response)) return response
+    const omitted = []
+    const omitAt = (object, prefix, depth = 0) => {
+        if (!object || typeof object !== 'object' || Array.isArray(object) || depth >= 32) return object
+        let next = object
+        if (object.data && typeof object.data === 'object' && !Array.isArray(object.data)) {
+            const data = omitAt(object.data, prefix + 'data.', depth + 1)
+            if (data !== object.data) next = { ...object, data }
+        }
+        if (typeof object.stdout !== 'string'
+            || !(object.ok === false || object.error !== undefined || object.error_code !== undefined)) return next
+        let parsed
+        try { parsed = JSON.parse(object.stdout) } catch { return next }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return next
+        const keys = Object.keys(parsed)
+        if (!keys.length || !keys.every(key => Object.hasOwn(object, key) && equalJsonValues(parsed[key], object[key]))) return next
+        const { stdout, ...rest } = next
+        omitted.push(prefix + 'stdout')
+        return rest
+    }
+    const result = omitAt(response, '')
+    if (!omitted.length) return response
+    return {
+        ...result,
+        wire_compacted: {
+            ...(result.wire_compacted || {}),
+            omitted: [result.wire_compacted?.omitted, ...omitted].filter(Boolean).join(' '),
+            full_payload_at: outPath,
+            full_payload_via: WIRE_FULL_PAYLOAD_VIA,
+        },
+    }
 }
 
 export function compactWireResponse(response, outPath, receiptVerb = response?.verb) {
