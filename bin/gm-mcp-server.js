@@ -41773,7 +41773,9 @@ var COMMANDS = {
       console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.error}`);
       return 1;
     }
+    const supervisor = await ensureHttpSupervisor({ port });
     console.log(`gm-mcp ${BUNDLE_VERSION}: ${result.reused ? "reusing" : "started"} the shared HTTP server (pid ${result.pid}) -- ${result.url}`);
+    console.log(`gm-mcp ${BUNDLE_VERSION}: supervisor ${supervisor.reason} (pid ${supervisor.pid ?? "none"}) -- restarts the server when it stops answering`);
     return 0;
   },
   "http-status": async () => {
@@ -41800,7 +41802,7 @@ usage:
   gm-mcp-server.js --http [--port N] [--host H]
                                    serve MCP streamable HTTP on http://127.0.0.1:N/mcp
                                    (stateless, so a dropped client is just another request)
-  gm-mcp-server.js ensure-http     start the shared HTTP server if none is listening and print its url
+  gm-mcp-server.js ensure-http     start the shared HTTP server if none is listening, arm its supervisor and print its url
   gm-mcp-server.js http-status     report whether the shared HTTP server is answering
   gm-mcp-server.js http-supervise [--port N] [--interval S]
                                    watch the shared HTTP server and restart it when it stops answering
