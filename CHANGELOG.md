@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased - the supervisor is started by Task Scheduler, not by the session that asked
+
+Measured 2026-10-07 on 8787: three supervisor + server pairs started inside a
+caller's process tree (`http-singleton-started` at 18:40:18, 18:49:56 and
+18:50:17) were all gone within ten minutes, each with no `exit` record and
+nothing on stderr -- killed, not crashed -- while the pair Task Scheduler
+started at 18:55:53, whose parent is `svchost.exe`, is the one still serving.
+`ensureHttpSupervisor` spawned the supervisor as a child of whatever asked for
+it: a stdio server seeding the singleton, a `--http` server, or a CLI run.
+`detached: true` makes a child outlive its parent's console, not its parent's
+tree, so one teardown took the supervisor and the server it had started, and
+the port stayed empty until the next task tick.
+
+- `ensureHttpSupervisor` starts the supervisor through its own scheduled task
+  (`schtasks /run /tn gm-mcp-http-supervise-<port>`) on Windows, creating the
+  task first when it is missing, so the scheduler host parents it and no
+  session exit can reach it. Off Windows, and with
+  `GM_MCP_HTTP_AUTOSTART_TASK=0`, it still spawns the detached child. A `/run`
+  that refuses is reported as `task-already-running`: an instance of that task
+  *is* `http-supervise`, so the refusal is itself proof a supervisor holds the
+  port (measured 0x80070420 while one was up) and spawning anyway would race it.
+- the task interval is 1 minute instead of 5. A supervisor started through the
+  task *is* the task's instance, so the scheduler does not fire again while it
+  lives and the short interval costs no extra process in steady state; it is
+  only the bound on the window after one kill takes both processes.
+
+BUNDLE_VERSION 0.2.8, deployed to `~/.gm-tools/gm-mcp-server.mjs`.
+
 ## Unreleased - a supervisor that stopped running is replaced, not trusted
 
 Measured 2026-10-07: the shared server on 8787 (pid 18824) stopped logging at
