@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased - the shared HTTP server is supervised, so a dead one comes back instead of stranding every session
+
+On 2026-10-07 the shared HTTP singleton (pid 8396) stopped serving in the same
+host-memory window that stack-overflowed the daemon's `update-poll` thread, and
+nothing brought it back: port 8787 answered nothing for 84 minutes (04:43 ->
+06:07 local), and it only returned because some other process happened to run
+`ensure-http`. A session registered with `{"type":"http","url":"..."}` runs no
+gm process of its own, so nothing on that path can start the server -- and a
+client that connected once and lost the pipe does not reconnect on its own, so
+its `mcp__gm__gm` reads "has disconnected" for the rest of the session. The
+daemon has a guard that restarts it; the durable transport had none.
+
+A `--http` server now arms a detached supervisor once the listen succeeds:
+`runHttpSupervisor` polls `/health` every 15 s (`GM_MCP_HTTP_SUPERVISOR_INTERVAL_SECONDS`)
+and calls `ensureHttpSingleton` when the port stops answering, logging
+`http-supervisor-restarted` or `http-supervisor-restart-failed`. `gm-mcp
+http-supervise [--port N] [--interval S]` runs one by hand, which is how an
+already-running server gets supervised without a restart. One supervisor per
+port, recorded in `~/.agentplug/gm-mcp-http-supervisor-<port>.json` and
+re-spawned only when that pid is gone; `GM_MCP_HTTP_SUPERVISOR=0` disables it,
+and the supervisor passes that down to everything it spawns so a restarted
+server does not seed a second supervisor that would race it.
+
+Measured on a throwaway port: killing a supervised server brought it back in
+17 s with the next tick, and the restarted server spawned no supervisor of its
+own.
+
 ## Unreleased - an unsupported `mcp-protocol-version` is answered, not refused
 
 Current Claude Code advertises protocol version `2026-07-28`. The bundled SDK

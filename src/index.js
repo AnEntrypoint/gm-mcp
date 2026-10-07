@@ -2,7 +2,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createServer } from './mcp-server.js'
 import { installStdioGuards } from './transport-guard.js'
 import { startHttpServer, httpListenOptions } from './http-transport.js'
-import { ensureHttpSingleton } from './singleton.js'
+import { ensureHttpSingleton, ensureHttpSupervisor } from './singleton.js'
 import { refreshStaleDeployedBundleInBackground } from './self-update.js'
 
 export { createServer } from './mcp-server.js'
@@ -34,9 +34,17 @@ function seedHttpSingletonInBackground() {
         .catch(() => {})
 }
 
+// Armed after the listen succeeds rather than before, so the supervisor can
+// never watch a port this process failed to take.
+function seedHttpSupervisorInBackground(port) {
+    ensureHttpSupervisor({ port })
+        .catch(() => {})
+}
+
 export async function main() {
     if (wantsHttpTransport()) {
-        await startHttpServer(httpListenOptions())
+        const { port } = await startHttpServer(httpListenOptions())
+        seedHttpSupervisorInBackground(port)
         return
     }
 

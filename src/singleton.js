@@ -5,12 +5,14 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { pidAlive } from './dispatch.js'
 import { appendDiagnostic, describeError } from './server-log.js'
+import { keepServingOnAsyncFailure, logSignalExits } from './transport-guard.js'
 import { DEFAULT_HOST, DEFAULT_PORT, HEALTH_PATH, MCP_PATH } from './http-transport.js'
 
 const STATE_FILE_NAME = 'gm-mcp-http.json'
 const PROBE_TIMEOUT_MS = 1_500
 const STARTUP_WAIT_MS = 20_000
 const STARTUP_POLL_MS = 250
+const SUPERVISOR_INTERVAL_MS = 15_000
 
 function agentplugDir() {
     const override = (process.env.AGENTPLUG_HOME || '').trim()
@@ -124,4 +126,89 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
     writeSingletonState({ port, pid: health.pid ?? pid, url: httpMcpUrl(port), ts: Date.now(), reused: false })
     appendDiagnostic('http-singleton-started', { port, pid: health.pid ?? pid, entry: serverEntryPath() })
     return { url: httpMcpUrl(port), port, pid: health.pid ?? pid, reused: false, version: health.version ?? null }
+}
+
+// Keyed by port like the singleton's own state, but in its own file per port:
+// a second supervisor on another port must not read this one's pid as its own.
+export function supervisorStateFilePath(port = defaultHttpPort()) {
+    return path.join(agentplugDir(), `gm-mcp-http-supervisor-${port}.json`)
+}
+
+export function supervisorIntervalMs() {
+    const seconds = Number((process.env.GM_MCP_HTTP_SUPERVISOR_INTERVAL_SECONDS || '').trim())
+    return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : SUPERVISOR_INTERVAL_MS
+}
+
+export function supervisorEnabled() {
+    return (process.env.GM_MCP_HTTP_SUPERVISOR || '').trim() !== '0'
+}
+
+function readSupervisorState(port) {
+    try {
+        const state = JSON.parse(readFileSync(supervisorStateFilePath(port), 'utf8'))
+        return state?.port === port ? state : null
+    } catch {
+        return null
+    }
+}
+
+function writeSupervisorState(state) {
+    const file = supervisorStateFilePath(state?.port)
+    try {
+        mkdirSync(path.dirname(file), { recursive: true })
+        writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+    } catch {
+    }
+}
+
+// The server is the only thing that ever starts itself, so a server that dies
+// stays dead: nothing on the http registration's path runs gm at all, and a
+// session whose client connected once never reconnects. This is the daemon
+// guard's counterpart for the durable transport -- a detached sibling that
+// only ever polls /health and restarts the server when it stops answering.
+export async function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
+    if (!supervisorEnabled()) return { port, pid: null, started: false, reason: 'disabled' }
+    const recorded = readSupervisorState(port)
+    if (recorded?.pid && pidAlive(recorded.pid) === true) {
+        return { port, pid: recorded.pid, started: false, reason: 'already-running' }
+    }
+    const child = spawn(process.execPath, [serverEntryPath(), 'http-supervise', '--port', String(port), '--interval', String(Math.round(intervalMs / 1000))], {
+        cwd: homedir(),
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        // Inherited by every process this one spawns, so a restarted server
+        // does not seed a second supervisor that would race this one.
+        env: { ...process.env, GM_MCP_TRANSPORT: 'http', GM_MCP_HTTP_SUPERVISOR: '0' },
+    })
+    child.on('error', (error) => {
+        appendDiagnostic('http-supervisor-spawn-error', { port, entry: serverEntryPath(), error: describeError(error) })
+    })
+    child.unref()
+    appendDiagnostic('http-supervisor-spawned', { port, pid: child.pid ?? null, interval_ms: intervalMs })
+    return { port, pid: child.pid ?? null, started: true, reason: 'spawned' }
+}
+
+export async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
+    const recorded = readSupervisorState(port)
+    if (recorded?.pid && recorded.pid !== process.pid && pidAlive(recorded.pid) === true) {
+        appendDiagnostic('http-supervisor-dup-exit', { port, owner_pid: recorded.pid, pid: process.pid })
+        return { port, supervised: false, reason: 'another supervisor owns this port' }
+    }
+    keepServingOnAsyncFailure()
+    logSignalExits()
+    writeSupervisorState({ port, pid: process.pid, url: httpMcpUrl(port), ts: Date.now() })
+    appendDiagnostic('http-supervisor-start', { port, pid: process.pid, interval_ms: intervalMs })
+    while (true) {
+        const health = await probeHealth(port)
+        if (!health) {
+            const result = await ensureHttpSingleton({ port })
+            appendDiagnostic(result.url ? 'http-supervisor-restarted' : 'http-supervisor-restart-failed', {
+                port,
+                pid: result.pid ?? null,
+                error: result.error ?? null,
+            })
+        }
+        await new Promise((resolve) => setTimeout(resolve, intervalMs))
+    }
 }
