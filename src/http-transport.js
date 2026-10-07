@@ -2,6 +2,7 @@ import { createServer as createHttpServer } from 'node:http'
 import { SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { createServer } from './mcp-server.js'
+import { inflightDispatchCount } from './dispatch.js'
 import { keepServingOnAsyncFailure, logSignalExits } from './transport-guard.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
@@ -11,6 +12,26 @@ export const DEFAULT_HOST = '127.0.0.1'
 export const DEFAULT_PORT = 8787
 export const MCP_PATH = '/mcp'
 export const HEALTH_PATH = '/health'
+
+// No idle reaping: a client holds one keep-alive socket for the whole session
+// and reuses it minutes later. Node closes such a socket at its
+// keepAliveTimeout, and the next POST the client writes to it fails in a way an
+// MCP client is allowed to read as a whole-session disconnect -- an idle gap is
+// not an error and must not cost the session. Nothing on this server is
+// per-connection state, so a socket may stay open as long as its client wants
+// it. headersTimeout has to stay above keepAliveTimeout.
+export const HTTP_KEEPALIVE_TIMEOUT_MS = 24 * 60 * 60 * 1000
+export const HTTP_HEADERS_TIMEOUT_MS = HTTP_KEEPALIVE_TIMEOUT_MS + 60_000
+
+// A client that opens a standalone SSE stream (GET /mcp) must be given one that
+// stays open: a 405 there is a status an MCP client may also read as fatal.
+// This server has nothing to push, so the stream is heartbeats only. Bounded in
+// count and in age so a client that never closes one cannot leak a socket.
+const SSE_HEARTBEAT_MS = 15_000
+const SSE_MAX_LIFETIME_MS = 6 * 60 * 60 * 1000
+const SSE_MAX_OPEN_STREAMS = 64
+const HTTP_HEARTBEAT_MS = 5 * 60 * 1000
+let openSseStreams = 0
 
 function flagValue(name) {
     const args = process.argv.slice(2)
@@ -61,14 +82,110 @@ function rejectOversizedBody(req, res) {
 // later one, which would be a worse failure than the stdio drop it replaces.
 // Nothing is carried between requests, so a client that vanishes mid-call can
 // never leave the server holding state for a session that is gone.
+// Every POST body is read here, whatever encoding it arrives in, so a body that
+// cannot be read or parsed never reaches the SDK. The SDK turns any body it
+// cannot turn into a JSON-RPC message into 400 with JSON-RPC code -32700
+// (`Parse error`), and -32700 is the one reply an MCP client is allowed to read
+// as a fatal protocol error and turn into a whole-session disconnect -- 46 of
+// them are in gm-mcp-server.log, the last one from the server that is listening
+// right now. A body we cannot use is answered 202 instead: accepted, nothing to
+// read, session intact. Oversized bodies hit the same cap either way.
+async function readBody(req) {
+    const chunks = []
+    let size = 0
+    for await (const chunk of req) {
+        chunks.push(chunk)
+        size += chunk.length
+        if (size > MAX_BODY_BYTES) return { tooLarge: true, size }
+    }
+    return { buffer: Buffer.concat(chunks) }
+}
+
+// A JSON-RPC message is an object carrying `jsonrpc: "2.0"`, or a batch of
+// them. Anything else -- a bare object, a bare string, an empty batch -- is what
+// makes the SDK answer -32700, so it is answered here instead.
+function isJsonRpcMessage(value) {
+    if (Array.isArray(value)) return value.length > 0 && value.every(isJsonRpcMessage)
+    return Boolean(value) && typeof value === 'object' && value.jsonrpc === '2.0'
+}
+
+function bodyPreview(buffer) {
+    const text = buffer.toString('utf8')
+    return text.length > 400 ? `${text.slice(0, 400)}...` : text
+}
+
+function rejectUnusableBody(res, event, fields) {
+    appendDiagnostic(event, fields)
+    sendAccepted(res)
+}
+
+function sendAccepted(res) {
+    res.writeHead(202, { 'content-length': 0, 'cache-control': 'no-store' })
+    res.end()
+}
+
+// Nothing here exits, and nothing here answers -32700. A 400 carrying a JSON-RPC
+// parse error is the one reply an MCP client is allowed to read as fatal and
+// turn into a whole-session disconnect, so every request this server cannot use
+// is answered 202 ("accepted, nothing to read") and logged instead. The tool
+// surface is unchanged: a well-formed request is served exactly as before.
 async function serveMcpRequest(req, res) {
+    if (req.method === 'GET') {
+        serveSseHeartbeat(req, res)
+        return
+    }
+    // A client terminating its session has nothing to terminate here -- there is
+    // no session -- and a 405 is a status a client may read as fatal.
+    if (req.method === 'DELETE') {
+        sendAccepted(res)
+        return
+    }
     if (req.method !== 'POST') {
-        sendJson(res, 405, { error: `stateless transport serves no ${req.method} stream; POST JSON-RPC to ${MCP_PATH}` })
+        appendDiagnostic('http-method-refused', { path: MCP_PATH, method: req.method })
+        sendJson(res, 405, { error: `POST JSON-RPC to ${MCP_PATH}` }, { allow: 'GET, POST, DELETE' })
         return
     }
     if (rejectOversizedBody(req, res)) return
+    // An empty POST is a keepalive or a port probe, not a client sending a
+    // broken frame; read it and decide from the bytes either way.
+    const read = await readBody(req)
+    if (read.tooLarge) {
+        sendJson(res, 413, { error: `request body exceeds the ${MAX_BODY_BYTES} byte cap` })
+        return
+    }
+    const buffer = read.buffer ?? Buffer.alloc(0)
+    if (buffer.toString('utf8').trim().length === 0) {
+        appendDiagnostic('http-empty-body-ignored', { path: MCP_PATH, remote: req.socket?.remotePort ?? null })
+        sendAccepted(res)
+        return
+    }
+    let parsedBody
+    try {
+        parsedBody = JSON.parse(buffer.toString('utf8'))
+    } catch (error) {
+        rejectUnusableBody(res, 'http-body-unparseable', {
+            path: MCP_PATH,
+            content_length: req.headers['content-length'] ?? null,
+            bytes: buffer.length,
+            preview: bodyPreview(buffer),
+            error: describeError(error),
+        })
+        return
+    }
+    if (!isJsonRpcMessage(parsedBody)) {
+        rejectUnusableBody(res, 'http-body-not-jsonrpc', {
+            path: MCP_PATH,
+            bytes: buffer.length,
+            preview: bodyPreview(buffer),
+        })
+        return
+    }
     normalizeProtocolVersion(req)
     const mcp = createServer()
+    // No session id is ever issued, so there is no session state to expire and
+    // none to reap: `validateSession` returns at once for a stateless transport,
+    // and a client that arrives holding an Mcp-Session-Id from some earlier
+    // build (or from a server on another port) is answered rather than 404'd.
     const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,
@@ -81,17 +198,66 @@ async function serveMcpRequest(req, res) {
         void mcp.close().catch(() => {})
     })
     await mcp.connect(transport)
-    await transport.handleRequest(req, res)
+    await transport.handleRequest(req, res, parsedBody)
 }
 
-function sendJson(res, status, payload) {
+function sendJson(res, status, payload, extraHeaders = {}) {
     const body = JSON.stringify(payload)
     res.writeHead(status, {
         'content-type': 'application/json; charset=utf-8',
         'content-length': Buffer.byteLength(body, 'utf8'),
         'cache-control': 'no-store',
+        ...extraHeaders,
     })
     res.end(body)
+}
+
+// A standalone SSE stream with nothing to say. It exists so a client that opens
+// one keeps an open, answered, periodically-written connection instead of being
+// told 405, and so a proxy or client that times out silence does not time out
+// here. SSE comments (`:`) are invisible to an MCP client, so this carries no
+// protocol meaning -- it is only proof the server is still up.
+function serveSseHeartbeat(req, res) {
+    if (openSseStreams >= SSE_MAX_OPEN_STREAMS) {
+        appendDiagnostic('http-sse-refused', { path: MCP_PATH, open: openSseStreams })
+        sendJson(res, 503, { error: `too many open ${MCP_PATH} streams` })
+        return
+    }
+    openSseStreams += 1
+    appendDiagnostic('http-sse-open', { path: MCP_PATH, open: openSseStreams })
+    res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache, no-transform',
+        connection: 'keep-alive',
+        'x-accel-buffering': 'no',
+    })
+    let closed = false
+    const stop = () => {
+        if (closed) return
+        closed = true
+        clearInterval(beat)
+        clearTimeout(lifetime)
+        openSseStreams -= 1
+        try {
+            res.end()
+        } catch {
+        }
+    }
+    const beat = setInterval(() => {
+        if (closed) return
+        try {
+            res.write(`: gm-mcp keepalive ${new Date().toISOString()}\n\n`)
+        } catch (error) {
+            appendDiagnostic('http-sse-write-failed', { path: MCP_PATH, error: describeError(error) })
+            stop()
+        }
+    }, SSE_HEARTBEAT_MS)
+    const lifetime = setTimeout(stop, SSE_MAX_LIFETIME_MS)
+    lifetime.unref?.()
+    res.write(`: gm-mcp ${BUNDLE_VERSION} stateless server; no server-initiated messages\n\n`)
+    req.on('close', stop)
+    res.on('close', stop)
+    res.on('error', stop)
 }
 
 export function healthPayload(port) {
@@ -117,6 +283,11 @@ export async function startHttpServer({ port, host } = {}) {
     const server = createHttpServer((req, res) => {
         void handleRequest(req, res)
     })
+    server.keepAliveTimeout = HTTP_KEEPALIVE_TIMEOUT_MS
+    server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS
+
+    let servedRequests = 0
+    let lastRequestAt = Date.now()
 
     async function handleRequest(req, res) {
         const path = (req.url || '/').split('?')[0]
@@ -128,6 +299,8 @@ export async function startHttpServer({ port, host } = {}) {
                 sendJson(res, 200, healthPayload(port))
                 return
             }
+            servedRequests += 1
+            lastRequestAt = Date.now()
             if (path !== MCP_PATH) {
                 sendJson(res, 404, { error: `no route for ${req.method} ${path}`, mcp_path: MCP_PATH })
                 return
@@ -154,6 +327,21 @@ export async function startHttpServer({ port, host } = {}) {
             resolve()
         })
     })
+
+    // A client that stops talking looks exactly like a server that died from the
+    // outside. Say, on a slow loop, that this process is up and how long it has
+    // been idle, so "the client dropped the session" and "the server is gone"
+    // are never the same log line again.
+    const heartbeat = setInterval(() => {
+        appendDiagnostic('http-heartbeat', {
+            port,
+            served_requests: servedRequests,
+            idle_ms: Date.now() - lastRequestAt,
+            open_sse_streams: openSseStreams,
+            dispatches_inflight: inflightDispatchCount(),
+        })
+    }, HTTP_HEARTBEAT_MS)
+    heartbeat.unref?.()
 
     appendDiagnostic('http-start', { host, port, path: MCP_PATH, pid: process.pid, version: BUNDLE_VERSION })
     console.error(`gm-mcp ${BUNDLE_VERSION}: serving streamable HTTP on http://${host}:${port}${MCP_PATH} (stateless)`)
