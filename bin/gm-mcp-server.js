@@ -7185,12 +7185,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs2, exportName) {
+    function addFormats(ajv, list, fs3, exportName) {
       var _a3;
       var _b;
       (_a3 = (_b = ajv.opts.code).formats) !== null && _a3 !== void 0 ? _a3 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs2[f]);
+        ajv.addFormat(f, fs3[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -7301,6 +7301,9 @@ var require_content_type = __commonJS({
     }
   }
 });
+
+// src/cli.js
+import fs2 from "node:fs";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
 import process3 from "node:process";
@@ -37935,12 +37938,18 @@ function trimOversizedLog(file2) {
   const firstNewline = tail.indexOf(10);
   writeFileSync(file2, firstNewline === -1 ? tail : tail.subarray(firstNewline + 1));
 }
+var echoDiagnosticsToStderr = (process.env.GM_MCP_LOG_STDERR || "").trim() !== "0";
+function setDiagnosticStderrEcho(enabled) {
+  echoDiagnosticsToStderr = Boolean(enabled);
+}
 function appendDiagnostic(event, fields = {}) {
   const record2 = JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), pid: process.pid, event, ...fields });
-  try {
-    process.stderr.write(`gm-mcp: ${record2}
+  if (echoDiagnosticsToStderr) {
+    try {
+      process.stderr.write(`gm-mcp: ${record2}
 `);
-  } catch {
+    } catch {
+    }
   }
   try {
     const file2 = logFilePath();
@@ -41186,6 +41195,13 @@ var DEFAULT_HOST = "127.0.0.1";
 var DEFAULT_PORT = 8787;
 var MCP_PATH = "/mcp";
 var HEALTH_PATH = "/health";
+var HTTP_KEEPALIVE_TIMEOUT_MS = 24 * 60 * 60 * 1e3;
+var HTTP_HEADERS_TIMEOUT_MS = HTTP_KEEPALIVE_TIMEOUT_MS + 6e4;
+var SSE_HEARTBEAT_MS = 15e3;
+var SSE_MAX_LIFETIME_MS = 6 * 60 * 60 * 1e3;
+var SSE_MAX_OPEN_STREAMS = 64;
+var HTTP_HEARTBEAT_MS = 5 * 60 * 1e3;
+var openSseStreams = 0;
 function flagValue(name) {
   const args = process.argv.slice(2);
   const index = args.indexOf(`--${name}`);
@@ -41216,12 +41232,79 @@ function rejectOversizedBody(req, res) {
   sendJson(res, 413, { error: `request body exceeds the ${MAX_BODY_BYTES} byte cap` });
   return true;
 }
+async function readBody(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    chunks.push(chunk);
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) return { tooLarge: true, size };
+  }
+  return { buffer: Buffer.concat(chunks) };
+}
+function isJsonRpcMessage(value) {
+  if (Array.isArray(value)) return value.length > 0 && value.every(isJsonRpcMessage);
+  return Boolean(value) && typeof value === "object" && value.jsonrpc === "2.0";
+}
+function bodyPreview(buffer) {
+  const text = buffer.toString("utf8");
+  return text.length > 400 ? `${text.slice(0, 400)}...` : text;
+}
+function rejectUnusableBody(res, event, fields) {
+  appendDiagnostic(event, fields);
+  sendAccepted(res);
+}
+function sendAccepted(res) {
+  res.writeHead(202, { "content-length": 0, "cache-control": "no-store" });
+  res.end();
+}
 async function serveMcpRequest(req, res) {
+  if (req.method === "GET") {
+    serveSseHeartbeat(req, res);
+    return;
+  }
+  if (req.method === "DELETE") {
+    sendAccepted(res);
+    return;
+  }
   if (req.method !== "POST") {
-    sendJson(res, 405, { error: `stateless transport serves no ${req.method} stream; POST JSON-RPC to ${MCP_PATH}` });
+    appendDiagnostic("http-method-refused", { path: MCP_PATH, method: req.method });
+    sendJson(res, 405, { error: `POST JSON-RPC to ${MCP_PATH}` }, { allow: "GET, POST, DELETE" });
     return;
   }
   if (rejectOversizedBody(req, res)) return;
+  const read = await readBody(req);
+  if (read.tooLarge) {
+    sendJson(res, 413, { error: `request body exceeds the ${MAX_BODY_BYTES} byte cap` });
+    return;
+  }
+  const buffer = read.buffer ?? Buffer.alloc(0);
+  if (buffer.toString("utf8").trim().length === 0) {
+    appendDiagnostic("http-empty-body-ignored", { path: MCP_PATH, remote: req.socket?.remotePort ?? null });
+    sendAccepted(res);
+    return;
+  }
+  let parsedBody;
+  try {
+    parsedBody = JSON.parse(buffer.toString("utf8"));
+  } catch (error61) {
+    rejectUnusableBody(res, "http-body-unparseable", {
+      path: MCP_PATH,
+      content_length: req.headers["content-length"] ?? null,
+      bytes: buffer.length,
+      preview: bodyPreview(buffer),
+      error: describeError(error61)
+    });
+    return;
+  }
+  if (!isJsonRpcMessage(parsedBody)) {
+    rejectUnusableBody(res, "http-body-not-jsonrpc", {
+      path: MCP_PATH,
+      bytes: buffer.length,
+      preview: bodyPreview(buffer)
+    });
+    return;
+  }
   normalizeProtocolVersion(req);
   const mcp = createServer();
   const transport = new StreamableHTTPServerTransport({
@@ -41238,16 +41321,63 @@ async function serveMcpRequest(req, res) {
     });
   });
   await mcp.connect(transport);
-  await transport.handleRequest(req, res);
+  await transport.handleRequest(req, res, parsedBody);
 }
-function sendJson(res, status, payload) {
+function sendJson(res, status, payload, extraHeaders = {}) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body, "utf8"),
-    "cache-control": "no-store"
+    "cache-control": "no-store",
+    ...extraHeaders
   });
   res.end(body);
+}
+function serveSseHeartbeat(req, res) {
+  if (openSseStreams >= SSE_MAX_OPEN_STREAMS) {
+    appendDiagnostic("http-sse-refused", { path: MCP_PATH, open: openSseStreams });
+    sendJson(res, 503, { error: `too many open ${MCP_PATH} streams` });
+    return;
+  }
+  openSseStreams += 1;
+  appendDiagnostic("http-sse-open", { path: MCP_PATH, open: openSseStreams });
+  res.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no"
+  });
+  let closed = false;
+  const stop = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(beat);
+    clearTimeout(lifetime);
+    openSseStreams -= 1;
+    try {
+      res.end();
+    } catch {
+    }
+  };
+  const beat = setInterval(() => {
+    if (closed) return;
+    try {
+      res.write(`: gm-mcp keepalive ${(/* @__PURE__ */ new Date()).toISOString()}
+
+`);
+    } catch (error61) {
+      appendDiagnostic("http-sse-write-failed", { path: MCP_PATH, error: describeError(error61) });
+      stop();
+    }
+  }, SSE_HEARTBEAT_MS);
+  const lifetime = setTimeout(stop, SSE_MAX_LIFETIME_MS);
+  lifetime.unref?.();
+  res.write(`: gm-mcp ${BUNDLE_VERSION} stateless server; no server-initiated messages
+
+`);
+  req.on("close", stop);
+  res.on("close", stop);
+  res.on("error", stop);
 }
 function healthPayload(port) {
   return {
@@ -41267,6 +41397,10 @@ async function startHttpServer({ port, host } = {}) {
   const server = createHttpServer((req, res) => {
     void handleRequest(req, res);
   });
+  server.keepAliveTimeout = HTTP_KEEPALIVE_TIMEOUT_MS;
+  server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
+  let servedRequests = 0;
+  let lastRequestAt = Date.now();
   async function handleRequest(req, res) {
     const path5 = (req.url || "/").split("?")[0];
     res.on("error", (error61) => {
@@ -41277,6 +41411,8 @@ async function startHttpServer({ port, host } = {}) {
         sendJson(res, 200, healthPayload(port));
         return;
       }
+      servedRequests += 1;
+      lastRequestAt = Date.now();
       if (path5 !== MCP_PATH) {
         sendJson(res, 404, { error: `no route for ${req.method} ${path5}`, mcp_path: MCP_PATH });
         return;
@@ -41301,6 +41437,16 @@ async function startHttpServer({ port, host } = {}) {
       resolve();
     });
   });
+  const heartbeat = setInterval(() => {
+    appendDiagnostic("http-heartbeat", {
+      port,
+      served_requests: servedRequests,
+      idle_ms: Date.now() - lastRequestAt,
+      open_sse_streams: openSseStreams,
+      dispatches_inflight: inflightDispatchCount()
+    });
+  }, HTTP_HEARTBEAT_MS);
+  heartbeat.unref?.();
   appendDiagnostic("http-start", { host, port, path: MCP_PATH, pid: process.pid, version: BUNDLE_VERSION });
   console.error(`gm-mcp ${BUNDLE_VERSION}: serving streamable HTTP on http://${host}:${port}${MCP_PATH} (stateless)`);
   return { server, url: `http://${host}:${port}${MCP_PATH}`, port, host };
@@ -41728,14 +41874,22 @@ function seedHttpSingletonInBackground() {
   }).catch(() => {
   });
 }
-function seedHttpSupervisorInBackground(port) {
-  ensureHttpSupervisor({ port }).catch(() => {
+function supervisorRearmMs() {
+  const seconds = Number((process.env.GM_MCP_HTTP_SUPERVISOR_REARM_SECONDS || "").trim());
+  return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1e3) : 5 * 6e4;
+}
+var SUPERVISOR_REARM_MS = supervisorRearmMs();
+function armHttpSupervisor(port) {
+  const arm = () => ensureHttpSupervisor({ port }).catch(() => {
   });
+  arm();
+  const timer = setInterval(arm, SUPERVISOR_REARM_MS);
+  timer.unref?.();
 }
 async function main() {
   if (wantsHttpTransport()) {
     const { port } = await startHttpServer(httpListenOptions());
-    seedHttpSupervisorInBackground(port);
+    armHttpSupervisor(port);
     return;
   }
   installStdioGuards();
@@ -41750,7 +41904,133 @@ async function main() {
 }
 
 // src/cli.js
+var DISPATCH_USAGE = `gm-mcp ${BUNDLE_VERSION} dispatch <verb> [--body <json|@file|->] [--raw <text|@file|->] [payload]
+
+Runs the same dispatch the gm MCP tool runs and prints its reply, so gm stays usable
+from a shell (or from an agent host that cannot see the MCP tools) with no MCP involved.
+
+  <verb>                  gm verb, e.g. grep, codesearch, fs_read, callers, fetch, health
+  [payload]               bare argument before any flag: parsed as JSON body when it starts
+                          with { , otherwise sent as the plain-text raw body
+  --body <json|@file|->   JSON body; @path reads a file, - reads stdin
+  --raw  <text|@file|->   plain-text body for serp/browser/cdp style verbs
+  --cwd <dir>             project root holding .gm/exec-spool (default: cwd)
+  --session-id <id>       gm session id (default: gm-cli-<pid>-<now>)
+  --timeout <seconds>     give up after this many seconds (default 120)
+  --poll <seconds>        spool poll interval (default 0.25)
+  --max-chars <n>         trim long text fields to n characters
+  --resume <task>         resume a previous dispatch instead of writing a new request
+  --full                  return the uncompacted payload
+  --timing                include dispatch timing
+
+examples:
+  gm dispatch grep --body {"pattern":"foo","output_mode":"content"} --cwd C:/dev/proj
+  gm dispatch codesearch '{"query":"chunk merger"}' --cwd C:/dev/proj
+  gm dispatch health
+  gm dispatch fetch --raw https://example.com
+
+(run the same verbs as "node <bundle> dispatch ..." when gm itself is not on PATH)`;
+var DISPATCH_VALUE_FLAGS = /* @__PURE__ */ new Set(["body", "raw", "cwd", "session-id", "timeout", "poll", "max-chars", "resume"]);
+function flagNameOf(arg) {
+  const name = arg.slice(2);
+  const eq = name.indexOf("=");
+  return eq === -1 ? { name, inline: void 0 } : { name: name.slice(0, eq), inline: name.slice(eq + 1) };
+}
+function dispatchFlag(argv, wanted) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (!arg.startsWith("--")) continue;
+    const { name, inline } = flagNameOf(arg);
+    if (name !== wanted) continue;
+    if (inline !== void 0) return inline;
+    const next = argv[i + 1];
+    return next === void 0 || next.startsWith("--") ? void 0 : next;
+  }
+  return void 0;
+}
+function dispatchPositional(argv) {
+  const positional = [];
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i];
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
+      continue;
+    }
+    const { name, inline } = flagNameOf(arg);
+    if (inline === void 0 && DISPATCH_VALUE_FLAGS.has(name)) i += 1;
+  }
+  return positional;
+}
+function resolvePayloadValue(value) {
+  if (value === "-") {
+    try {
+      return fs2.readFileSync(0, "utf8");
+    } catch {
+      return "";
+    }
+  }
+  if (value.startsWith("@")) {
+    const target = value.slice(1);
+    try {
+      return fs2.readFileSync(target, "utf8");
+    } catch (error61) {
+      throw new Error(`cannot read ${target}: ${error61.message}`);
+    }
+  }
+  return value;
+}
+async function dispatchCommand() {
+  setDiagnosticStderrEcho(false);
+  const argv = process.argv.slice(3);
+  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
+    console.log(DISPATCH_USAGE);
+    return 0;
+  }
+  const verb = argv[0];
+  const positional = dispatchPositional(argv);
+  const rawFlag = dispatchFlag(argv, "raw");
+  const bodyFlag = dispatchFlag(argv, "body");
+  let rawBody;
+  if (rawFlag !== void 0) rawBody = resolvePayloadValue(rawFlag);
+  else if (positional.length > 0 && !positional[0].trimStart().startsWith("{")) rawBody = resolvePayloadValue(positional[0]);
+  let body;
+  const bodyText = bodyFlag !== void 0 ? resolvePayloadValue(bodyFlag) : positional.length > 0 && positional[0].trimStart().startsWith("{") ? positional[0] : void 0;
+  if (bodyText !== void 0) {
+    try {
+      body = JSON.parse(bodyText);
+    } catch (error61) {
+      console.error(`gm-mcp dispatch: --body is not valid JSON: ${error61.message}`);
+      return 2;
+    }
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      console.error("gm-mcp dispatch: --body must be a JSON object");
+      return 2;
+    }
+  }
+  const numberOrUndefined = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : void 0;
+  };
+  const args = {
+    verb,
+    body,
+    raw_body: rawBody,
+    session_id: dispatchFlag(argv, "session-id") || `gm-cli-${process.pid}-${Date.now()}`,
+    cwd: dispatchFlag(argv, "cwd") || process.cwd(),
+    timeout_seconds: numberOrUndefined(dispatchFlag(argv, "timeout")),
+    poll_interval_seconds: numberOrUndefined(dispatchFlag(argv, "poll")),
+    max_chars: numberOrUndefined(dispatchFlag(argv, "max-chars")),
+    resume_task: dispatchFlag(argv, "resume"),
+    full_response: argv.includes("--full") ? true : void 0,
+    include_timing: argv.includes("--timing") ? true : void 0
+  };
+  const text = await gmDispatch(args);
+  process.stdout.write(text.endsWith("\n") ? text : `${text}
+`);
+  return text.trimStart().startsWith("error:") ? 1 : 0;
+}
 var COMMANDS = {
+  dispatch: dispatchCommand,
   "pin-local-build": () => {
     const deployedPath = process.argv[3];
     const pin = deployedPath ? pinLocalBuild(deployedPath) : pinLocalBuild();
@@ -41807,6 +42087,9 @@ usage:
   gm-mcp-server.js http-supervise [--port N] [--interval S]
                                    watch the shared HTTP server and restart it when it stops answering
                                    (a --http server starts one for itself unless ${"GM_MCP_HTTP_SUPERVISOR"}=0)
+  gm-mcp-server.js dispatch <verb> [--body <json>] [--raw <text>] [--cwd <dir>] [--help]
+                                   run a gm dispatch from the shell and print its reply,
+                                   with no MCP client involved
   gm-mcp-server.js pin-local-build [path]   pin the deployed bundle (default ~/.gm-tools/gm-mcp-server.mjs) so a self-update cannot overwrite it
   gm-mcp-server.js unpin-local-build        clear that pin
   gm-mcp-server.js self-update-status       print freeze state, local-build pin and deployed bundle sha256

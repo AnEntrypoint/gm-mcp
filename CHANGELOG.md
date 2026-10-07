@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased - the HTTP transport never drops a client it can still serve
+
+Measured 2026-10-07: a session in `C:\dev\train` called `mcp__gm__gm` at
+23:29, then every call from 04:07 on answered "Its MCP server 'gm' has
+disconnected" for the remaining four hours while port 8787 answered a fresh
+client fine. Two things set that up.
+
+The shared HTTP server was not running. pid 8396 took the port at 22:30 and
+pid 21940 had to be started again at 04:07:02 -- both gone with no `exit`
+diagnostic, so killed, not crashed -- and nothing was watching the port
+until 04:32. `WaitForMcpServers` then reported `Failed to connect: gm` at
+04:07:49 with the server already 47 s old, and the server logged no request
+at all in that window: the client did not retry, it reported a connection it
+had already memoized as failed, and it keeps that verdict for the life of the
+session. That half is Claude Code's, not ours -- no server-side reply can
+make a client re-connect. What is ours is the window in which the server was
+down, so the server is now harder to lose and more forgiving to come back to:
+
+- `startHttpServer` sets `keepAliveTimeout` 300 s and `headersTimeout` 310 s
+  (node defaults 5 s and 60 s). A client holds one keep-alive socket for a
+  whole session; the old 5 s default closed it underneath a client about to
+  reuse it, and a POST lost that way is unrecoverable. `test/http-session-resume.mjs`
+  holds one socket idle 12 s and then serves a request on it.
+- An empty POST is answered `202` with an empty body and logged as
+  `http-empty-body-ignored`, instead of the SDK's `400 Parse error: Invalid
+  JSON`. 400 is the one status an MCP client may read as fatal; 202 is what
+  the SDK's own client reads as "accepted, nothing to read". 39 of these had
+  been served as 400.
+- `GET` carries `Allow: GET, POST, DELETE`, so a client that opens a stream
+  can tell "no stream here" from a dead server. No session is ever issued, so
+  there is no session id to expire and none to reap: an unknown
+  `mcp-session-id` on `DELETE` is answered, not 404'd.
+- The `--http` server re-asserts its supervisor every 5 min
+  (`GM_MCP_HTTP_SUPERVISOR_REARM_SECONDS`) instead of arming it once. The
+  supervisor is the only thing that restarts a dead server and it is just
+  another detached process: killed, it stayed dead, and the gap before 04:32
+  was long enough to strand a session permanently. Re-arming is a no-op while
+  its pid is alive -- measured one spawned pid across ten re-arm attempts.
+
+## Unreleased - `dispatch <verb>` runs a verb with no MCP client involved
+
+A running agent host cannot gain the `mcp__gm__*` tools: Claude Code fixes its
+tool list at startup, `reload_plugins` and `mcp_reconnect` both answer `Server
+not found` for a server added after startup, and no file watcher re-reads
+`mcpServers`. So a session that predates the registration has no way in, and
+the same is true of any shell. `dispatch` closes that: it runs the identical
+`runDispatch` path the `gm` MCP tool runs and prints the reply.
+
+    node gm-mcp-server.js dispatch grep --body {"pattern":"foo","output_mode":"content"} --cwd C:/dev/proj
+    node gm-mcp-server.js dispatch codesearch '{"query":"chunk merger"}' --cwd C:/dev/proj
+    node gm-mcp-server.js dispatch fetch --raw https://example.com
+
+`--body` takes JSON inline, `@path`, or `-` for stdin; `--raw` takes plain text
+for the serp/browser/cdp verbs; a bare argument is read as JSON when it starts
+with `{` and as raw text otherwise, so `--cwd` and friends are never mistaken
+for a payload. Exit status is 1 when the reply starts with `error:`. Diagnostics
+still land in `~/.gm-tools/gm-mcp-server.log` but no longer echo to stderr
+(`GM_MCP_LOG_STDERR=0`), because a CLI subcommand owns its stderr while a stdio
+server's stderr is the only channel the host keeps. `gm dispatch ...` and
+`gm mcp-status` in the parent repo wrap this and the health probe.
+
 ## Unreleased - the shared HTTP server is supervised, so a dead one comes back instead of stranding every session
 
 On 2026-10-07 the shared HTTP singleton (pid 8396) stopped serving in the same
