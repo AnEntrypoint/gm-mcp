@@ -38972,7 +38972,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
 }
 
 // src/bundle-version.js
-var BUNDLE_VERSION = "0.2.5";
+var BUNDLE_VERSION = "0.2.6";
 
 // src/mcp-server.js
 var numberLike = external_exports.union([external_exports.number(), external_exports.string()]);
@@ -41246,6 +41246,14 @@ function isJsonRpcMessage(value) {
   if (Array.isArray(value)) return value.length > 0 && value.every(isJsonRpcMessage);
   return Boolean(value) && typeof value === "object" && value.jsonrpc === "2.0";
 }
+function isJsonRpcNotification(value) {
+  if (Array.isArray(value)) return value.length > 0 && value.every(isJsonRpcNotification);
+  return Boolean(value) && typeof value === "object" && value.jsonrpc === "2.0" && typeof value.method === "string" && value.id === void 0;
+}
+function answerNotificationsWithOk(res) {
+  const writeHead = res.writeHead.bind(res);
+  res.writeHead = (status, ...rest) => status === 202 ? writeHead(200, ...rest) : writeHead(status, ...rest);
+}
 function bodyPreview(buffer) {
   const text = buffer.toString("utf8");
   return text.length > 400 ? `${text.slice(0, 400)}...` : text;
@@ -41304,6 +41312,10 @@ async function serveMcpRequest(req, res) {
       preview: bodyPreview(buffer)
     });
     return;
+  }
+  if (isJsonRpcNotification(parsedBody)) {
+    answerNotificationsWithOk(res);
+    appendDiagnostic("http-notification-answered-ok", { path: MCP_PATH, bytes: buffer.length });
   }
   normalizeProtocolVersion(req);
   const mcp = createServer();
@@ -41372,6 +41384,9 @@ function serveSseHeartbeat(req, res) {
   }, SSE_HEARTBEAT_MS);
   const lifetime = setTimeout(stop, SSE_MAX_LIFETIME_MS);
   lifetime.unref?.();
+  res.write(`retry: ${Math.round(SSE_HEARTBEAT_MS / 1e3)}
+
+`);
   res.write(`: gm-mcp ${BUNDLE_VERSION} stateless server; no server-initiated messages
 
 `);
@@ -41542,6 +41557,12 @@ async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs = START
   if (live) {
     writeSingletonState({ port, pid: live.pid ?? null, url: httpMcpUrl(port), ts: Date.now(), reused: true });
     return { url: httpMcpUrl(port), port, pid: live.pid ?? null, reused: true, version: live.version ?? null };
+  }
+  const confirmed = await probeHealth(port);
+  if (confirmed) {
+    appendDiagnostic("http-singleton-probe-false-negative", { port, pid: confirmed.pid ?? null });
+    writeSingletonState({ port, pid: confirmed.pid ?? null, url: httpMcpUrl(port), ts: Date.now(), reused: true });
+    return { url: httpMcpUrl(port), port, pid: confirmed.pid ?? null, reused: true, version: confirmed.version ?? null };
   }
   const recorded = readSingletonState(port);
   if (recorded?.pid && pidAlive(recorded.pid) === true) {
