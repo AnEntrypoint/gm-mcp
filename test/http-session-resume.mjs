@@ -8,7 +8,8 @@
 //   2. an idle gap far longer than node's old 5 s keepAliveTimeout
 //   3. the same client still works after that gap (no session expiry, no reap)
 //   4. an empty POST is answered 202, never a 400 that a client reads as fatal
-//   5. GET is a labelled 405, DELETE with an unknown session id is not a 404
+//   5. GET is a labelled heartbeat carrying `retry:`, DELETE with an unknown
+//      session id is not a 404
 import { spawn } from 'node:child_process'
 import { connect } from 'node:net'
 import { mkdtempSync, readFileSync } from 'node:fs'
@@ -96,8 +97,19 @@ try {
         'http-empty-body-ignored',
     )
 
+    // A client that opens a GET stream anyway (the 0.2.5 client always did) gets
+    // a heartbeat, not a 405 it may read as fatal. The `retry:` field is what
+    // stops an ended stream from being re-GETted in a hot loop, so assert it.
     const get = await fetch(url, { headers: { accept: 'text/event-stream' } })
-    check('GET is a labelled 405 with Allow', get.status === 405 && Boolean(get.headers.get('allow')), `${get.status} allow=${get.headers.get('allow')}`)
+    const reader = get.body.getReader()
+    const firstChunk = new TextDecoder().decode((await reader.read()).value ?? new Uint8Array())
+    await reader.cancel().catch(() => {})
+    const retrySeconds = /^retry: (\d+)$/m.exec(firstChunk)?.[1] ?? null
+    check(
+        'GET is a heartbeat carrying a retry hint, not a fatal 405',
+        get.status === 200 && retrySeconds !== null,
+        `${get.status} retry=${retrySeconds}s`,
+    )
 
     const del = await fetch(url, { method: 'DELETE', headers: { 'mcp-session-id': 'stale-session-from-an-old-build' } })
     check('DELETE with an unknown session id is not 404', del.status !== 404, `status ${del.status}`)
