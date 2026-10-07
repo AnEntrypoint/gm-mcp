@@ -306,9 +306,9 @@ function objectBodyDiagnostic(verb, body) {
     return 'git_merge requires a non-empty body.ref, for example {"ref":"origin/main"}.'
 }
 
-const RUNNER_DIR = path.join(os.homedir(), '.gm-tools')
+const RUNNER_DIR = path.resolve(process.env.GM_TOOLS_DIR?.trim() || path.join(os.homedir(), '.gm-tools'))
 const RUNNER_PATH = path.join(RUNNER_DIR, process.platform === 'win32' ? 'agentplug-runner.exe' : 'agentplug-runner')
-const AGENTPLUG_DIR = path.join(os.homedir(), '.agentplug')
+const AGENTPLUG_DIR = path.resolve(process.env.AGENTPLUG_HOME?.trim() || path.join(os.homedir(), '.agentplug'))
 const GLOBAL_DAEMON_STATUS_PATH = path.join(AGENTPLUG_DIR, 'daemon-status.json')
 const GLOBAL_DAEMON_OWNER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'daemon-owner.lock')
 const GLOBAL_DAEMON_LOG_PATH = path.join(AGENTPLUG_DIR, 'daemon.log')
@@ -502,7 +502,7 @@ function ensureSpoolRunnerRunning(root) {
     try {
         child = spawn(RUNNER_PATH, ['spool'], {
             cwd: root,
-            env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+            env: { ...process.env, GM_TOOLS_DIR: RUNNER_DIR, AGENTPLUG_HOME: AGENTPLUG_DIR, CLAUDE_PROJECT_DIR: root },
             detached: true,
             stdio: 'ignore',
             windowsHide: true,
