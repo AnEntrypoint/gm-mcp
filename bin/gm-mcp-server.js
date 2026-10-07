@@ -41463,6 +41463,7 @@ var PROBE_TIMEOUT_MS = 1500;
 var STARTUP_WAIT_MS = 2e4;
 var STARTUP_POLL_MS = 250;
 var SUPERVISOR_INTERVAL_MS = 15e3;
+var SUPERVISOR_WATCH_MS = 1e3;
 function agentplugDir2() {
   const override = (process.env.AGENTPLUG_HOME || "").trim();
   return override ? path3.resolve(override) : path3.join(homedir2(), ".agentplug");
@@ -41608,6 +41609,34 @@ async function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = sup
   appendDiagnostic("http-supervisor-spawned", { port, pid: child.pid ?? null, interval_ms: intervalMs });
   return { port, pid: child.pid ?? null, started: true, reason: "spawned" };
 }
+function autostartScriptPath() {
+  const appData = process.env.APPDATA || "";
+  if (!appData) return null;
+  return path3.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "gm-mcp-http-supervise.vbs");
+}
+function installHttpAutostart({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
+  const target = autostartScriptPath();
+  if (!target) return { installed: false, reason: "APPDATA is not set" };
+  const entry = serverEntryPath();
+  const seconds = Math.max(1, Math.round(intervalMs / 1e3));
+  const script = [
+    'Set sh = CreateObject("WScript.Shell")',
+    `sh.CurrentDirectory = "${path3.dirname(entry)}"`,
+    `sh.Run """${process.execPath}"" ""${entry}"" http-supervise --port ${port} --interval ${seconds}", 0, False`,
+    ""
+  ].join("\r\n");
+  try {
+    const before = existsSync(target) ? readFileSync2(target, "utf8") : null;
+    if (before === script) return { installed: true, path: target, changed: false };
+    mkdirSync2(path3.dirname(target), { recursive: true });
+    writeFileSync2(target, script, "utf8");
+    appendDiagnostic("http-autostart-installed", { port, path: target });
+    return { installed: true, path: target, changed: true };
+  } catch (error61) {
+    appendDiagnostic("http-autostart-install-failed", { port, path: target, error: describeError(error61) });
+    return { installed: false, reason: describeError(error61) };
+  }
+}
 async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
   const recorded = readSupervisorState(port);
   if (recorded?.pid && recorded.pid !== process.pid && pidAlive(recorded.pid) === true) {
@@ -41616,19 +41645,30 @@ async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = superv
   }
   keepServingOnAsyncFailure();
   logSignalExits();
+  installHttpAutostart({ port, intervalMs });
   writeSupervisorState({ port, pid: process.pid, url: httpMcpUrl(port), ts: Date.now() });
   appendDiagnostic("http-supervisor-start", { port, pid: process.pid, interval_ms: intervalMs });
+  let serverPid = null;
+  let nextProbeAt = 0;
   while (true) {
-    const health = await probeHealth(port);
-    if (!health) {
-      const result = await ensureHttpSingleton({ port });
-      appendDiagnostic(result.url ? "http-supervisor-restarted" : "http-supervisor-restart-failed", {
-        port,
-        pid: result.pid ?? null,
-        error: result.error ?? null
-      });
+    const serverExited = serverPid !== null && pidAlive(serverPid) === false;
+    if (Date.now() >= nextProbeAt || serverExited) {
+      const health = await probeHealth(port);
+      if (health) {
+        serverPid = health.pid ?? serverPid;
+      } else {
+        const result = await ensureHttpSingleton({ port });
+        appendDiagnostic(result.url ? "http-supervisor-restarted" : "http-supervisor-restart-failed", {
+          port,
+          pid: result.pid ?? null,
+          error: result.error ?? null,
+          noticed_by: serverExited ? "pid-watch" : "health-probe"
+        });
+        serverPid = result.pid ?? null;
+      }
+      nextProbeAt = Date.now() + intervalMs;
     }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    await new Promise((resolve) => setTimeout(resolve, SUPERVISOR_WATCH_MS));
   }
 }
 
@@ -42064,9 +42104,11 @@ var COMMANDS = {
       console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.error}`);
       return 1;
     }
+    const autostart = installHttpAutostart({ port });
     const supervisor = await ensureHttpSupervisor({ port });
     console.log(`gm-mcp ${BUNDLE_VERSION}: ${result.reused ? "reusing" : "started"} the shared HTTP server (pid ${result.pid}) -- ${result.url}`);
     console.log(`gm-mcp ${BUNDLE_VERSION}: supervisor ${supervisor.reason} (pid ${supervisor.pid ?? "none"}) -- restarts the server when it stops answering`);
+    console.log(`gm-mcp ${BUNDLE_VERSION}: autostart ${autostart.installed ? autostart.changed ? "written" : "already current" : `skipped (${autostart.reason})`} -- ${autostart.path ?? "none"}`);
     return 0;
   },
   "http-status": async () => {

@@ -13,6 +13,11 @@ const PROBE_TIMEOUT_MS = 1_500
 const STARTUP_WAIT_MS = 20_000
 const STARTUP_POLL_MS = 250
 const SUPERVISOR_INTERVAL_MS = 15_000
+// How often the supervisor asks whether the server process still exists. It is
+// far shorter than the health-probe interval on purpose: an exited server has
+// to be replaced in about a second, because that is the window in which a
+// client's one and only connect attempt is refused.
+const SUPERVISOR_WATCH_MS = 1_000
 
 function agentplugDir() {
     const override = (process.env.AGENTPLUG_HOME || '').trim()
@@ -189,6 +194,44 @@ export async function ensureHttpSupervisor({ port = defaultHttpPort(), intervalM
     return { port, pid: child.pid ?? null, started: true, reason: 'spawned' }
 }
 
+// The supervisor only exists for as long as whatever started it, and a machine
+// that slept or was logged off comes back with nothing listening on the MCP
+// port -- the exact window in which a Claude Code session connects once, is
+// refused, and then reports the server as disconnected for the rest of its
+// life. So the autostart that brings the supervisor back belongs to the code
+// that needs it rather than to a setup step someone runs once: written on
+// every supervisor start and on every `ensure-http`, hidden, and idempotent,
+// so a deleted or stale entry repairs itself with no manual step.
+export function autostartScriptPath() {
+    const appData = process.env.APPDATA || ''
+    if (!appData) return null
+    return path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'gm-mcp-http-supervise.vbs')
+}
+
+export function installHttpAutostart({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
+    const target = autostartScriptPath()
+    if (!target) return { installed: false, reason: 'APPDATA is not set' }
+    const entry = serverEntryPath()
+    const seconds = Math.max(1, Math.round(intervalMs / 1000))
+    const script = [
+        'Set sh = CreateObject("WScript.Shell")',
+        `sh.CurrentDirectory = "${path.dirname(entry)}"`,
+        `sh.Run """${process.execPath}"" ""${entry}"" http-supervise --port ${port} --interval ${seconds}", 0, False`,
+        '',
+    ].join('\r\n')
+    try {
+        const before = existsSync(target) ? readFileSync(target, 'utf8') : null
+        if (before === script) return { installed: true, path: target, changed: false }
+        mkdirSync(path.dirname(target), { recursive: true })
+        writeFileSync(target, script, 'utf8')
+        appendDiagnostic('http-autostart-installed', { port, path: target })
+        return { installed: true, path: target, changed: true }
+    } catch (error) {
+        appendDiagnostic('http-autostart-install-failed', { port, path: target, error: describeError(error) })
+        return { installed: false, reason: describeError(error) }
+    }
+}
+
 export async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
     const recorded = readSupervisorState(port)
     if (recorded?.pid && recorded.pid !== process.pid && pidAlive(recorded.pid) === true) {
@@ -197,18 +240,37 @@ export async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs =
     }
     keepServingOnAsyncFailure()
     logSignalExits()
+    installHttpAutostart({ port, intervalMs })
     writeSupervisorState({ port, pid: process.pid, url: httpMcpUrl(port), ts: Date.now() })
     appendDiagnostic('http-supervisor-start', { port, pid: process.pid, interval_ms: intervalMs })
+    let serverPid = null
+    let nextProbeAt = 0
     while (true) {
-        const health = await probeHealth(port)
-        if (!health) {
-            const result = await ensureHttpSingleton({ port })
-            appendDiagnostic(result.url ? 'http-supervisor-restarted' : 'http-supervisor-restart-failed', {
-                port,
-                pid: result.pid ?? null,
-                error: result.error ?? null,
-            })
+        // A server that exits between probes used to stay dead for the rest of
+        // the interval, and Claude Code connects to this port exactly once, when
+        // its session starts, and reads a refused connection as a permanent
+        // session-long "gm has disconnected". The window in which nothing
+        // listens is the whole failure, so it is one watch tick (~1 s), not one
+        // poll interval (15 s). The pid is watched between probes because an
+        // exit is visible at once; the probe still runs on its interval because
+        // a server can keep its pid and stop answering.
+        const serverExited = serverPid !== null && pidAlive(serverPid) === false
+        if (Date.now() >= nextProbeAt || serverExited) {
+            const health = await probeHealth(port)
+            if (health) {
+                serverPid = health.pid ?? serverPid
+            } else {
+                const result = await ensureHttpSingleton({ port })
+                appendDiagnostic(result.url ? 'http-supervisor-restarted' : 'http-supervisor-restart-failed', {
+                    port,
+                    pid: result.pid ?? null,
+                    error: result.error ?? null,
+                    noticed_by: serverExited ? 'pid-watch' : 'health-probe',
+                })
+                serverPid = result.pid ?? null
+            }
+            nextProbeAt = Date.now() + intervalMs
         }
-        await new Promise((resolve) => setTimeout(resolve, intervalMs))
+        await new Promise((resolve) => setTimeout(resolve, SUPERVISOR_WATCH_MS))
     }
 }
