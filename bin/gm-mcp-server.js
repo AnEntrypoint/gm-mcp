@@ -38376,8 +38376,11 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
       else resolve(wakeSource);
     };
     const onAbort = () => finish(void 0, new Error("aborted"));
+    const outName = path2.basename(outPath);
     const wake = (_event, filename) => {
-      if (!filename || filename.toString() === path2.basename(outPath)) finish("filesystem_event");
+      if (filename == null) return;
+      const name = filename.toString();
+      if (name === outName || name === `${outName}.ready`) finish("filesystem_event");
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
@@ -38700,6 +38703,8 @@ function queuePressureNote(pressure, queuedPath, stall) {
 }
 var FINAL_OUT_RECHECK_WINDOW_MS = 2500;
 var FINAL_OUT_RECHECK_INTERVAL_MS = 150;
+var OUT_MARKER_GRACE_MS = 60;
+var OUT_READ_ATTEMPTS = 3;
 var STALE_CHROME_SCAN_TIMEOUT_MS = 3e3;
 function staleChromeCount() {
   if (process.platform !== "win32") return null;
@@ -38855,6 +38860,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     startRunnerWatchdog(root);
     if (isPlainText) {
       publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds));
+    } else if (DEADLINE_AWARE_JSON_VERBS.includes(verb)) {
+      const fullBody = { ...normalizedBody, session_id };
+      publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, JSON.stringify(fullBody), timeout_seconds));
     } else {
       const fullBody = { ...normalizedBody, session_id };
       publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody));
@@ -38865,46 +38873,74 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
   const timeoutMs = budget.ms;
   const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1e3);
   const deadline = Date.now() + timeoutMs;
-  const readLandedOutFile = () => {
+  const outMarkerPath = `${outPath}.ready`;
+  const sizeOf = (file2) => {
+    try {
+      return fs.statSync(file2).size;
+    } catch {
+      return null;
+    }
+  };
+  const outFileComplete = async () => {
+    if (fs.existsSync(outMarkerPath)) return true;
+    const first = sizeOf(outPath);
+    if (first === null) return false;
+    await sleep(OUT_MARKER_GRACE_MS).catch(() => {
+    });
+    if (fs.existsSync(outMarkerPath)) return true;
+    return sizeOf(outPath) === first;
+  };
+  const renderLandedOut = (parsed, landedAtMs) => {
+    rememberDeliveredInstructionHash(verb, parsed, root, session_id);
+    const plainTextFile = typeof parsed?.result_file === "string" ? parsed.result_file : void 0;
+    const cleaned = cleanResponse(parsed, void 0, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }));
+    let out = cleaned;
+    if (cleaned && typeof cleaned === "object" && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === "object" && !Array.isArray(cleaned.data)) {
+      const { data, ...rest } = cleaned;
+      const collides = Object.keys(data).some((k) => k in rest);
+      if (!collides) out = { ...rest, ...data };
+    }
+    if (!full_response && carriedNoFailure(out)) out = compactWireResponse(out, outPath);
+    if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs));
+    else out = withDispatchWait(out, Date.now() - callStartedAtMs);
+    if (out && typeof out === "object" && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
+      out = { ...out, instruction_text_at: path2.join(root, ".gm", "next-step.md") };
+    }
+    if (include_timing === true || include_timing === "true") {
+      const timingKey = out && typeof out === "object" && !Array.isArray(out) && "mcp_timing" in out ? "mcp_client_timing" : "mcp_timing";
+      const timing = {
+        submitted_at_ms: callStartedAtMs,
+        response_observed_at_ms: Date.now(),
+        round_trip_ms: Date.now() - callStartedAtMs,
+        response_wakeup: lastWakeSource,
+        daemon_at_submission: readDaemonLiveness(spoolDir)
+      };
+      out = out && typeof out === "object" && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing };
+    }
+    return toYaml(out);
+  };
+  const readLandedOutFile = async () => {
     if (!fs.existsSync(outPath)) return void 0;
+    if (!await outFileComplete()) return void 0;
     let landedAtMs = null;
     try {
       landedAtMs = fs.statSync(outPath).mtimeMs;
     } catch {
       landedAtMs = null;
     }
-    try {
-      const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, "utf8")));
-      rememberDeliveredInstructionHash(verb, parsed, root, session_id);
-      const plainTextFile = typeof parsed?.result_file === "string" ? parsed.result_file : void 0;
-      const cleaned = cleanResponse(parsed, void 0, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }));
-      let out = cleaned;
-      if (cleaned && typeof cleaned === "object" && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === "object" && !Array.isArray(cleaned.data)) {
-        const { data, ...rest } = cleaned;
-        const collides = Object.keys(data).some((k) => k in rest);
-        if (!collides) out = { ...rest, ...data };
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, "utf8")));
+        return renderLandedOut(parsed, landedAtMs);
+      } catch (e) {
+        if (attempt >= OUT_READ_ATTEMPTS) {
+          const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath };
+          return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed);
+        }
+        await sleep(OUT_MARKER_GRACE_MS).catch(() => {
+        });
+        if (!await outFileComplete()) return void 0;
       }
-      if (!full_response && carriedNoFailure(out)) out = compactWireResponse(out, outPath);
-      if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs));
-      else out = withDispatchWait(out, Date.now() - callStartedAtMs);
-      if (out && typeof out === "object" && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
-        out = { ...out, instruction_text_at: path2.join(root, ".gm", "next-step.md") };
-      }
-      if (include_timing === true || include_timing === "true") {
-        const timingKey = out && typeof out === "object" && !Array.isArray(out) && "mcp_timing" in out ? "mcp_client_timing" : "mcp_timing";
-        const timing = {
-          submitted_at_ms: callStartedAtMs,
-          response_observed_at_ms: Date.now(),
-          round_trip_ms: Date.now() - callStartedAtMs,
-          response_wakeup: lastWakeSource,
-          daemon_at_submission: readDaemonLiveness(spoolDir)
-        };
-        out = out && typeof out === "object" && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing };
-      }
-      return toYaml(out);
-    } catch (e) {
-      const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath };
-      return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed);
     }
   };
   const withdrawUnclaimedRequest = () => {
@@ -38931,12 +38967,12 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
   while (true) {
     if (signal?.aborted) return abortedReply();
     ensureSpoolRunnerRunning(root);
-    const landed = readLandedOutFile();
+    const landed = await readLandedOutFile();
     if (landed !== void 0) return landed;
     if (Date.now() >= deadline) {
       const finalRecheckDeadline = Date.now() + FINAL_OUT_RECHECK_WINDOW_MS;
       while (true) {
-        const landedLate = readLandedOutFile();
+        const landedLate = await readLandedOutFile();
         if (landedLate !== void 0) return landedLate;
         if (signal?.aborted) return abortedReply();
         if (Date.now() >= finalRecheckDeadline) break;
@@ -41215,6 +41251,8 @@ function httpListenOptions() {
   return { port: Number.isInteger(port) && port > 0 ? port : DEFAULT_PORT, host: host || DEFAULT_HOST };
 }
 var SERVED_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
+var REQUIRED_ACCEPT_TYPES = ["application/json", "text/event-stream"];
+var SERVED_ACCEPT_HEADER = REQUIRED_ACCEPT_TYPES.join(", ");
 function normalizeProtocolVersion(req) {
   const requested = req.headers["mcp-protocol-version"];
   if (typeof requested !== "string" || SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) return;
@@ -41226,6 +41264,28 @@ function normalizeProtocolVersion(req) {
     }
   }
   appendDiagnostic("http-protocol-version-normalized", { requested, served: SERVED_PROTOCOL_VERSION });
+}
+function acceptNamesBothTypes(value) {
+  if (typeof value !== "string") return false;
+  const lowered = value.toLowerCase();
+  return REQUIRED_ACCEPT_TYPES.every((type) => lowered.includes(type));
+}
+function normalizeAcceptHeader(req) {
+  if (acceptNamesBothTypes(req.headers?.accept)) return;
+  const requested = typeof req.headers?.accept === "string" ? req.headers.accept : null;
+  if (req.headers) req.headers.accept = SERVED_ACCEPT_HEADER;
+  const raw = req.rawHeaders;
+  if (Array.isArray(raw)) {
+    let rewritten = false;
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+      if (typeof raw[i] === "string" && raw[i].toLowerCase() === "accept") {
+        raw[i + 1] = SERVED_ACCEPT_HEADER;
+        rewritten = true;
+      }
+    }
+    if (!rewritten) raw.push("Accept", SERVED_ACCEPT_HEADER);
+  }
+  appendDiagnostic("http-accept-normalized", { requested, served: SERVED_ACCEPT_HEADER });
 }
 function rejectOversizedBody(req, res) {
   if (Number(req.headers["content-length"] || 0) <= MAX_BODY_BYTES) return false;
@@ -41318,6 +41378,7 @@ async function serveMcpRequest(req, res) {
     appendDiagnostic("http-notification-answered-ok", { path: MCP_PATH, bytes: buffer.length });
   }
   normalizeProtocolVersion(req);
+  normalizeAcceptHeader(req);
   const mcp = createServer();
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: void 0,
@@ -41406,6 +41467,17 @@ function healthPayload(port) {
     port
   };
 }
+var LISTEN_FAILURE_REASONS = {
+  EADDRINUSE: (host, port) => `another process already holds ${host}:${port}, so the shared server on that port is serving ${MCP_PATH} without this one`,
+  EACCES: (host, port) => `this process may not bind ${host}:${port}`,
+  EADDRNOTAVAIL: (host) => `${host} is not an address this machine has`,
+  ENOTFOUND: (host) => `${host} does not resolve`
+};
+function describeListenFailure(error61, host, port) {
+  const named = LISTEN_FAILURE_REASONS[error61?.code];
+  const cause = named ? named(host, port) : describeError(error61);
+  return `gm-mcp ${BUNDLE_VERSION}: cannot serve http://${host}:${port}${MCP_PATH} -- ${cause}`;
+}
 async function startHttpServer({ port, host } = {}) {
   keepServingOnAsyncFailure();
   logSignalExits();
@@ -41445,13 +41517,19 @@ async function startHttpServer({ port, host } = {}) {
   server.on("clientError", (_error, socket) => {
     socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
   });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, host, () => {
-      server.removeListener("error", reject);
-      resolve();
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(port, host, () => {
+        server.removeListener("error", reject);
+        resolve();
+      });
     });
-  });
+  } catch (error61) {
+    process.stderr.write(`${describeListenFailure(error61, host, port)}
+`);
+    throw error61;
+  }
   const heartbeat = setInterval(() => {
     appendDiagnostic("http-heartbeat", {
       port,

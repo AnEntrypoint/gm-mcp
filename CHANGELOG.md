@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased - a POST naming one Accept type is answered, not refused with 406
+
+Measured 2026-10-07 against the shared server on 8787: a POST whose `Accept`
+names only `application/json`, only `text/event-stream`, or nothing at all is
+answered `406` with the JSON-RPC body `{"code":-32000,"message":"Not Acceptable:
+Client must accept both application/json and text/event-stream"}`. That is the
+same shape as the `-32700` this transport already refuses to send -- a non-200
+carrying a JSON-RPC error object, which an MCP client may read as fatal and turn
+into a whole-session disconnect. `gm-mcp-http-8787.log` at
+2026-10-07T16:52:08.448Z is one real request it answered that way, raised as
+`http-transport-error` by the bundled SDK's `handlePostRequest`.
+
+- `serveMcpRequest` rewrites `Accept` to `application/json, text/event-stream`
+  when the request's own does not name both types, in `headers` and in
+  `rawHeaders` alike, the way `mcp-protocol-version` is already normalized. A
+  client that asks for one type, or names none, is asking for whatever the
+  server has, not for the session to end.
+- every rewrite is recorded as `http-accept-normalized` with the requested and
+  served values.
+
+A server that cannot bind its port now names why on stderr -- `gm-mcp 0.2.8:
+cannot serve http://127.0.0.1:8899/mcp -- another process already holds
+127.0.0.1:8899, so the shared server on that port is serving /mcp without this
+one` -- instead of exiting on a bare `EADDRINUSE` stack, so a held port never
+reads as gm-mcp dying for no reason.
+
+BUNDLE_VERSION 0.2.8, deployed to `~/.gm-tools/gm-mcp-server.mjs` (sha256
+cabbe94e79b1674f6ba1c0a6888b4866747d7386602b743bc9455b2e5d13ffe3) and pinned as
+a local build there.
+
 ## Unreleased - the supervisor is started by Task Scheduler, not by the session that asked
 
 Measured 2026-10-07 on 8787: three supervisor + server pairs started inside a

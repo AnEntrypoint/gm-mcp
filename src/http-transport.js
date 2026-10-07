@@ -56,6 +56,9 @@ export function httpListenOptions() {
 // Speak the newest version we do support instead of refusing the request.
 const SERVED_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 
+const REQUIRED_ACCEPT_TYPES = ['application/json', 'text/event-stream']
+const SERVED_ACCEPT_HEADER = REQUIRED_ACCEPT_TYPES.join(', ')
+
 function normalizeProtocolVersion(req) {
     const requested = req.headers['mcp-protocol-version']
     if (typeof requested !== 'string' || SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) return
@@ -69,6 +72,30 @@ function normalizeProtocolVersion(req) {
         }
     }
     appendDiagnostic('http-protocol-version-normalized', { requested, served: SERVED_PROTOCOL_VERSION })
+}
+
+function acceptNamesBothTypes(value) {
+    if (typeof value !== 'string') return false
+    const lowered = value.toLowerCase()
+    return REQUIRED_ACCEPT_TYPES.every((type) => lowered.includes(type))
+}
+
+function normalizeAcceptHeader(req) {
+    if (acceptNamesBothTypes(req.headers?.accept)) return
+    const requested = typeof req.headers?.accept === 'string' ? req.headers.accept : null
+    if (req.headers) req.headers.accept = SERVED_ACCEPT_HEADER
+    const raw = req.rawHeaders
+    if (Array.isArray(raw)) {
+        let rewritten = false
+        for (let i = 0; i + 1 < raw.length; i += 2) {
+            if (typeof raw[i] === 'string' && raw[i].toLowerCase() === 'accept') {
+                raw[i + 1] = SERVED_ACCEPT_HEADER
+                rewritten = true
+            }
+        }
+        if (!rewritten) raw.push('Accept', SERVED_ACCEPT_HEADER)
+    }
+    appendDiagnostic('http-accept-normalized', { requested, served: SERVED_ACCEPT_HEADER })
 }
 
 function rejectOversizedBody(req, res) {
@@ -213,6 +240,7 @@ async function serveMcpRequest(req, res) {
         appendDiagnostic('http-notification-answered-ok', { path: MCP_PATH, bytes: buffer.length })
     }
     normalizeProtocolVersion(req)
+    normalizeAcceptHeader(req)
     const mcp = createServer()
     // No session id is ever issued, so there is no session state to expire and
     // none to reap: `validateSession` returns at once for a stateless transport,
@@ -309,6 +337,19 @@ export function healthPayload(port) {
     }
 }
 
+const LISTEN_FAILURE_REASONS = {
+    EADDRINUSE: (host, port) => `another process already holds ${host}:${port}, so the shared server on that port is serving ${MCP_PATH} without this one`,
+    EACCES: (host, port) => `this process may not bind ${host}:${port}`,
+    EADDRNOTAVAIL: (host) => `${host} is not an address this machine has`,
+    ENOTFOUND: (host) => `${host} does not resolve`,
+}
+
+export function describeListenFailure(error, host, port) {
+    const named = LISTEN_FAILURE_REASONS[error?.code]
+    const cause = named ? named(host, port) : describeError(error)
+    return `gm-mcp ${BUNDLE_VERSION}: cannot serve http://${host}:${port}${MCP_PATH} -- ${cause}`
+}
+
 // Stateless: no session id, so a client that drops its connection and comes
 // back is just another request. Nothing here is tied to a client's lifetime,
 // which is the whole reason this transport survives what kills stdio.
@@ -356,13 +397,18 @@ export async function startHttpServer({ port, host } = {}) {
         socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
     })
 
-    await new Promise((resolve, reject) => {
-        server.once('error', reject)
-        server.listen(port, host, () => {
-            server.removeListener('error', reject)
-            resolve()
+    try {
+        await new Promise((resolve, reject) => {
+            server.once('error', reject)
+            server.listen(port, host, () => {
+                server.removeListener('error', reject)
+                resolve()
+            })
         })
-    })
+    } catch (error) {
+        process.stderr.write(`${describeListenFailure(error, host, port)}\n`)
+        throw error
+    }
 
     // A client that stops talking looks exactly like a server that died from the
     // outside. Say, on a slow loop, that this process is up and how long it has
