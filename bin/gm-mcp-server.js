@@ -41547,7 +41547,7 @@ async function startHttpServer({ port, host } = {}) {
 
 // src/singleton.js
 import { spawn as spawn2, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import path3 from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41682,7 +41682,7 @@ function supervisorIntervalMs() {
   return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1e3) : SUPERVISOR_INTERVAL_MS;
 }
 function supervisorEnabled() {
-  return (process.env.GM_MCP_HTTP_SUPERVISOR || "").trim() !== "0";
+  return (process.env.GM_MCP_HTTP_SUPERVISOR || "").trim() === "1";
 }
 function readSupervisorState(port) {
   try {
@@ -41705,32 +41705,12 @@ function supervisorRunning(state, now = Date.now()) {
   if (!state?.pid || pidAlive(state.pid) !== true) return false;
   return typeof state.ts === "number" && now - state.ts < SUPERVISOR_STATE_STALE_MS;
 }
-function startSupervisorViaTask({ port }) {
-  if (process.platform !== "win32") return null;
-  if ((process.env.GM_MCP_HTTP_AUTOSTART_TASK || "").trim() === "0") return null;
-  const task = supervisorTaskName(port);
-  const query = spawnSync("schtasks", ["/query", "/tn", task], { encoding: "utf8", windowsHide: true });
-  if (query.error || query.status !== 0) {
-    const created = installHttpScheduledTask({ port });
-    if (!created.installed) return null;
-  }
-  const run = spawnSync("schtasks", ["/run", "/tn", task], { encoding: "utf8", windowsHide: true });
-  if (run.error || run.status !== 0) {
-    const reason = run.error?.message || (run.stderr || "").trim() || `schtasks /run exited ${run.status}`;
-    appendDiagnostic("http-supervisor-task-run-refused", { port, task, error: reason });
-    return { port, pid: null, started: false, reason: "task-already-running" };
-  }
-  appendDiagnostic("http-supervisor-task-run", { port, task });
-  return { port, pid: null, started: true, reason: "task-run" };
-}
 async function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
   if (!supervisorEnabled()) return { port, pid: null, started: false, reason: "disabled" };
   const recorded = readSupervisorState(port);
   if (supervisorRunning(recorded)) {
     return { port, pid: recorded.pid, started: false, reason: "already-running" };
   }
-  const viaTask = startSupervisorViaTask({ port });
-  if (viaTask) return viaTask;
   const child = spawn2(process.execPath, [serverEntryPath(), "http-supervise", "--port", String(port), "--interval", String(Math.round(intervalMs / 1e3))], {
     cwd: homedir2(),
     detached: true,
@@ -41752,55 +41732,27 @@ function autostartScriptPath() {
   if (!appData) return null;
   return path3.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "gm-mcp-http-supervise.vbs");
 }
-function installHttpAutostart({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
-  const target = autostartScriptPath();
-  if (!target) return { installed: false, reason: "APPDATA is not set" };
-  const entry = serverEntryPath();
-  const seconds = Math.max(1, Math.round(intervalMs / 1e3));
-  const script = [
-    'Set sh = CreateObject("WScript.Shell")',
-    `sh.CurrentDirectory = "${path3.dirname(entry)}"`,
-    `sh.Run """${process.execPath}"" ""${entry}"" http-supervise --port ${port} --interval ${seconds}", 0, False`,
-    ""
-  ].join("\r\n");
-  try {
-    const before = existsSync(target) ? readFileSync2(target, "utf8") : null;
-    if (before === script) return { installed: true, path: target, changed: false };
-    mkdirSync2(path3.dirname(target), { recursive: true });
-    writeFileSync2(target, script, "utf8");
-    appendDiagnostic("http-autostart-installed", { port, path: target });
-    return { installed: true, path: target, changed: true };
-  } catch (error61) {
-    appendDiagnostic("http-autostart-install-failed", { port, path: target, error: describeError(error61) });
-    return { installed: false, reason: describeError(error61) };
-  }
-}
-var AUTOSTART_TASK_MINUTES = 1;
 function supervisorTaskName(port = defaultHttpPort()) {
   return `gm-mcp-http-supervise-${port}`;
 }
-function installHttpScheduledTask({ port = defaultHttpPort() } = {}) {
-  if (process.platform !== "win32") return { installed: false, reason: "the task re-arm is a Windows restarter" };
-  if ((process.env.GM_MCP_HTTP_AUTOSTART_TASK || "").trim() === "0") return { installed: false, reason: "disabled by GM_MCP_HTTP_AUTOSTART_TASK=0" };
-  const task = supervisorTaskName(port);
-  const entry = serverEntryPath();
-  const command2 = `"${process.execPath}" "${entry}" http-supervise --port ${port} --interval ${Math.round(supervisorIntervalMs() / 1e3)}`;
-  try {
-    const result = spawnSync("schtasks", ["/create", "/tn", task, "/tr", command2, "/sc", "MINUTE", "/mo", String(AUTOSTART_TASK_MINUTES), "/f"], {
-      encoding: "utf8",
-      windowsHide: true
-    });
-    if (result.error || result.status !== 0) {
-      const reason = result.error?.message || (result.stderr || "").trim() || `schtasks exited ${result.status}`;
-      appendDiagnostic("http-autostart-task-install-failed", { port, task, error: reason });
-      return { installed: false, reason };
+function removeHttpAutostart({ port = defaultHttpPort() } = {}) {
+  const removed = [];
+  const target = autostartScriptPath();
+  if (target && existsSync(target)) {
+    try {
+      unlinkSync(target);
+      removed.push(target);
+    } catch (error61) {
+      appendDiagnostic("http-autostart-remove-failed", { port, path: target, error: describeError(error61) });
     }
-    appendDiagnostic("http-autostart-task-installed", { port, task, minutes: AUTOSTART_TASK_MINUTES });
-    return { installed: true, task, minutes: AUTOSTART_TASK_MINUTES };
-  } catch (error61) {
-    appendDiagnostic("http-autostart-task-install-failed", { port, task, error: describeError(error61) });
-    return { installed: false, reason: describeError(error61) };
   }
+  if (process.platform === "win32") {
+    const task = supervisorTaskName(port);
+    const result = spawnSync("schtasks", ["/delete", "/tn", task, "/f"], { encoding: "utf8", windowsHide: true });
+    if (!result.error && result.status === 0) removed.push(`task:${task}`);
+  }
+  if (removed.length) appendDiagnostic("http-autostart-removed", { port, removed });
+  return { removed };
 }
 async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
   const recorded = readSupervisorState(port);
@@ -41810,8 +41762,7 @@ async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = superv
   }
   keepServingOnAsyncFailure();
   logSignalExits();
-  installHttpAutostart({ port, intervalMs });
-  installHttpScheduledTask({ port });
+  removeHttpAutostart({ port });
   writeSupervisorState({ port, pid: process.pid, url: httpMcpUrl(port), ts: Date.now() });
   appendDiagnostic("http-supervisor-start", { port, pid: process.pid, interval_ms: intervalMs });
   let serverPid = null;
@@ -41856,7 +41807,7 @@ async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = superv
 // src/self-update.js
 import { createHash } from "node:crypto";
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { copyFileSync, existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, realpathSync, renameSync, rmSync, statSync as statSync2, unlinkSync, utimesSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { copyFileSync, existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, realpathSync, renameSync, rmSync, statSync as statSync2, unlinkSync as unlinkSync2, utimesSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import path4 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -42030,7 +41981,7 @@ function replaceDeployedBundle(deployedPath, bytes) {
     copyFileSync(deployedPath, `${deployedPath}.prev`);
     renameSync(candidatePath, deployedPath);
   } catch (error61) {
-    if (existsSync2(candidatePath)) unlinkSync(candidatePath);
+    if (existsSync2(candidatePath)) unlinkSync2(candidatePath);
     throw error61;
   }
 }
@@ -42089,7 +42040,7 @@ function wantsHttpTransport() {
   return (process.env.GM_MCP_TRANSPORT || "").trim().toLowerCase() === "http";
 }
 function seedHttpSingletonInBackground() {
-  if ((process.env.GM_MCP_HTTP_SINGLETON || "").trim() === "0") return;
+  if ((process.env.GM_MCP_HTTP_SINGLETON || "").trim() !== "1") return;
   ensureHttpSingleton().then((result) => {
     if (result?.url) return;
   }).catch(() => {
@@ -42285,13 +42236,11 @@ var COMMANDS = {
       console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.error}`);
       return 1;
     }
-    const autostart = installHttpAutostart({ port });
+    const cleanup = removeHttpAutostart({ port });
     const supervisor = await ensureHttpSupervisor({ port });
-    const task = installHttpScheduledTask({ port });
     console.log(`gm-mcp ${BUNDLE_VERSION}: ${result.reused ? "reusing" : "started"} the shared HTTP server (pid ${result.pid}) -- ${result.url}`);
-    console.log(`gm-mcp ${BUNDLE_VERSION}: supervisor ${supervisor.reason} (pid ${supervisor.pid ?? "none"}) -- restarts the server when it stops answering`);
-    console.log(`gm-mcp ${BUNDLE_VERSION}: autostart ${autostart.installed ? autostart.changed ? "written" : "already current" : `skipped (${autostart.reason})`} -- ${autostart.path ?? "none"}`);
-    console.log(`gm-mcp ${BUNDLE_VERSION}: task ${task.installed ? `${task.task} every ${task.minutes} min` : `skipped (${task.reason})`} -- restarts the supervisor when nothing else can`);
+    console.log(`gm-mcp ${BUNDLE_VERSION}: supervisor ${supervisor.reason} (pid ${supervisor.pid ?? "none"}) -- set GM_MCP_HTTP_SUPERVISOR=1 to have one restart the server`);
+    if (cleanup.removed.length) console.log(`gm-mcp ${BUNDLE_VERSION}: removed leftover autostart ${cleanup.removed.join(", ")}`);
     return 0;
   },
   "http-status": async () => {

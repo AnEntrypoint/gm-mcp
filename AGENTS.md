@@ -52,14 +52,12 @@ what README does not.
   `StreamableHTTPServerTransport` per request; do not hoist them back out to
   save a millisecond. Registering it is `claude mcp add --transport http gm
   http://127.0.0.1:8787/mcp -s user`.
-- **The supervisor has to be started by Task Scheduler, not by whoever asked
-  for it.** `ensureHttpSupervisor` spawning a detached child still makes that
-  child part of the caller's tree, and a stdio server seeding the singleton, the
-  `--http` server, and the supervisor it arms all die in one teardown -- which
-  leaves the port empty until the next task tick. So on Windows the supervisor
-  is started with `schtasks /run /tn gm-mcp-http-supervise-<port>`: the
-  scheduler host parents it, and no session exit reaches it. Off Windows, and
-  with `GM_MCP_HTTP_AUTOSTART_TASK=0`, it falls back to the detached spawn.
+- **Nothing gm starts persists by default.** The supervisor and the stdio
+  server's seeding of the shared HTTP server are opt-in (`GM_MCP_HTTP_SUPERVISOR=1`,
+  `GM_MCP_HTTP_SINGLETON=1`). No logon Startup script and no Task Scheduler job is
+  ever installed; earlier builds installed both, and a per-minute task running raw
+  `node.exe` opened a visible console every minute. `removeHttpAutostart` deletes
+  those leftovers on every `ensure-http` and supervisor start.
 - **A 202 on `notifications/initialized` is the dropout.** The SDK's HTTP client
   reads 202 for that one notification as "accepted, I will push to you later" and
   then opens a standalone `GET /mcp` SSE stream (`_startOrAuthSse`) and holds it
@@ -101,8 +99,8 @@ what README does not.
   is now refreshed every `SUPERVISOR_STATE_BEAT_MS` (15 s) and trusted only
   within `SUPERVISOR_STATE_STALE_MS` (60 s); a supervisor that finds another pid
   owning its port exits (`http-supervisor-superseded`) rather than supervising
-  twice. Consequence: `ensure-http` re-arms a genuinely dead supervisor within
-  one server re-arm tick (5 min) instead of never.
+  twice. Consequence: with `GM_MCP_HTTP_SUPERVISOR=1`, a genuinely dead
+  supervisor is re-armed within one server re-arm tick (5 min).
 - **Runner recovery.** The daemon exits on purpose and depends on this file to
   bring it back: it self-recycles when idle or over its wasm memory ceiling
   (`self-recycling after 3600000ms fully idle ... next real dispatch spawns a

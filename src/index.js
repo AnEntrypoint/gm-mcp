@@ -20,13 +20,10 @@ export function wantsHttpTransport() {
     return (process.env.GM_MCP_TRANSPORT || '').trim().toLowerCase() === 'http'
 }
 
-// A stdio server is owned by the client that spawned it: when that one pipe
-// goes away the tool is gone for the whole session and nothing can re-attach
-// it. Seeding the shared HTTP singleton here means the durable transport is
-// up before any client asks for it, so switching the registration over is a
-// one-liner with nothing to install.
+// Opt-in (GM_MCP_HTTP_SINGLETON=1): seeding starts a detached HTTP server that
+// outlives the session, so a plain stdio session never leaves one behind.
 function seedHttpSingletonInBackground() {
-    if ((process.env.GM_MCP_HTTP_SINGLETON || '').trim() === '0') return
+    if ((process.env.GM_MCP_HTTP_SINGLETON || '').trim() !== '1') return
     ensureHttpSingleton()
         .then((result) => {
             if (result?.url) return
