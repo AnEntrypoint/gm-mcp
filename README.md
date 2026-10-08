@@ -15,8 +15,8 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
   - hit-array ranking internals (`cos`/`recency` in `recall_hits`/`bm25_hits`/`vector_hits`/`commits`) dropped, `score` retained as ranked evidence
   - byte-identical object rows repeated inside one array collapsed to the first copy
   - empty/null/empty-string fields removed at every level, except an empty result list (`edges`, `reachable`, `reached`, `callees`, `functions`, `matches`, `definitions`, `references`), which stays as `[]` so "nothing found" reads as an answer rather than a missing field; and a `false` on a flag whose only meaning is the absence of a problem (`session_mismatch`, `instruction_unchanged`, `instruction_suppressible_by_asserting_hash`, `recall_embed_failed`, `should_residual_scan`, `fsm_graph_rejected`)
-- A successful response omits the spool file paths entirely (the caller already knows verb/cwd); they only appear on timeout/abort/error, to say where to look
-- Supports plain-text-body verbs (`exec_js` and every language stem it backs, `serp`, `browser`, `cdp`) via a `raw_body` string parameter (a string `body`, or a `body` object with exactly one string field among `code`/`script`/`command`/`source`/`text`, is accepted as the same text), since these verbs reject a JSON-object body outright
+- Spool paths appear on timeout/abort/error or when compaction points to the original payload; other successful responses omit them (the caller already knows verb/cwd).
+- Supports plain-text-body verbs (`exec_js` and every language stem it backs) via a `raw_body` string parameter (a string `body`, or a `body` object with exactly one string field among `code`/`script`/`command`/`source`/`text`, is accepted as the same text), since these verbs reject a JSON-object body outright
 - Adds a `timeoutMs=<ms>` first line to an exec-family `raw_body` that has none, derived from `timeout_seconds` (see "Exec-family timeout prefix" below)
 
 ## Usage
@@ -100,9 +100,18 @@ systemd unit and no long-lived launcher to check.
 Restart it by hand for one project with the same command the server uses --
 the `spool` launcher detaches `agentplug-runner daemon` for that root:
 
+On Windows:
+
+```powershell
+cd C:/dev/mc-420
+& "$HOME/.gm-tools/agentplug-runner.exe" spool
+```
+
+On Unix:
+
 ```bash
-cd C:/dev/mc-420 && "$HOME/.gm-tools/agentplug-runner.exe" spool   # Windows
-cd ~/my/project && ~/.gm-tools/agentplug-runner spool               # Unix
+cd ~/my/project
+~/.gm-tools/agentplug-runner spool
 ```
 
 A cold start compiles wasm for tens of seconds before it claims its first
@@ -191,9 +200,12 @@ State, both under `~/.agentplug` (`$AGENTPLUG_HOME` moves it): `gm-mcp-http.json
 `bin/gm-mcp-server.js` is a committed build artifact, not hand-edited source --
 edit `src/index.js`/`src/dispatch.js`/`src/cli.js` instead, then rebuild:
 
+Install development dependencies, then bundle `src/cli.js` into the committed
+runtime artifact:
+
 ```bash
-npm install   # pulls the real deps into devDependencies for the build only
-npm run build # bundles src/cli.js -> bin/gm-mcp-server.js, no runtime deps left
+npm install
+npm run build
 ```
 
 Rebuilding is not cosmetic: the bundle carries the tool's `inputSchema`, and
@@ -206,9 +218,11 @@ written with an empty body, and the caller got the resumed verb's own
 body-validation error (`query required`) with nothing pointing at the stale
 bundle. Rebuild in the same commit as any `src/` change.
 
-`npm run verify-build` rebuilds `src/` into a scratch buffer and fails if it
-differs from the committed `bin/gm-mcp-server.js`, naming the byte-count
-mismatch. `npm install` points this checkout's git hooks at `.githooks/`
+`npm run build` and `verify-build` share `scripts/build.mjs`, whose version banner
+comes from `src/bundle-version.js` and remains readable by the updater after
+minification. `verify-build` rebuilds into memory, checks that production parser
+against the source version, and fails on committed-bundle byte drift.
+`npm install` points this checkout's git hooks at `.githooks/`
 (`core.hooksPath`, local to this checkout, never committed) so `pre-push` runs
 it automatically and blocks a push carrying a stale bundle.
 
@@ -232,7 +246,7 @@ at launch time.
 | `body` | object | no | JSON body for the dispatch (not valid for plain-text-body verbs) |
 | `raw_body` | string | no | Literal text body for a plain-text-body verb, mutually exclusive with `body` |
 | `cwd` | string | no | Project root containing `.gm/exec-spool` -- defaults to `process.cwd()` |
-| `timeout_seconds` | number | no | Give up polling and return `timed_out:true` after this many seconds. Default 120, or for an exec-family `raw_body` that starts with `timeoutMs=<ms>`, that value plus 5 s. An explicit value always wins. |
+| `timeout_seconds` | number | no | Requested poll budget. Default 120, or an exec-family `timeoutMs` prefix plus 5 s. Explicit values override that request; every call is capped at 240 s and returns a resumable task if still pending. |
 | `poll_interval_seconds` | number | no | Fallback response check interval when filesystem events are unavailable (default 0.25) |
 | `include_timing` | boolean | no | Include MCP submission-to-response timing and the last response wakeup source |
 | `resume_task` | string | no | The `task` field from a previous `timed_out`/aborted response -- keep polling that SAME dispatch instead of writing a new one |
@@ -258,7 +272,28 @@ wire_compacted:
 
 Long prose is cut to a 160-char excerpt ending in `...+<n>`, so an abbreviated
 field always says how much is missing. `full_response: true` returns the
-pre-compaction payload byte for byte.
+original guest fields and data layout, including `dispatch_id` and
+`request_fingerprint`, without cleaning or compaction. MCP wait and resume
+metadata remains separate.
+
+`phase_history` retains the newest five transitions in its existing order. The
+`wire_compacted.shortened` entry records retained/total counts and points to the
+unchanged out-file. Current phase, gate decisions, session mismatch, PRD counts,
+and failure payloads are not shortened. Use `full_response: true` for all history.
+
+Committed `git_commit` and `git_finalize` successes retain at most five received
+examples in `excluded` and `excluded_but_dirty`. Metadata records received-array
+counts, not repository totals: five of 50 examples remains `5/50` even when
+`excluded_count` is 193. Native totals, truncation counts, requested paths, commit
+SHA and authors stay unchanged. The original out-file and `full_response: true`
+recover all received examples; failures, refusals and uncommitted receipts bypass
+this shortening.
+
+Successful exhaustive `output_mode: count` replies omit `output` only when every
+entry exactly repeats its corresponding structured `counts` row as `path:count`.
+All count rows, totals and scan metadata remain unchanged. The original out-file
+and `full_response: true` retain the repeated array; incomplete, failed and
+nonmatching replies keep it.
 
 ### Long text inline limits
 
@@ -270,7 +305,7 @@ pointer. They are read once at server start, so a host must restart its
 | Env var | Applies to | Default | Ceiling |
 |---|---|---|---|
 | `GM_MCP_LONG_TEXT_INLINE_MAX` | every long text field, including `instruction`'s phase prose | `400` | `1048576` |
-| `GM_MCP_STDOUT_INLINE_MAX` | the whole response of a plain-text-body verb (`exec_js` and every language stem it backs, `serp`, `browser`, `cdp`) | `32768` | `1048576` |
+| `GM_MCP_STDOUT_INLINE_MAX` | the whole response of a plain-text-body verb (`exec_js` and every language stem it backs) | `32768` | `1048576` |
 | `GM_MCP_FILE_READ_INLINE_MAX` | the file body `fs_read` returns | `65536` | `1048576` |
 | `GM_MCP_NO_SELF_UPDATE` | any value but `0`/`false`/`no`/`off` freezes the deployed bundle against every self-update | unset | -- |
 
@@ -295,9 +330,9 @@ knob in the `mcpServers.gm` entry:
 
 Non-numeric, zero or negative values fall back to the default. `max_chars` is
 the per-dispatch override of all three: it is an MCP argument, so it never
-reaches the verb's own body. `full_response: true` lifts the text cap to the
-ceiling as well as skipping wire compaction, so it really does return every
-field verbatim.
+reaches the verb's own body. `full_response: true` bypasses text caps, cleaning, data flattening and
+wire compaction. The original response file remains subject to the bounded
+4 MiB read limit.
 
 Measure it against any real dispatch:
 
@@ -321,14 +356,14 @@ For these verbs the server adds the line itself when `raw_body` lacks one:
 - the value is `timeout_seconds * 1000` (default 300000), floored at 100
 - a `raw_body` that already starts with `timeoutMs=<ms>` or `timeout_ms=<ms>`
   (leading whitespace allowed) is sent unchanged -- an explicit line wins
-- `serp`, `browser` and `cdp` are not touched; they take a `timeout=<ms>`
-  line and carry their own default
 
-The prefix is the process budget the daemon enforces; `timeout_seconds` is how
-long this wrapper polls. When only the prefix is given, the wrapper polls for
-the prefix plus 5 s, so a `timeoutMs=240000` body is awaited for 245 s. When
-both are given, `timeout_seconds` wins for the poll: a shorter value returns
-`timed_out:true` with a `task` to `resume_task`, a longer one just waits. Because
+The prefix is the process budget the daemon enforces; `timeout_seconds` requests
+the wrapper's poll budget. Without an explicit poll value, an exec prefix requests
+its duration plus 5 s, with a 120 s minimum. Every initial or resume call is capped
+at 240 s so it can return before a 300 s client transport deadline. A pending reply
+reports `poll_timeout_ms`, `requested_poll_timeout_ms`, `poll_timeout_capped`,
+and the original `task` and spool paths. Resume that same task without a body;
+poll expiration neither stops execution nor queues another dispatch. Because
 the daemon kills the child at `timeoutMs`, an abandoned call never leaves a
 runaway process: it ends at the limit. An aborted call also withdraws its
 request from the spool when the daemon has not claimed it yet

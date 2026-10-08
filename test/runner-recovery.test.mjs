@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { liveDaemonSweepsProject, pidAlive, recordRunnerEnsureInflight, runnerEnsureInFlight } from '../src/dispatch.js'
+import { launcherLockMayBeReclaimed, liveDaemonSweepsProject, pidAlive, recordRunnerEnsureInflight, runnerEnsureInFlight } from '../src/dispatch.js'
 
 let passed = 0
 function test(name, fn) {
@@ -19,12 +19,6 @@ function test(name, fn) {
 }
 
 const scratch = mkdtempSync(path.join(tmpdir(), 'gm-runner-recovery-'))
-const sharedDir = path.join(scratch, 'agentplug')
-mkdirSync(sharedDir, { recursive: true })
-process.env.GM_MCP_AGENTPLUG_DIR = sharedDir
-const sharedStatusPath = path.join(sharedDir, 'daemon-status.json')
-const writeSharedStatus = (status) => writeFileSync(sharedStatusPath, JSON.stringify(status))
-const clearSharedStatus = () => rmSync(sharedStatusPath, { force: true })
 const spool = (name) => {
     const dir = path.join(scratch, name, '.gm', 'exec-spool')
     mkdirSync(dir, { recursive: true })
@@ -54,7 +48,6 @@ test('a fresh heartbeat from a live daemon is a live sweeper', () => {
 })
 
 test('a stale heartbeat from a live daemon is not a live sweeper', () => {
-    clearSharedStatus()
     const dir = spool('stale-heartbeat')
     writeStatus(dir, { pid: process.pid, ts: Date.now() - 60_000 })
     assert.equal(liveDaemonSweepsProject(dir), false)
@@ -64,8 +57,7 @@ test('a project with no status.json is the registration path, not a live sweeper
     assert.equal(liveDaemonSweepsProject(spool('never-swept')), false)
 })
 
-test('with no pid and no shared daemon status, the project heartbeat decides', () => {
-    clearSharedStatus()
+test('a status.json without a pid falls back to the heartbeat', () => {
     const dir = spool('no-pid')
     writeStatus(dir, { ts: Date.now() })
     assert.equal(liveDaemonSweepsProject(dir), true)
@@ -73,16 +65,12 @@ test('with no pid and no shared daemon status, the project heartbeat decides', (
     assert.equal(liveDaemonSweepsProject(dir), false)
 })
 
-test('a stale project heartbeat is still a live sweeper while the shared daemon is fresh', () => {
-    const dir = spool('stale-heartbeat-shared-fresh')
-    writeStatus(dir, { pid: process.pid, ts: Date.now() - 60_000 })
-    writeSharedStatus({ pid: process.pid, ts: Date.now() })
-    assert.equal(liveDaemonSweepsProject(dir), true)
-    writeSharedStatus({ pid: exitedPid, ts: Date.now() })
-    assert.equal(liveDaemonSweepsProject(dir), false)
-    writeSharedStatus({ pid: process.pid, ts: Date.now() - 60_000 })
-    assert.equal(liveDaemonSweepsProject(dir), false)
-    clearSharedStatus()
+test('a stale launcher lock held by a live process is never reclaimed', () => {
+    assert.equal(launcherLockMayBeReclaimed({ pid: process.pid, ts: Date.now() - 121_000 }), false)
+})
+
+test('a launcher lock held by an exited process is reclaimable', () => {
+    assert.equal(launcherLockMayBeReclaimed({ pid: exitedPid, ts: Date.now() }), true)
 })
 
 test('no runner ensure recorded is not in flight', () => {
