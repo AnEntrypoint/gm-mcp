@@ -1,6 +1,7 @@
 import fs from 'node:fs'
-import { main } from './index.js'
+import { main, flagValue } from './index.js'
 import { gmDispatch } from './dispatch.js'
+import { runDevSync } from './dev-sync.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
 import { defaultHttpPort, ensureHttpSingleton, httpMcpUrl, probeHealth } from './singleton.js'
@@ -172,6 +173,11 @@ const COMMANDS = {
     },
     'self-update-status': () => {
         console.log(JSON.stringify(selfUpdateStatus(), null, 2))
+        return 0
+    },
+    'dev-sync': async () => {
+        const report = runDevSync(flagValue('root') || process.cwd())
+        console.log(JSON.stringify(report, null, 2))
         return 0
     },
     'ensure-http': async () => {
