@@ -24,7 +24,7 @@ const BUNDLE_VERSION_ASSIGNMENT = /BUNDLE_VERSION\s*=\s*["']([^"']+)["']/
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const shortHash = (hex) => hex.slice(0, 12)
 
-function toolsDir() {
+export function toolsDir() {
     return path.resolve(process.env.GM_TOOLS_DIR?.trim() || path.join(homedir(), '.gm-tools'))
 }
 
@@ -32,7 +32,7 @@ function defaultDeployedPath() {
     return path.join(toolsDir(), DEPLOYED_BUNDLE_FILE_NAME)
 }
 
-function agentplugDir() {
+export function agentplugDir() {
     const override = (process.env.AGENTPLUG_HOME || '').trim()
     return override ? path.resolve(override) : path.join(homedir(), '.agentplug')
 }
