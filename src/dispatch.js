@@ -487,8 +487,11 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
             else resolve(wakeSource)
         }
         const onAbort = () => finish(undefined, new Error('aborted'))
+        const outName = path.basename(outPath)
         const wake = (_event, filename) => {
-            if (!filename || filename.toString() === path.basename(outPath)) finish('filesystem_event')
+            if (filename == null) return
+            const name = filename.toString()
+            if (name === outName || name === `${outName}.ready`) finish('filesystem_event')
         }
         signal?.addEventListener('abort', onAbort, { once: true })
         try {
@@ -915,6 +918,13 @@ function queuePressureNote(pressure, queuedPath, stall) {
 const FINAL_OUT_RECHECK_WINDOW_MS = 2500
 const FINAL_OUT_RECHECK_INTERVAL_MS = 150
 
+// write_spool_out_confirmed renames the body into place and then drops the zero-byte
+// <out>.ready marker, so the marker -- not the .json's own existence -- is what says the
+// bytes are all down. Wait that long for it before trusting the file; a writer that never
+// publishes a marker still shows up as a size that stopped growing.
+const OUT_MARKER_GRACE_MS = 60
+const OUT_READ_ATTEMPTS = 3
+
 const STALE_CHROME_SCAN_TIMEOUT_MS = 3000
 
 // A completed dispatch that still reads as a timeout is nearly always a starved
@@ -1105,6 +1115,15 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         startRunnerWatchdog(root)
         if (isPlainText) {
             publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds))
+        } else if (DEADLINE_AWARE_JSON_VERBS.includes(verb)) {
+            // plugkit strips a leading timeoutMs=<n>\n directive off a JSON body before
+            // parsing it (strip_timeout_ms_prefix_directive) and feeds it to
+            // caller_remaining_ms(), which is how these verbs decide whether to index and
+            // run both search channels or answer with what they have. Sent as JSON only they
+            // never learn the caller's budget, so they index to their own internal budgets
+            // and answer long after the caller stopped waiting.
+            const fullBody = { ...normalizedBody, session_id }
+            publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, JSON.stringify(fullBody), timeout_seconds))
         } else {
             const fullBody = { ...normalizedBody, session_id }
             publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody))
@@ -1118,46 +1137,76 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const deadline = Date.now() + timeoutMs
 
 
-    const readLandedOutFile = () => {
+    const outMarkerPath = `${outPath}.ready`
+
+    const sizeOf = (file) => {
+        try {
+            return fs.statSync(file).size
+        } catch {
+            return null
+        }
+    }
+
+    const outFileComplete = async () => {
+        if (fs.existsSync(outMarkerPath)) return true
+        const first = sizeOf(outPath)
+        if (first === null) return false
+        await sleep(OUT_MARKER_GRACE_MS).catch(() => {})
+        if (fs.existsSync(outMarkerPath)) return true
+        return sizeOf(outPath) === first
+    }
+
+    const renderLandedOut = (parsed, landedAtMs) => {
+        rememberDeliveredInstructionHash(verb, parsed, root, session_id)
+        const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
+        const cleaned = cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
+        let out = cleaned
+        if (cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
+            const { data, ...rest } = cleaned
+            const collides = Object.keys(data).some(k => k in rest)
+            if (!collides) out = { ...rest, ...data }
+        }
+        if (!full_response && carriedNoFailure(out)) out = compactWireResponse(out, outPath)
+        if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
+        else out = withDispatchWait(out, Date.now() - callStartedAtMs)
+        if (out && typeof out === 'object' && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
+            out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
+        }
+        if (include_timing === true || include_timing === 'true') {
+            const timingKey = out && typeof out === 'object' && !Array.isArray(out) && 'mcp_timing' in out ? 'mcp_client_timing' : 'mcp_timing'
+            const timing = {
+                submitted_at_ms: callStartedAtMs,
+                response_observed_at_ms: Date.now(),
+                round_trip_ms: Date.now() - callStartedAtMs,
+                response_wakeup: lastWakeSource,
+                daemon_at_submission: readDaemonLiveness(spoolDir),
+            }
+            out = out && typeof out === 'object' && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
+        }
+        return toYaml(out)
+    }
+
+    const readLandedOutFile = async () => {
         if (!fs.existsSync(outPath)) return undefined
+        if (!(await outFileComplete())) return undefined
         let landedAtMs = null
         try {
             landedAtMs = fs.statSync(outPath).mtimeMs
         } catch {
             landedAtMs = null
         }
-        try {
-            const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, 'utf8')))
-            rememberDeliveredInstructionHash(verb, parsed, root, session_id)
-            const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
-            const cleaned = cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
-            let out = cleaned
-            if (cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
-                const { data, ...rest } = cleaned
-                const collides = Object.keys(data).some(k => k in rest)
-                if (!collides) out = { ...rest, ...data }
-            }
-            if (!full_response && carriedNoFailure(out)) out = compactWireResponse(out, outPath)
-            if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
-            else out = withDispatchWait(out, Date.now() - callStartedAtMs)
-            if (out && typeof out === 'object' && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
-                out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
-            }
-            if (include_timing === true || include_timing === 'true') {
-                const timingKey = out && typeof out === 'object' && !Array.isArray(out) && 'mcp_timing' in out ? 'mcp_client_timing' : 'mcp_timing'
-                const timing = {
-                    submitted_at_ms: callStartedAtMs,
-                    response_observed_at_ms: Date.now(),
-                    round_trip_ms: Date.now() - callStartedAtMs,
-                    response_wakeup: lastWakeSource,
-                    daemon_at_submission: readDaemonLiveness(spoolDir),
+        for (let attempt = 1; ; attempt++) {
+            try {
+                const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, 'utf8')))
+                return renderLandedOut(parsed, landedAtMs)
+            } catch (e) {
+                if (attempt >= OUT_READ_ATTEMPTS) {
+                    const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
+                    return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
                 }
-                out = out && typeof out === 'object' && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
+                await sleep(OUT_MARKER_GRACE_MS).catch(() => {})
+                if (!(await outFileComplete())) return undefined
             }
-            return toYaml(out)
-        } catch (e) {
-            const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
-            return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
         }
     }
 
@@ -1191,7 +1240,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         // inside ensureSpoolRunnerRunning keeps it to one attempt every
         // ENSURE_INTERVAL_MS, and it is a no-op while the daemon is live.
         ensureSpoolRunnerRunning(root)
-        const landed = readLandedOutFile()
+        const landed = await readLandedOutFile()
         if (landed !== undefined) return landed
         if (Date.now() >= deadline) {
             // The daemon writes its reply without knowing anyone stopped
@@ -1202,7 +1251,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             // beats reporting a timeout.
             const finalRecheckDeadline = Date.now() + FINAL_OUT_RECHECK_WINDOW_MS
             while (true) {
-                const landedLate = readLandedOutFile()
+                const landedLate = await readLandedOutFile()
                 if (landedLate !== undefined) return landedLate
                 if (signal?.aborted) return abortedReply()
                 if (Date.now() >= finalRecheckDeadline) break
