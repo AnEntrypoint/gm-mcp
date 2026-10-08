@@ -43,7 +43,7 @@ function syncOne(dir) {
     if (!fetched.ok) return { repo: rel, action: 'fetch-failed', detail: fetched.err }
     const branch = git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])
     if (!branch.ok || branch.out !== 'main') return { repo: rel, action: 'skipped-not-main', detail: branch.out }
-    const dirty = git(dir, ['status', '--porcelain', '--', ...EXCLUDED_FROM_DIRTY])
+    const dirty = git(dir, ['status', '--porcelain', '--ignore-submodules=all', '--', ...EXCLUDED_FROM_DIRTY])
     if (!dirty.ok) return { repo: rel, action: 'skipped-status-failed', detail: dirty.err }
     if (dirty.out) return { repo: rel, action: 'skipped-dirty', detail: `${dirty.out.split('\n').length} changed path(s); left untouched` }
     const local = git(dir, ['rev-parse', 'HEAD'])
@@ -58,7 +58,9 @@ function syncOne(dir) {
 }
 
 export function runDevSync(root) {
-    const dirs = submodulePaths(root).map((p) => path.join(root, p)).filter((d) => existsSync(d))
+    // The parent goes first: its fast-forward moves the submodule pins, and each
+    // submodule then fast-forwards to origin/main on its own branch rule.
+    const dirs = [root, ...submodulePaths(root).map((p) => path.join(root, p))].filter((d) => existsSync(d))
     const results = dirs.map((dir) => {
         try {
             return syncOne(dir)
