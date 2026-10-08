@@ -25,7 +25,7 @@ const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const shortHash = (hex) => hex.slice(0, 12)
 
 function toolsDir() {
-    return process.env.GM_TOOLS_DIR || path.join(homedir(), '.gm-tools')
+    return path.resolve(process.env.GM_TOOLS_DIR?.trim() || path.join(homedir(), '.gm-tools'))
 }
 
 function defaultDeployedPath() {

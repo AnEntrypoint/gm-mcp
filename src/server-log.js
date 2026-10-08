@@ -23,22 +23,11 @@ function trimOversizedLog(file) {
     writeFileSync(file, firstNewline === -1 ? tail : tail.subarray(firstNewline + 1))
 }
 
-// A stdio server's stderr is the only channel the host keeps, so diagnostics go
-// there by default. A CLI subcommand owns its stderr instead, and every record
-// below still lands on disk, so it can turn the echo off and keep its output clean.
-let echoDiagnosticsToStderr = (process.env.GM_MCP_LOG_STDERR || '').trim() !== '0'
-
-export function setDiagnosticStderrEcho(enabled) {
-    echoDiagnosticsToStderr = Boolean(enabled)
-}
-
 export function appendDiagnostic(event, fields = {}) {
     const record = JSON.stringify({ ts: new Date().toISOString(), pid: process.pid, event, ...fields })
-    if (echoDiagnosticsToStderr) {
-        try {
-            process.stderr.write(`gm-mcp: ${record}\n`)
-        } catch {
-        }
+    try {
+        process.stderr.write(`gm-mcp: ${record}\n`)
+    } catch {
     }
     try {
         const file = logFilePath()
