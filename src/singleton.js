@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -186,8 +186,10 @@ export function supervisorIntervalMs() {
     return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : SUPERVISOR_INTERVAL_MS
 }
 
+// Opt-in only: a supervisor is a detached process that outlives the session
+// that asked for it, so nothing starts one unless GM_MCP_HTTP_SUPERVISOR=1.
 export function supervisorEnabled() {
-    return (process.env.GM_MCP_HTTP_SUPERVISOR || '').trim() !== '0'
+    return (process.env.GM_MCP_HTTP_SUPERVISOR || '').trim() === '1'
 }
 
 function readSupervisorState(port) {
@@ -216,36 +218,6 @@ function supervisorRunning(state, now = Date.now()) {
     return typeof state.ts === 'number' && now - state.ts < SUPERVISOR_STATE_STALE_MS
 }
 
-// A supervisor spawned from inside a session is that session's child: a stdio
-// server seeds the shared --http server, that server arms a supervisor, and one
-// tree teardown takes all three. Measured 2026-10-07 on 8787 -- three
-// supervisor + server pairs started inside a caller's tree were all gone within
-// ten minutes, and the pair Task Scheduler started, whose parent is svchost.exe
-// and which no session exit can reach, is the one still serving. So on Windows
-// the supervisor is started through its own task rather than as a child of
-// whoever asked: the scheduler host parents it, and it outlives every session.
-function startSupervisorViaTask({ port }) {
-    if (process.platform !== 'win32') return null
-    if ((process.env.GM_MCP_HTTP_AUTOSTART_TASK || '').trim() === '0') return null
-    const task = supervisorTaskName(port)
-    const query = spawnSync('schtasks', ['/query', '/tn', task], { encoding: 'utf8', windowsHide: true })
-    if (query.error || query.status !== 0) {
-        const created = installHttpScheduledTask({ port })
-        if (!created.installed) return null
-    }
-    const run = spawnSync('schtasks', ['/run', '/tn', task], { encoding: 'utf8', windowsHide: true })
-    if (run.error || run.status !== 0) {
-        const reason = run.error?.message || (run.stderr || '').trim() || `schtasks /run exited ${run.status}`
-        // An instance of this task is `http-supervise`, so a /run that refuses
-        // is itself proof a supervisor holds the port -- measured 0x80070420
-        // while one was up. Spawning anyway would race it.
-        appendDiagnostic('http-supervisor-task-run-refused', { port, task, error: reason })
-        return { port, pid: null, started: false, reason: 'task-already-running' }
-    }
-    appendDiagnostic('http-supervisor-task-run', { port, task })
-    return { port, pid: null, started: true, reason: 'task-run' }
-}
-
 // The server is the only thing that ever starts itself, so a server that dies
 // stays dead: nothing on the http registration's path runs gm at all, and a
 // session whose client connected once never reconnects. This is the daemon
@@ -257,8 +229,6 @@ export async function ensureHttpSupervisor({ port = defaultHttpPort(), intervalM
     if (supervisorRunning(recorded)) {
         return { port, pid: recorded.pid, started: false, reason: 'already-running' }
     }
-    const viaTask = startSupervisorViaTask({ port })
-    if (viaTask) return viaTask
     const child = spawn(process.execPath, [serverEntryPath(), 'http-supervise', '--port', String(port), '--interval', String(Math.round(intervalMs / 1000))], {
         cwd: homedir(),
         detached: true,
@@ -276,83 +246,38 @@ export async function ensureHttpSupervisor({ port = defaultHttpPort(), intervalM
     return { port, pid: child.pid ?? null, started: true, reason: 'spawned' }
 }
 
-// The supervisor only exists for as long as whatever started it, and a machine
-// that slept or was logged off comes back with nothing listening on the MCP
-// port -- the exact window in which a Claude Code session connects once, is
-// refused, and then reports the server as disconnected for the rest of its
-// life. So the autostart that brings the supervisor back belongs to the code
-// that needs it rather than to a setup step someone runs once: written on
-// every supervisor start and on every `ensure-http`, hidden, and idempotent,
-// so a deleted or stale entry repairs itself with no manual step.
+// gm installs nothing that starts at logon or on a timer. Earlier builds did,
+// so every supervisor start and `ensure-http` removes what they left behind.
 export function autostartScriptPath() {
     const appData = process.env.APPDATA || ''
     if (!appData) return null
     return path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'gm-mcp-http-supervise.vbs')
 }
 
-export function installHttpAutostart({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
-    const target = autostartScriptPath()
-    if (!target) return { installed: false, reason: 'APPDATA is not set' }
-    const entry = serverEntryPath()
-    const seconds = Math.max(1, Math.round(intervalMs / 1000))
-    const script = [
-        'Set sh = CreateObject("WScript.Shell")',
-        `sh.CurrentDirectory = "${path.dirname(entry)}"`,
-        `sh.Run """${process.execPath}"" ""${entry}"" http-supervise --port ${port} --interval ${seconds}", 0, False`,
-        '',
-    ].join('\r\n')
-    try {
-        const before = existsSync(target) ? readFileSync(target, 'utf8') : null
-        if (before === script) return { installed: true, path: target, changed: false }
-        mkdirSync(path.dirname(target), { recursive: true })
-        writeFileSync(target, script, 'utf8')
-        appendDiagnostic('http-autostart-installed', { port, path: target })
-        return { installed: true, path: target, changed: true }
-    } catch (error) {
-        appendDiagnostic('http-autostart-install-failed', { port, path: target, error: describeError(error) })
-        return { installed: false, reason: describeError(error) }
-    }
-}
-
-// The logon autostart covers a reboot, not a kill: a server and its supervisor
-// taken down together leave nothing alive to re-arm either, and that pair is
-// exactly what a parent process teardown takes with it. A per-user task is the
-// one restarter outside both families, so it is installed on every supervisor
-// start and idempotently re-written; a run whose port already has a supervisor
-// exits at once, so the task costs one short-lived node per interval.
-//
-// One minute, not five. Once a supervisor is started through the task it *is*
-// that task's instance, so the scheduler never fires again while it is healthy
-// and a short interval costs nothing in steady state; it is only the bound on
-// the window after a kill takes server and supervisor together.
-const AUTOSTART_TASK_MINUTES = 1
-
 export function supervisorTaskName(port = defaultHttpPort()) {
     return `gm-mcp-http-supervise-${port}`
 }
 
-export function installHttpScheduledTask({ port = defaultHttpPort() } = {}) {
-    if (process.platform !== 'win32') return { installed: false, reason: 'the task re-arm is a Windows restarter' }
-    if ((process.env.GM_MCP_HTTP_AUTOSTART_TASK || '').trim() === '0') return { installed: false, reason: 'disabled by GM_MCP_HTTP_AUTOSTART_TASK=0' }
-    const task = supervisorTaskName(port)
-    const entry = serverEntryPath()
-    const command = `"${process.execPath}" "${entry}" http-supervise --port ${port} --interval ${Math.round(supervisorIntervalMs() / 1000)}`
-    try {
-        const result = spawnSync('schtasks', ['/create', '/tn', task, '/tr', command, '/sc', 'MINUTE', '/mo', String(AUTOSTART_TASK_MINUTES), '/f'], {
-            encoding: 'utf8',
-            windowsHide: true,
-        })
-        if (result.error || result.status !== 0) {
-            const reason = result.error?.message || (result.stderr || '').trim() || `schtasks exited ${result.status}`
-            appendDiagnostic('http-autostart-task-install-failed', { port, task, error: reason })
-            return { installed: false, reason }
+// Removes the logon script and the per-minute task that earlier builds
+// installed. Both are gm's own artifacts, so deleting them is the repair.
+export function removeHttpAutostart({ port = defaultHttpPort() } = {}) {
+    const removed = []
+    const target = autostartScriptPath()
+    if (target && existsSync(target)) {
+        try {
+            unlinkSync(target)
+            removed.push(target)
+        } catch (error) {
+            appendDiagnostic('http-autostart-remove-failed', { port, path: target, error: describeError(error) })
         }
-        appendDiagnostic('http-autostart-task-installed', { port, task, minutes: AUTOSTART_TASK_MINUTES })
-        return { installed: true, task, minutes: AUTOSTART_TASK_MINUTES }
-    } catch (error) {
-        appendDiagnostic('http-autostart-task-install-failed', { port, task, error: describeError(error) })
-        return { installed: false, reason: describeError(error) }
     }
+    if (process.platform === 'win32') {
+        const task = supervisorTaskName(port)
+        const result = spawnSync('schtasks', ['/delete', '/tn', task, '/f'], { encoding: 'utf8', windowsHide: true })
+        if (!result.error && result.status === 0) removed.push(`task:${task}`)
+    }
+    if (removed.length) appendDiagnostic('http-autostart-removed', { port, removed })
+    return { removed }
 }
 
 export async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
@@ -363,8 +288,7 @@ export async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs =
     }
     keepServingOnAsyncFailure()
     logSignalExits()
-    installHttpAutostart({ port, intervalMs })
-    installHttpScheduledTask({ port })
+    removeHttpAutostart({ port })
     writeSupervisorState({ port, pid: process.pid, url: httpMcpUrl(port), ts: Date.now() })
     appendDiagnostic('http-supervisor-start', { port, pid: process.pid, interval_ms: intervalMs })
     let serverPid = null
