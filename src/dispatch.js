@@ -787,10 +787,16 @@ export function readDaemonLiveness(spoolDir) {
         return coldProjectLiveness()
     }
         const now = Date.now()
-        const heartbeatAgeMs = timestampAgeMs(status.ts, now)
+    const globalStatus = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    const projectFresh = isFreshDaemonTimestamp(status.ts, now)
+    const globalFresh = isFreshDaemonTimestamp(globalStatus?.ts, now)
+    const sameLiveDaemon = globalFresh && Number(status.pid) === Number(globalStatus.pid)
+    const useGlobalHeartbeat = !projectFresh && sameLiveDaemon
+    const heartbeatTs = useGlobalHeartbeat ? globalStatus.ts : status.ts
+    const heartbeatAgeMs = timestampAgeMs(heartbeatTs, now)
     const pid = typeof status.pid === 'number' ? status.pid : Number(status.pid) || null
         const pidAliveFlag = pidAlive(pid)
-        const alive = pidAliveFlag === true && isFreshDaemonTimestamp(status.ts, now)
+        const alive = pidAliveFlag === true && (projectFresh || sameLiveDaemon)
     const busyForMs = typeof status.busy_until === 'number' ? status.busy_until - now : null
     const busy = busyForMs !== null && busyForMs > 0
     const note = !alive
