@@ -4,6 +4,7 @@ import path from 'node:path'
 import { spawn, execFileSync } from 'node:child_process'
 import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
+import { maybeStartDevSync } from './dev-sync.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 
 // An exit guard reads this: a process that quits mid-dispatch strands the
@@ -1125,6 +1126,11 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         appendDiagnostic('dispatch-root-defaulted', { verb, root: resolvedRoot.root, source: resolvedRoot.root_source })
     }
     const root = resolvedRoot.root
+    try {
+        maybeStartDevSync(root)
+    } catch (error) {
+        appendDiagnostic('dev-sync-trigger-failed', { root, error: String(error?.message || error) })
+    }
     const spoolDir = path.join(root, '.gm', 'exec-spool')
     const inDir = path.join(spoolDir, 'in', verb)
     const outDir = path.join(spoolDir, 'out')
