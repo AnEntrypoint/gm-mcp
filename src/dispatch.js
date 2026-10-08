@@ -3,8 +3,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn, execFileSync } from 'node:child_process'
 import * as yaml from 'js-yaml'
-import { cleanResponse, compactWireResponse, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 import { appendDiagnostic } from './server-log.js'
+import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 
 // An exit guard reads this: a process that quits mid-dispatch strands the
 // spool ticket it already wrote and drops the reply nobody else will poll for.
@@ -76,10 +76,24 @@ function nextN(sessionId) {
 
 const UNEXPANDED_INTERPOLATION = /\$\{[^}]*\}|\$\(|\$env:|\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%|`/i
 
-function unsafeSpoolName(role, value) {
+const SPOOL_COMPONENT_BYTE_LIMITS = {
+    verb: 255,
+    session_id: 150,
+    task: 200,
+}
+
+export function unsafeSpoolName(role, value) {
+    if (role === 'session_id' && (typeof value !== 'string' || !/^[A-Za-z0-9_.-]{1,150}$/.test(value) || value === '.' || value === '..')) {
+        return 'session_id must be 1-150 ASCII letters, digits, dots, underscores or hyphens, excluding dot components'
+    }
     if (typeof value !== 'string' || !value) return null
-    if (value.includes('\0') || value === '.' || value === '..' || value.includes('/') || value.includes('\\')) {
-        return `${role} ${JSON.stringify(value)} is not a single spool name component: it carries a NUL byte, a path separator, or is a dot component`
+    if (value.includes('\0') || /[\r\n]/.test(value) || value === '.' || value === '..' || value.includes('/') || value.includes('\\')) {
+        return `${role} ${JSON.stringify(value)} is not a single spool name component: it carries a NUL byte, a line break, a path separator, or is a dot component`
+    }
+    const byteLimit = SPOOL_COMPONENT_BYTE_LIMITS[role]
+    const byteLength = Buffer.byteLength(value)
+    if (byteLength > byteLimit) {
+        return `${role} is ${byteLength} UTF-8 bytes, exceeding its ${byteLimit}-byte spool component limit`
     }
     const found = UNEXPANDED_INTERPOLATION.exec(value)
     if (!found) return null
@@ -134,6 +148,159 @@ function withCodesearchScalarsCoerced(verb, body) {
     return coerced
 }
 
+const RESULT_CHUNK_DEFAULT_CHARACTERS = 12000
+const RESULT_CHUNK_MAX_CHARACTERS = 16000
+const RESULT_FILE_MAX_BYTES = 4 * 1024 * 1024
+const RESULT_READ_CHUNK_BYTES = 64 * 1024
+
+function spoolFilePath(root, file) {
+    const outDir = path.join(root, '.gm', 'exec-spool', 'out')
+    const candidate = path.resolve(root, file)
+    const absoluteOutDir = path.resolve(outDir)
+    const resolvedOutDir = fs.realpathSync(outDir)
+    const relative = path.relative(absoluteOutDir, candidate)
+    if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        throw new Error('spool file must name a file inside this project\'s .gm/exec-spool/out directory')
+    }
+    return { candidate, resolvedOutDir }
+}
+
+function openedDescriptorPath(fd) {
+    const descriptorRoot = process.platform === 'linux' ? '/proc/self/fd'
+        : process.platform === 'darwin' ? '/dev/fd'
+            : undefined
+    if (!descriptorRoot) return undefined
+    try {
+        return fs.realpathSync(path.join(descriptorRoot, String(fd)))
+    } catch {
+        return undefined
+    }
+}
+
+function openSpoolRegularFile(root, file) {
+    const { candidate, resolvedOutDir } = spoolFilePath(root, file)
+    const before = fs.lstatSync(candidate)
+    if (!before.isFile() || before.nlink !== 1) throw new Error('spool file must be an unlinked regular spool file')
+    const fd = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
+    try {
+        const opened = fs.fstatSync(fd)
+        if (!opened.isFile() || opened.nlink !== 1) throw new Error('spool file must be an unlinked regular spool file')
+        if (opened.dev !== before.dev || opened.ino !== before.ino) throw new Error('spool file changed while opening')
+        if (opened.size > RESULT_FILE_MAX_BYTES) throw new Error(`spool file exceeds ${RESULT_FILE_MAX_BYTES} byte limit`)
+        const descriptorPath = openedDescriptorPath(fd)
+        if (descriptorPath) {
+            const relative = path.relative(resolvedOutDir, descriptorPath)
+            if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+                throw new Error('spool file is outside the GM output spool')
+            }
+        }
+        return { fd, file: candidate, size: opened.size, mtimeMs: opened.mtimeMs }
+    } catch (error) {
+        fs.closeSync(fd)
+        throw error
+    }
+}
+
+function openResultFile(root, resultFile) {
+    return openSpoolRegularFile(root, resultFile)
+}
+
+function readAllBounded(fd, size) {
+    const buffer = Buffer.allocUnsafe(size)
+    let position = 0
+    while (position < size) {
+        const read = fs.readSync(fd, buffer, position, size - position, position)
+        if (read === 0) break
+        position += read
+    }
+    return buffer.subarray(0, position).toString('utf8')
+}
+
+function readUtf8Page(fd, size, offset, limit) {
+    const decoder = new TextDecoder()
+    const buffer = Buffer.allocUnsafe(Math.min(RESULT_READ_CHUNK_BYTES, Math.max(size, 1)))
+    let position = 0
+    let totalCharacters = 0
+    let content = ''
+    const consume = text => {
+        const remaining = limit - content.length
+        if (remaining > 0 && totalCharacters + text.length > offset) {
+            const start = Math.max(0, offset - totalCharacters)
+            content += text.slice(start, start + remaining)
+        }
+        totalCharacters += text.length
+    }
+    while (position < size) {
+        const read = fs.readSync(fd, buffer, 0, Math.min(buffer.length, size - position), position)
+        if (read === 0) break
+        position += read
+        consume(decoder.decode(buffer.subarray(0, read), { stream: true }))
+    }
+    consume(decoder.decode())
+    const nextOffset = offset + limit < totalCharacters ? offset + limit : undefined
+    return { content, totalCharacters, nextOffset }
+}
+
+function resultField(value, field) {
+    const segments = field.split('.').filter(Boolean)
+    const atPath = (candidate, candidateSegments) => {
+        let current = candidate
+        for (const segment of candidateSegments) {
+            if (!current || typeof current !== 'object' || !Object.hasOwn(current, segment)) return undefined
+            current = current[segment]
+        }
+        return current
+    }
+    const direct = atPath(value, segments)
+    if (direct !== undefined) return { value: direct, path: field }
+    if (value && typeof value === 'object' && value.data && typeof value.data === 'object') {
+        const nested = atPath(value.data, segments)
+        if (nested !== undefined) return { value: nested, path: `data.${field}` }
+    }
+    throw new Error(`field "${field}" was not found; omit field to read the complete raw response`)
+}
+
+export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_DEFAULT_CHARACTERS, cwd }) {
+    const root = cwd || process.cwd()
+    const toYaml = value => yaml.dump(value, { lineWidth: 100 })
+    if (typeof result_file !== 'string' || !result_file) return toYaml({ error: 'result_file required' })
+    if (field !== undefined && (typeof field !== 'string' || !field)) return toYaml({ error: 'field must be a non-empty string when provided' })
+    if (!Number.isInteger(offset) || offset < 0) return toYaml({ error: 'offset must be a non-negative integer' })
+    if (!Number.isInteger(limit) || limit < 1 || limit > RESULT_CHUNK_MAX_CHARACTERS) return toYaml({ error: `limit must be an integer from 1 through ${RESULT_CHUNK_MAX_CHARACTERS}` })
+    try {
+        const { fd, file, size } = openResultFile(root, result_file)
+        try {
+            let content
+            let totalCharacters
+            let nextOffset
+            let resolvedField
+            if (field) {
+                const selected = resultField(JSON.parse(readAllBounded(fd, size)), field)
+                content = JSON.stringify(selected.value, null, 2)
+                resolvedField = selected.path
+                totalCharacters = content.length
+                nextOffset = offset + limit < totalCharacters ? offset + limit : undefined
+            } else {
+                ({ content, totalCharacters, nextOffset } = readUtf8Page(fd, size, offset, limit))
+            }
+            const page = field ? content.slice(offset, offset + limit) : content
+            return toYaml({
+                result_file: file,
+                ...(resolvedField ? { field: resolvedField } : {}),
+                offset,
+                returned_characters: page.length,
+                total_characters: totalCharacters,
+                ...(nextOffset === undefined ? { complete: true } : { next_offset: nextOffset }),
+                content: page,
+            })
+        } finally {
+            fs.closeSync(fd)
+        }
+    } catch (error) {
+        return toYaml({ error: `result_file could not be read: ${error.message}` })
+    }
+}
+
 const PLAIN_TEXT_BODY_FIELDS = ['raw_body', 'code', 'script', 'command', 'source', 'text', 'body']
 
 function plainTextFromBody(body) {
@@ -186,31 +353,13 @@ function objectBodyDiagnostic(verb, body) {
     return 'git_merge requires a non-empty body.ref, for example {"ref":"origin/main"}.'
 }
 
-const RUNNER_DIR = path.join(os.homedir(), '.gm-tools')
+const RUNNER_DIR = path.resolve(process.env.GM_TOOLS_DIR?.trim() || path.join(os.homedir(), '.gm-tools'))
 const RUNNER_PATH = path.join(RUNNER_DIR, process.platform === 'win32' ? 'agentplug-runner.exe' : 'agentplug-runner')
-function agentplugDir() {
-    const override = process.env.GM_MCP_AGENTPLUG_DIR
-    return override ? override : path.join(os.homedir(), '.agentplug')
-}
+const AGENTPLUG_DIR = path.resolve(process.env.AGENTPLUG_HOME?.trim() || path.join(os.homedir(), '.agentplug'))
+const GLOBAL_DAEMON_STATUS_PATH = path.join(AGENTPLUG_DIR, 'daemon-status.json')
+const GLOBAL_DAEMON_OWNER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'daemon-owner.lock')
+const GLOBAL_DAEMON_LOG_PATH = path.join(AGENTPLUG_DIR, 'daemon.log')
 
-function globalDaemonStatusPath() {
-    return path.join(agentplugDir(), 'daemon-status.json')
-}
-
-function globalDaemonOwnerLockPath() {
-    return path.join(agentplugDir(), 'daemon-owner.lock')
-}
-
-function globalDaemonLogPath() {
-    return path.join(agentplugDir(), 'daemon.log')
-}
-
-function globalLauncherLockPath() {
-    return path.join(agentplugDir(), 'spool-launch.lock')
-}
-
-// Recovery windows for a daemon that exits on purpose and is restarted from
-// here -- see AGENTS.md ("Runner recovery").
 const ENSURE_INTERVAL_MS = 2_000
 const ENSURE_LEASE_MS = 3_000
 const ENSURE_BOOT_GRACE_MS = 30_000
@@ -242,10 +391,12 @@ export function pidAlive(pid) {
 }
 
 function globalDaemonPid() {
-    const status = readJsonFile(globalDaemonStatusPath())
+    const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
     if (pidAlive(status?.pid) === true) return status.pid
     try {
-        const owner = Number.parseInt(fs.readFileSync(globalDaemonOwnerLockPath(), 'utf8').trim(), 10)
+        const ownerText = fs.readFileSync(GLOBAL_DAEMON_OWNER_LOCK_PATH, 'utf8').trim()
+        if (!/^[1-9][0-9]*$/.test(ownerText)) return null
+        const owner = Number(ownerText)
         if (pidAlive(owner) === true) return owner
     } catch {
     }
@@ -253,62 +404,64 @@ function globalDaemonPid() {
 }
 
 export function daemonBootGraceActive() {
-    const status = readJsonFile(globalDaemonStatusPath())
+    const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
     const bootTs = status?.daemon_boot_ts
-    if (typeof bootTs !== 'number') return false
-    if (Date.now() - bootTs >= ENSURE_BOOT_GRACE_MS) return false
-    return globalDaemonPid() !== null || Date.now() - (status.ts || 0) < 10_000
+    const age = timestampAgeMs(bootTs)
+    if (age === null || age < -DAEMON_TIMESTAMP_FUTURE_SKEW_MS || age >= ENSURE_BOOT_GRACE_MS) return false
+    return globalDaemonPid() !== null || isFreshDaemonTimestamp(status.ts)
 }
 
 export function liveDaemonSweepsProject(spoolDir) {
     const status = readJsonFile(path.join(spoolDir, '.status.json'))
     if (!status) return false
-    if (pidAlive(status.pid) === false) return false
-    if (Date.now() - (status.ts || 0) < DAEMON_HEARTBEAT_STALE_MS) return true
-    const shared = readJsonFile(globalDaemonStatusPath())
-    if (typeof shared?.ts !== 'number') return false
-    if (Date.now() - shared.ts >= DAEMON_HEARTBEAT_STALE_MS) return false
-    return pidAlive(shared.pid ?? status.pid) !== false
+    if (!isFreshDaemonTimestamp(status.ts)) return false
+    const alive = pidAlive(status.pid)
+    return alive === true
 }
+
+const GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'spool-launch.lock')
+
+const LAUNCHER_LOCK_UNREADABLE_GRACE_MS = 120_000
 
 function readLauncherLock() {
     try {
-        const [pid, ts, role] = fs.readFileSync(globalLauncherLockPath(), 'utf8').trim().split(/\s+/)
-        return { pid: Number(pid), ts: Number(ts), role: role || null }
+        const [pid, ts] = fs.readFileSync(GLOBAL_LAUNCHER_LOCK_PATH, 'utf8').trim().split(/\s+/).map(Number)
+        return { pid, ts }
     } catch {
         return null
     }
 }
 
-// The lock names whichever process holds it, so a reader can tell a spawned
-// runner from the server that claimed it. It is only ever stolen, never
-// signalled: the pid it names is read back from disk long after the fact, and
-// pid reuse or a contended write can leave another session's live gm-mcp
-// server in it -- killing that pid is how this server used to take a whole
-// session's MCP connection down with it. A wedged runner is already bounded by
-// ENSURE_CHILD_MAX_AGE_MS and the per-root in-flight guard, and a fresh
-// `agentplug-runner spool` against a live daemon only registers and exits.
+export function launcherLockMayBeReclaimed(held, lockPath) {
+    if (held) return pidAlive(held.pid) !== true
+    if (!lockPath) return true
+    try {
+        return Date.now() - fs.statSync(lockPath).mtimeMs > LAUNCHER_LOCK_UNREADABLE_GRACE_MS
+    } catch {
+        return false
+    }
+}
+
 function claimGlobalLauncher() {
-    fs.mkdirSync(agentplugDir(), { recursive: true })
+    fs.mkdirSync(AGENTPLUG_DIR, { recursive: true })
     for (let attempt = 0; attempt < 2; attempt++) {
+        const tempPath = path.join(AGENTPLUG_DIR, `.spool-launch.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`)
         try {
-            fs.writeFileSync(globalLauncherLockPath(), `${process.pid} ${Date.now()} server`, { flag: 'wx', mode: 0o600 })
+            fs.writeFileSync(tempPath, `${process.pid} ${Date.now()}`, { flag: 'wx', mode: 0o600 })
+            fs.linkSync(tempPath, GLOBAL_LAUNCHER_LOCK_PATH)
             return true
         } catch (error) {
             if (error?.code !== 'EEXIST') return false
+        } finally {
+            try {
+                fs.unlinkSync(tempPath)
+            } catch {
+            }
         }
         const held = readLauncherLock()
-        const heldAgeMs = held?.ts ? Date.now() - held.ts : Number.POSITIVE_INFINITY
-        if (held && heldAgeMs < ENSURE_CHILD_MAX_AGE_MS && pidAlive(held.pid) !== false) return false
-        appendDiagnostic('launcher-lock-stolen', {
-            lock: globalLauncherLockPath(),
-            held_pid: held?.pid ?? null,
-            held_role: held?.role ?? null,
-            held_age_ms: Number.isFinite(heldAgeMs) ? Math.round(heldAgeMs) : null,
-            held_pid_alive: pidAlive(held?.pid),
-        })
+        if (!launcherLockMayBeReclaimed(held, GLOBAL_LAUNCHER_LOCK_PATH)) return false
         try {
-            fs.unlinkSync(globalLauncherLockPath())
+            fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH)
         } catch {
             return false
         }
@@ -350,13 +503,6 @@ function claimRunnerEnsure(root) {
     }
 }
 
-// A cold `agentplug-runner spool` takes tens of seconds (it registers the
-// project, then waits out the shared daemon's wasm compile). The watchdog wakes
-// every WATCHDOG_INTERVAL_MS, so without this guard one cold start spawns a new
-// runner every ENSURE_INTERVAL_MS -- a pile of processes that all contend for
-// daemon.lock and none of which finish faster. ENSURE_CHILD_MAX_AGE_MS caps it:
-// a `spool` that outlives the cap is treated as wedged and re-issued, so a hung
-// child can never block supervision forever.
 const ENSURE_CHILD_MAX_AGE_MS = 120_000
 const inflightEnsuresByRoot = new Map()
 const consecutiveFailedEnsuresByRoot = new Map()
@@ -373,8 +519,9 @@ export function runnerEnsureInFlight(root, now = Date.now()) {
         inflightEnsuresByRoot.delete(root)
         return false
     }
-    if (now - entry.spawnedAtMs >= ENSURE_CHILD_MAX_AGE_MS) {
-        inflightEnsuresByRoot.delete(root)
+        if (now - entry.spawnedAtMs >= ENSURE_CHILD_MAX_AGE_MS) {
+            inflightEnsuresByRoot.delete(root)
+            entry.child?.kill()
         return false
     }
     return true
@@ -402,24 +549,23 @@ function ensureSpoolRunnerRunning(root) {
     try {
         child = spawn(RUNNER_PATH, ['spool'], {
             cwd: root,
-            env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+            env: { ...process.env, GM_TOOLS_DIR: RUNNER_DIR, AGENTPLUG_HOME: AGENTPLUG_DIR, CLAUDE_PROJECT_DIR: root },
             detached: true,
             stdio: 'ignore',
             windowsHide: true,
         })
-    } catch (error) {
-        appendDiagnostic('runner-spawn-failed', { root, runner: RUNNER_PATH, error: String(error?.message || error) })
+    } catch {
         try {
-            fs.unlinkSync(globalLauncherLockPath())
+            fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH)
         } catch {
         }
         return
     }
     try {
-        fs.writeFileSync(globalLauncherLockPath(), `${child.pid} ${now} runner`, 'utf8')
+        fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${child.pid} ${now}`, 'utf8')
     } catch {
     }
-    const entry = { pid: child.pid, spawnedAtMs: now, exitCode: null }
+        const entry = { pid: child.pid, child, spawnedAtMs: now, exitCode: null }
     const settle = (code) => {
         entry.exitCode = code ?? 0
         if (inflightEnsuresByRoot.get(root) === entry) inflightEnsuresByRoot.delete(root)
@@ -434,14 +580,10 @@ function ensureSpoolRunnerRunning(root) {
     child.unref()
 }
 
-// Seam for the recovery tests: seeds the in-flight map so runnerEnsureInFlight
-// can be asserted without spawning a real runner.
 export function recordRunnerEnsureInflight(root, entry) {
     inflightEnsuresByRoot.set(root, entry)
 }
 
-// A timer per root keeps the daemon up between dispatches, so the next dispatch
-// lands on a live sweeper instead of reviving one inside its own poll budget.
 function startRunnerWatchdog(root) {
     if (process.env.GM_MCP_RUNNER_WATCHDOG === '0') return
     if (watchdogTimersByRoot.has(root)) return
@@ -487,11 +629,8 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
             else resolve(wakeSource)
         }
         const onAbort = () => finish(undefined, new Error('aborted'))
-        const outName = path.basename(outPath)
         const wake = (_event, filename) => {
-            if (filename == null) return
-            const name = filename.toString()
-            if (name === outName || name === `${outName}.ready`) finish('filesystem_event')
+            if (!filename || filename.toString() === path.basename(outPath)) finish('filesystem_event')
         }
         signal?.addEventListener('abort', onAbort, { once: true })
         try {
@@ -509,19 +648,15 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
     })
 }
 
-const BROWSER_PLAIN_TEXT_VERBS = ['serp', 'browser', 'cdp']
-
 const EXEC_FAMILY_VERBS = ['exec_js', 'nodejs', 'javascript', 'node', 'js', 'bash', 'sh', 'shell', 'zsh', 'python', 'py', 'powershell', 'ps1', 'ssh', 'go', 'rust', 'c', 'cpp', 'java', 'deno']
 
-const PLAIN_TEXT_BODY_VERBS = new Set([...EXEC_FAMILY_VERBS, ...BROWSER_PLAIN_TEXT_VERBS])
+const PLAIN_TEXT_BODY_VERBS = new Set(EXEC_FAMILY_VERBS)
 
-const DEADLINE_AWARE_JSON_VERBS = ['codesearch', 'codeinsight', 'instruction', 'recall']
-
-const TIMEOUT_MS_PREFIX_VERBS = new Set([...EXEC_FAMILY_VERBS, ...DEADLINE_AWARE_JSON_VERBS])
+const TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS)
 
 const TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/
 
-const TIMEOUT_MS_PREFIX_VALUE = /^\s*timeout(?:Ms|_ms)=(\d+)/
+const TIMEOUT_MS_PREFIX_VALUE = /^\s*timeout(?:Ms|_ms)=([0-9]+)[ \t]*(?:\r?\n|$)/
 
 const DEFAULT_TIMEOUT_SECONDS = 120
 
@@ -529,7 +664,11 @@ const EXEC_DEFAULT_LIMIT_SECONDS = 300
 
 const POLL_MARGIN_PAST_EXEC_TIMEOUT_MS = 5000
 
-const CLIENT_DEADLINE_MARGIN_MS = 1500
+const MCP_POLL_TIMEOUT_CEILING_MS = 240000
+
+const MAX_TIMER_TIMEOUT_MS = 2_147_483_647
+
+const MAX_EXEC_TIMEOUT_MS = MAX_TIMER_TIMEOUT_MS - POLL_MARGIN_PAST_EXEC_TIMEOUT_MS
 
 function unpackExecOutputEnvelope(verb, parsed) {
     if (!EXEC_FAMILY_VERBS.includes(verb) || !parsed || typeof parsed.data !== 'string') return parsed
@@ -541,94 +680,84 @@ function unpackExecOutputEnvelope(verb, parsed) {
     }
 }
 
+function timeoutMilliseconds(timeout_seconds, fallbackSeconds) {
+    const seconds = Number(timeout_seconds)
+    if (!Number.isFinite(seconds) || seconds <= 0) return fallbackSeconds * 1000
+    return Math.min(MAX_TIMER_TIMEOUT_MS, Math.max(1, Math.round(seconds * 1000)))
+}
+
+function timeoutSecondsDiagnostic(timeout_seconds) {
+    if (timeout_seconds === undefined || timeout_seconds === null || timeout_seconds === '') return undefined
+    const seconds = Number(timeout_seconds)
+    if (!Number.isFinite(seconds)) return 'timeout_seconds must be a finite number of seconds'
+    if (seconds <= 0) return undefined
+    const milliseconds = seconds * 1000
+    if (!Number.isSafeInteger(milliseconds) || milliseconds > MAX_TIMER_TIMEOUT_MS) {
+        return `timeout_seconds must not exceed ${MAX_TIMER_TIMEOUT_MS / 1000} seconds`
+    }
+    return undefined
+}
+
+function timeoutDirectiveDiagnostic(verb, raw_body) {
+    if (!TIMEOUT_MS_PREFIX_VERBS.has(verb) || typeof raw_body !== 'string' || !TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return undefined
+    const bodyPrefix = TIMEOUT_MS_PREFIX_VALUE.exec(raw_body)
+    if (!bodyPrefix) return 'timeoutMs must be a decimal millisecond value on its own first line'
+    const milliseconds = Number(bodyPrefix[1])
+    if (!Number.isSafeInteger(milliseconds) || milliseconds > MAX_EXEC_TIMEOUT_MS) {
+        return `timeoutMs must not exceed ${MAX_EXEC_TIMEOUT_MS} milliseconds`
+    }
+    return undefined
+}
+
+function timeoutInputDiagnostic(verb, raw_body, timeout_seconds) {
+    return timeoutSecondsDiagnostic(timeout_seconds) || timeoutDirectiveDiagnostic(verb, raw_body)
+}
+
 export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
-    const explicitSeconds = Number(timeout_seconds)
-    if (explicitSeconds > 0) return Math.max(1000, explicitSeconds * 1000 - CLIENT_DEADLINE_MARGIN_MS)
+    const explicitMs = timeoutMilliseconds(timeout_seconds, 0)
+    if (explicitMs > 0) return explicitMs
     const bodyPrefix = TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === 'string' ? TIMEOUT_MS_PREFIX_VALUE.exec(raw_body) : null
-    if (bodyPrefix) return Math.max(DEFAULT_TIMEOUT_SECONDS * 1000, Number(bodyPrefix[1]) + POLL_MARGIN_PAST_EXEC_TIMEOUT_MS)
+    if (bodyPrefix) {
+        const milliseconds = Number(bodyPrefix[1])
+        if (Number.isSafeInteger(milliseconds) && milliseconds <= MAX_EXEC_TIMEOUT_MS) {
+            return Math.max(DEFAULT_TIMEOUT_SECONDS * 1000, milliseconds + POLL_MARGIN_PAST_EXEC_TIMEOUT_MS)
+        }
+    }
     return DEFAULT_TIMEOUT_SECONDS * 1000
 }
 
-const CLIENT_DEADLINE_DEFAULT_SECONDS = 60
-
-function clientDeadline() {
-    const raw = Number(process.env.GM_MCP_CLIENT_DEADLINE_SECONDS)
-    if (!Number.isFinite(raw) || raw < 0) return { seconds: CLIENT_DEADLINE_DEFAULT_SECONDS, operator_set: false }
-    return { seconds: raw, operator_set: true }
-}
-
-export function applyClientDeadline(requestedMs, callerExplicit = false) {
-    const { seconds, operator_set } = clientDeadline()
-    const base = { client_deadline_seconds: seconds, requested_ms: requestedMs, caller_timeout_explicit: Boolean(callerExplicit) }
-    if (seconds <= 0) return { ms: requestedMs, clamped: false, ...base }
-    // An operator-set GM_MCP_CLIENT_DEADLINE_SECONDS is still honoured, so it caps unnamed and named budgets alike.
-    if (callerExplicit && !operator_set) return { ms: requestedMs, clamped: false, ...base }
-    const ceilingMs = seconds * 1000 - CLIENT_DEADLINE_MARGIN_MS - FINAL_OUT_RECHECK_WINDOW_MS
-    if (ceilingMs <= 0 || requestedMs <= ceilingMs) {
-        return { ms: requestedMs, clamped: false, ...base }
-    }
-    return { ms: ceilingMs, clamped: true, ...base }
-}
-
-function pollBudgetDisclosure(budget, waitedMs) {
-    const base = {
-        requested_ms: budget.requested_ms,
-        effective_ms: budget.ms,
-        clamped_to_client_deadline: budget.clamped,
-        client_deadline_seconds: budget.client_deadline_seconds,
-        waited_ms: waitedMs,
-    }
-    return budget.clamped
-        ? {
-            ...base,
-            reason: `the MCP client cuts this tool call off at ${budget.client_deadline_seconds}s, so gm stopped polling ${CLIENT_DEADLINE_MARGIN_MS}ms early rather than let the reply be discarded -- the dispatch is NOT cancelled and its result still lands in out_path. Re-poll the SAME dispatch with resume_task set to this response's task (same verb and cwd), and raise GM_MCP_CLIENT_DEADLINE_SECONDS if your client really waits longer.`,
-        }
-        : {
-            ...base,
-            reason: !budget.caller_timeout_explicit && budget.client_deadline_seconds > 0 && budget.requested_ms > budget.client_deadline_seconds * 1000
-                ? `this dispatch did not finish within the requested ${budget.requested_ms}ms poll budget; note the MCP client's own deadline is ${budget.client_deadline_seconds}s, so a slower dispatch needs resume_task rather than a longer timeout_seconds`
-                : `this dispatch did not finish within the requested ${budget.requested_ms}ms poll budget`,
-        }
-}
-
 function timeoutMsFor(timeout_seconds) {
-    const seconds = Number(timeout_seconds)
-    return Math.max(100, Math.round((seconds > 0 ? seconds : EXEC_DEFAULT_LIMIT_SECONDS) * 1000))
+    return Math.max(100, timeoutMilliseconds(timeout_seconds, EXEC_DEFAULT_LIMIT_SECONDS))
 }
 
 export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
     if (!TIMEOUT_MS_PREFIX_VERBS.has(verb)) return raw_body
     if (TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return raw_body
-    const prefixMs = EXEC_FAMILY_VERBS.includes(verb)
-        ? timeoutMsFor(timeout_seconds)
-        : applyClientDeadline(pollTimeoutMs(verb, raw_body, timeout_seconds), Number(timeout_seconds) > 0).ms
-    return `timeoutMs=${prefixMs}\n${raw_body}`
+    return `timeoutMs=${timeoutMsFor(timeout_seconds)}\n${raw_body}`
 }
 
 const DAEMON_HEARTBEAT_STALE_MS = 20000
+
+const DAEMON_TIMESTAMP_FUTURE_SKEW_MS = 60000
+
+
+function timestampAgeMs(timestamp, now = Date.now()) {
+    return typeof timestamp === 'number' && Number.isFinite(timestamp) ? now - timestamp : null
+}
+
+
+function isFreshDaemonTimestamp(timestamp, now = Date.now()) {
+    const age = timestampAgeMs(timestamp, now)
+    return age !== null && age >= -DAEMON_TIMESTAMP_FUTURE_SKEW_MS && age < DAEMON_HEARTBEAT_STALE_MS
+}
 
 function projectRootOfSpool(spoolDir) {
     return path.resolve(spoolDir, '..', '..')
 }
 
-const MUTATING_VERB_PREFIXES = ['git_', 'prd-', 'mutable-', 'memorize-']
-const MUTATING_VERBS = new Set(['fs_write', 'transition'])
-
-function verbMutatesState(verb) {
-    return MUTATING_VERBS.has(verb) || MUTATING_VERB_PREFIXES.some((prefix) => verb.startsWith(prefix))
-}
-
-function stateChangingNote(verb) {
-    if (!verbMutatesState(verb)) return {}
-    return {
-        state_changing: true,
-        state_changing_note: 'this verb changes state, so a caller that stopped waiting cannot tell applied from not-applied: read out_path or the project state before acting, and never re-dispatch it -- a second ' + verb + ' repeats the change. Resume this task to collect the result already on its way',
-    }
-}
-
 function heartbeatAgeMs(spoolDir) {
     const status = readJsonFile(path.join(spoolDir, '.status.json'))
-    return status && typeof status.ts === 'number' ? Date.now() - status.ts : null
+    return timestampAgeMs(status?.ts)
 }
 
 function daemonRestartCommand(root) {
@@ -636,7 +765,7 @@ function daemonRestartCommand(root) {
 }
 
 function coldProjectLiveness() {
-    const shared = readJsonFile(globalDaemonStatusPath())
+    const shared = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
     const sharedPid = globalDaemonPid()
     if (sharedPid === null) {
         return { alive: null, note: 'no .status.json heartbeat found for this project yet and no shared daemon process is running -- nothing has swept this project; start one with the restart command for this project' }
@@ -656,20 +785,11 @@ export function readDaemonLiveness(spoolDir) {
     } catch {
         return coldProjectLiveness()
     }
-    const now = Date.now()
-    const heartbeatAgeMs = typeof status.ts === 'number' ? now - status.ts : null
+        const now = Date.now()
+        const heartbeatAgeMs = timestampAgeMs(status.ts, now)
     const pid = typeof status.pid === 'number' ? status.pid : Number(status.pid) || null
-    const pidAliveFlag = pidAlive(pid)
-    const sharedStatus = readJsonFile(globalDaemonStatusPath())
-    const sharedHeartbeatAgeMs = typeof sharedStatus?.ts === 'number' ? now - sharedStatus.ts : null
-    const sharedDaemonFresh = pidAliveFlag === true
-        && sharedHeartbeatAgeMs !== null
-        && sharedHeartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS
-    const projectHeartbeatFresh = heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS
-    const alive = pidAliveFlag === false ? false : (projectHeartbeatFresh || sharedDaemonFresh)
-    const holder = typeof status.sweep_holder_root === 'string'
-        ? ` -- the shared daemon is currently inside its "${status.sweep_holder_phase}" pass holding ${status.sweep_holder_root} for ${status.sweep_holder_ms} ms`
-        : ''
+        const pidAliveFlag = pidAlive(pid)
+        const alive = pidAliveFlag === true && isFreshDaemonTimestamp(status.ts, now)
     const busyForMs = typeof status.busy_until === 'number' ? status.busy_until - now : null
     const busy = busyForMs !== null && busyForMs > 0
     const note = !alive
@@ -677,18 +797,11 @@ export function readDaemonLiveness(spoolDir) {
             ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed`
             : pidAliveFlag === false
                 ? `the daemon process that last swept this project (pid ${pid}) is gone -- the daemon recycles itself on idle/memory pressure and on a runner version handoff, and is restarted on demand; this call already asked for a replacement, so a dispatch submitted now waits for its cold start (wasm compile, tens of seconds) instead of for a queue`
-                : `the shared daemon process (pid ${pid}) is alive but its OWN heartbeat is ${sharedHeartbeatAgeMs} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms), so the daemon is wedged rather than merely behind on this project${holder}. Its log is ${globalDaemonLogPath()}; it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}`
-        : projectHeartbeatFresh
-            ? (busy
-                ? 'daemon is alive and still actively working on this project'
-                : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that')
-            : `this project's heartbeat is ${heartbeatAgeMs} ms old, past the ${DAEMON_HEARTBEAT_STALE_MS} ms bound, but the shared daemon process (pid ${pid}) is alive with a ${sharedHeartbeatAgeMs} ms-old heartbeat, so the daemon is UP and only this project's heartbeat is late -- that heartbeat is refreshed by a ticker walking every registered root on a budget, so a large registry delays it${holder}. Dispatching is safe; dispatch_state is the authority on whether a request was claimed.`
+                : `daemon heartbeat is ${heartbeatAgeMs} ms stale (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) -- it is down, hung, or has not registered this project; its own log is ${GLOBAL_DAEMON_LOG_PATH} (this project's spool log is ${path.join(spoolDir, '.watcher.log')}) and it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}; this is not necessarily this dispatch's fault`
+        : busy
+            ? 'daemon is alive and still actively working on this project'
+            : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that'
     const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note }
-    if (sharedHeartbeatAgeMs !== null) liveness.shared_heartbeat_age_ms = sharedHeartbeatAgeMs
-    if (!projectHeartbeatFresh && sharedDaemonFresh) liveness.project_heartbeat_stale_ms = heartbeatAgeMs
-    if (typeof status.sweep_holder_root === 'string') liveness.sweep_holder_root = status.sweep_holder_root
-    if (typeof status.sweep_holder_phase === 'string') liveness.sweep_holder_phase = status.sweep_holder_phase
-    if (typeof status.sweep_holder_ms === 'number') liveness.sweep_holder_ms = status.sweep_holder_ms
     if (pid !== null) liveness.pid = pid
     if (pidAliveFlag !== null) liveness.pid_alive = pidAliveFlag
     if (status.runtime) liveness.runtime = status.runtime
@@ -699,7 +812,7 @@ export function readDaemonLiveness(spoolDir) {
     if (typeof status.claimed_step_count === 'number') liveness.claimed_step_count = status.claimed_step_count
     if (typeof status.queued_step_count === 'number') liveness.queued_step_count = status.queued_step_count
     if (typeof status.gm_processor_capacity === 'number') liveness.gm_processor_capacity = status.gm_processor_capacity
-    const sharedProjects = readJsonFile(globalDaemonStatusPath())?.active_projects
+    const sharedProjects = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)?.active_projects
     if (typeof sharedProjects === 'number') liveness.daemon_active_projects = sharedProjects
     if (status.runner_update_in_progress) {
         liveness.runner_update_in_progress = true
@@ -708,11 +821,6 @@ export function readDaemonLiveness(spoolDir) {
     return liveness
 }
 
-// A missing runner binary with no live shared daemon means the daemon can never
-// claim a fresh ticket: without this guard the request is written, sits
-// unclaimed, and the caller only learns the binary is absent after a full poll
-// timeout. Failing fast here keeps a working shared daemon usable (its liveness
-// short-circuits) and turns the silent no-op into one actionable error.
 function runnerUnavailable(root, spoolDir) {
     if (!runnerBinaryMissing()) return null
     if (readDaemonLiveness(spoolDir).alive) return null
@@ -724,14 +832,6 @@ function runnerUnavailable(root, spoolDir) {
     }
 }
 
-// A dispatch written to a project whose daemon is gone sits
-// queued_not_yet_claimed and costs the caller its whole poll budget -- the
-// spool has no way to answer "nobody is listening". This asks for a runner,
-// waits out the cold start, and only then reports, so a dead daemon answers in
-// DAEMON_START_GRACE_MS instead of after a silent 120 s. A project with no
-// heartbeat at all is a first run, not a dead daemon: it still dispatches,
-// because the runner registers the project on its next tick and
-// startRunnerWatchdog keeps it up from then on.
 const DAEMON_START_GRACE_MS = Number(process.env.GM_MCP_DAEMON_START_GRACE_MS) > 0
     ? Number(process.env.GM_MCP_DAEMON_START_GRACE_MS)
     : 15_000
@@ -740,8 +840,7 @@ const DAEMON_START_POLL_MS = 250
 export async function awaitDaemonHeartbeat(spoolDir, signal) {
     const deadline = Date.now() + DAEMON_START_GRACE_MS
     while (true) {
-        const age = heartbeatAgeMs(spoolDir)
-        if (age !== null && age < DAEMON_HEARTBEAT_STALE_MS) return 'recovered'
+        if (liveDaemonSweepsProject(spoolDir)) return 'recovered'
         if (Date.now() >= deadline) return 'still_dead'
         try {
             await sleep(DAEMON_START_POLL_MS, signal)
@@ -754,10 +853,11 @@ export async function awaitDaemonHeartbeat(spoolDir, signal) {
 export async function daemonNotRunning(root, spoolDir, signal) {
     if (process.env.GM_MCP_DAEMON_PREFLIGHT === '0') return undefined
     if (readDaemonLiveness(spoolDir).alive) return undefined
+    const statusPath = path.join(spoolDir, '.status.json')
     const age = heartbeatAgeMs(spoolDir)
-    if (age === null) return undefined
+    if (age === null && !fs.existsSync(statusPath)) return undefined
     if (daemonBootGraceActive()) return undefined
-    if (readJsonFile(path.join(spoolDir, '.status.json'))?.runner_update_in_progress) return undefined
+    if (readJsonFile(statusPath)?.runner_update_in_progress) return undefined
     ensureSpoolRunnerRunning(root)
     startRunnerWatchdog(root)
     if (await awaitDaemonHeartbeat(spoolDir, signal) !== 'still_dead') return undefined
@@ -770,7 +870,7 @@ export async function daemonNotRunning(root, spoolDir, signal) {
         waited_for_start_ms: DAEMON_START_GRACE_MS,
         note: `this project's daemon heartbeat is ${staleFor} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) and did not come back within ${DAEMON_START_GRACE_MS} ms of asking for a runner, so no dispatch was written -- it would sit queued_not_yet_claimed and only fail at the poll timeout. Restart it and dispatch again: ${daemonRestartCommand(root)}`,
         checked_status_file: path.join(spoolDir, '.status.json'),
-        daemon_log: globalDaemonLogPath(),
+        daemon_log: GLOBAL_DAEMON_LOG_PATH,
         spool_log: path.join(spoolDir, '.watcher.log'),
     }
 }
@@ -793,39 +893,6 @@ export function readSpoolDispatchState(spoolDir, verb, task) {
     return { state, claimed, queued, ...(stall ?? {}), ...(pressure ?? {}), note }
 }
 
-export function readDispatchWaitProgress(spoolDir, verb, task) {
-    const ledgerPath = path.join(spoolDir, '.dispatch-wait.json')
-    const ledger = readJsonFile(ledgerPath)
-    if (!ledger || !Array.isArray(ledger.requests)) {
-        return {
-            ledger_path: ledgerPath,
-            published: false,
-            note: 'the daemon has not published a dispatch-wait ledger for this project, so there is no finer-grained progress than claimed/unclaimed to report',
-        }
-    }
-    const mine = ledger.requests.find((r) => r.verb === verb && r.task === task) ?? null
-    return {
-        ledger_path: ledgerPath,
-        published: true,
-        ledger_age_ms: typeof ledger.ts === 'number' ? Date.now() - ledger.ts : null,
-        daemon_pid: ledger.daemon_pid ?? null,
-        project_in_flight: ledger.project_in_flight ?? null,
-        project_in_flight_cap: ledger.project_in_flight_cap ?? null,
-        waiting_requests: ledger.requests.length,
-        mine,
-        note: mine
-            ? `the daemon (pid ${ledger.daemon_pid ?? 'unknown'}) reports this dispatch as "${mine.state}" for ${mine.stage_age_ms} ms, ${mine.file_age_ms} ms after it was written${mine.lane ? `, serial lane "${mine.lane}"` : ''}${mine.admission_kind ? `, admission gate "${mine.admission_kind}" (${mine.admission_in_flight}/${mine.admission_limit} busy)` : ''} -- it IS progressing, so resume rather than re-dispatch`
-            : `the daemon has published a wait ledger with ${ledger.requests.length} waiting request(s) but no row for this task, so this dispatch has no recorded stage yet`,
-    }
-}
-
-// A live daemon with free claim slots claims a settled ticket on its next pass
-// over the project's spool. Past this age an unclaimed ticket is not ordinary
-// queueing: the pass that claims is not reaching this project (it walks the whole
-// registry in order, and anything that stalls it -- a synchronous network update
-// poll, a saturated shared plugin pool -- stalls every project behind it). Name
-// that instead of telling the caller to keep waiting on a sweep that is not
-// running.
 const CLAIM_SWEEP_STALL_MS = 30_000
 
 function claimSweepStall(pressure, queued) {
@@ -837,13 +904,6 @@ function claimSweepStall(pressure, queued) {
     return { claim_sweep_stalled: stalled, claim_sweep_stalled_for_ms: oldestMs }
 }
 
-// The daemon refuses to claim another dispatch for a project once that project
-// already holds MAX_CLAIMED_DISPATCHES_PER_PROJECT claimed ones (agentplug-runner
-// daemon.rs, claim_budget). A dispatch that sits unclaimed is therefore either
-// blocked by that cap or merely waiting for the daemon's next sweep of this
-// project -- and the two need opposite responses from the caller (wait vs
-// escalate). The spool holds both numbers, so measure them instead of listing
-// hypotheses.
 const MAX_CLAIMED_DISPATCHES_PER_PROJECT = 32
 
 export function scanSpoolQueue(spoolDir, myQueuedPath) {
@@ -875,8 +935,6 @@ export function scanSpoolQueue(spoolDir, myQueuedPath) {
         }
         for (const fileEntry of files) {
             if (!fileEntry.isFile() || fileEntry.name.startsWith('.')) continue
-            // A claim renames <task>.<ext> to <task>.<ext>.inflight in place, so
-            // .inflight is the only marker of a dispatch the daemon owns.
             if (fileEntry.name.endsWith('.inflight')) {
                 claimedCount += 1
                 continue
@@ -918,56 +976,6 @@ function queuePressureNote(pressure, queuedPath, stall) {
 const FINAL_OUT_RECHECK_WINDOW_MS = 2500
 const FINAL_OUT_RECHECK_INTERVAL_MS = 150
 
-// write_spool_out_confirmed renames the body into place and then drops the zero-byte
-// <out>.ready marker, so the marker -- not the .json's own existence -- is what says the
-// bytes are all down. Wait that long for it before trusting the file; a writer that never
-// publishes a marker still shows up as a size that stopped growing.
-const OUT_MARKER_GRACE_MS = 60
-const OUT_READ_ATTEMPTS = 3
-
-const STALE_CHROME_SCAN_TIMEOUT_MS = 3000
-
-// A completed dispatch that still reads as a timeout is nearly always a starved
-// daemon, and the starvation is nearly always gm's own headless Chrome piling
-// up: every orphan makes the reaper's process scan slower, a slow scan trips the
-// reaper's circuit breaker, and a blind reaper reaps nothing -- so the count
-// climbs on its own. Naming the count turns a bare "timed out" into the one
-// action that clears it.
-function staleChromeCount() {
-    if (process.platform !== 'win32') return null
-    try {
-        const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq chrome.exe', '/FO', 'CSV', '/NH'], {
-            timeout: STALE_CHROME_SCAN_TIMEOUT_MS,
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'ignore'],
-            windowsHide: true,
-        })
-        const n = String(out).split('\n').filter(l => l.toLowerCase().includes('chrome.exe')).length
-        return Number.isFinite(n) ? n : null
-    } catch {
-        return null
-    }
-}
-
-function staleChromeTimeoutNote(verb) {
-    const isBrowserVerb = verb === 'browser' || verb === 'cdp'
-    const count = staleChromeCount()
-    // The count is a bonus, never a gate: if the scan cannot answer, the browser
-    // verbs still get the actionable note, because that is exactly the starved
-    // machine where it matters and where a scan is least likely to answer.
-    if (count === null && !isBrowserVerb) return {}
-    const observed = count === null
-        ? 'A process scan could not count them just now'
-        : `${count} chrome.exe process(es) are running`
-    const reap = 'Dispatch `browser` with body `session close-all`, then `session list` to confirm none remain.'
-    return {
-        ...(count === null ? {} : { stale_chrome_processes: count }),
-        timeout_note: isBrowserVerb
-            ? `${observed}. gm-spawned headless Chrome that is never closed accumulates, and the orphan reaper cannot see any of it while its own process scan is failing -- so the pile grows on its own and every later dispatch, browser or not, waits behind it. ${reap} Then re-poll THIS dispatch with resume_task rather than dispatching it again.`
-            : `${observed}. Accumulated gm headless Chrome starves the daemon and delays unrelated verbs like \`${verb}\`, so this dispatch is more likely still queued than lost. Re-poll it with resume_task (same verb and cwd, no body); if it keeps timing out, ${reap}`,
-    }
-}
-
 function resumeDisclosure(task, landedAtMs, callStartedAtMs) {
     const resultPredatesResume = typeof landedAtMs === 'number' && landedAtMs < callStartedAtMs
     return {
@@ -983,7 +991,10 @@ function resumeDisclosure(task, landedAtMs, callStartedAtMs) {
 
 function carriedNoFailure(out) {
     return Boolean(out) && typeof out === 'object' && !Array.isArray(out)
-        && out.error === undefined && out.timed_out !== true && out.ok !== false
+        && out.error === undefined && out.error_code === undefined
+        && out.dispatch_ledger_error === undefined && out.dream_rsi_observation_error === undefined
+        && out.timed_out !== true && out.ok !== false
+        && (!out.data || typeof out.data !== 'object' || Array.isArray(out.data) || carriedNoFailure(out.data))
 }
 
 const DISPATCH_WAIT_DISCLOSED_AT_MS = 5000
@@ -1031,12 +1042,64 @@ function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
     }
 }
 
-export async function gmDispatch(args, signal) {
+
+const ownerHeaderCapabilityByRuntime = new Map()
+const OWNER_HEADER_CAPABILITY_CACHE_MAX = 64
+
+function ownerHeaderRuntimeIdentity(root) {
+    const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    const hash = status?.loaded_plugin_content_sha256?.gm
+    const slots = status?.shared_pool_slot_content_sha256?.gm
+    if (!status || !Number.isSafeInteger(status.pid) || pidAlive(status.pid) !== true
+        || !isFreshDaemonTimestamp(status.ts, Date.now())
+        || typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)
+        || !Array.isArray(slots) || !slots.some(value => value === hash)
+        || slots.some(value => value !== null && value !== hash)
+        || status.pending_store_swaps?.gm
+        || (Array.isArray(status.mixed_version_pools) && status.mixed_version_pools.length)) return null
+    const project = readJsonFile(path.join(root, '.gm', 'exec-spool', '.status.json'))
+    if (project && (project.pid !== status.pid || !isFreshDaemonTimestamp(project.ts, Date.now()))) return null
+    return JSON.stringify([root, GLOBAL_DAEMON_STATUS_PATH, status.pid, status.daemon_boot_ts, hash])
+}
+
+async function plainTextOwnerTransport(root, sessionId, signal) {
+    const before = ownerHeaderRuntimeIdentity(root)
+    if (before && ownerHeaderCapabilityByRuntime.has(before)) {
+        const cached = await ownerHeaderCapabilityByRuntime.get(before)
+        return ownerHeaderRuntimeIdentity(root) === before ? cached : 'unverified'
+    }
+    const probe = async () => {
+        let response
+        try {
+            await gmDispatch({
+                verb: 'phase-status', body: {}, session_id: sessionId,
+                cwd: root, timeout_seconds: 20, full_response: true,
+            }, signal, value => { response = value })
+        } catch { return 'unverified' }
+        if (!before || ownerHeaderRuntimeIdentity(root) !== before) return 'unverified'
+        if (response?.gm_session_header_version === 1) return 'header-v1'
+        if (response?.ok === true && response.timed_out !== true) return 'legacy-unverified'
+        return 'unverified'
+    }
+    const pending = probe()
+    if (before) {
+        if (ownerHeaderCapabilityByRuntime.size >= OWNER_HEADER_CAPABILITY_CACHE_MAX) {
+            ownerHeaderCapabilityByRuntime.delete(ownerHeaderCapabilityByRuntime.keys().next().value)
+        }
+        ownerHeaderCapabilityByRuntime.set(before, pending)
+    }
+    const transport = await pending
+    if (before && transport === 'unverified'
+        && ownerHeaderCapabilityByRuntime.get(before) === pending) ownerHeaderCapabilityByRuntime.delete(before)
+    return transport
+}
+
+export async function gmDispatch(args, signal, responseValueObserver) {
     inflightDispatches += 1
     const startedAtMs = Date.now()
     appendDiagnostic('dispatch-start', { verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
     try {
-        return await runDispatch(args, signal)
+        return await runDispatch(args, signal, responseValueObserver)
     } catch (error) {
         appendDiagnostic('dispatch-error', { verb: args?.verb ?? null, error: error?.message ? String(error.message) : String(error) })
         throw error
@@ -1046,17 +1109,17 @@ export async function gmDispatch(args, signal) {
     }
 }
 
-async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal) {
+async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal, responseValueObserver) {
     if (!verb) return 'error: verb required'
+    if (typeof session_id === 'string') session_id = session_id.trim()
     if (!session_id) return 'error: session_id required'
     const n = resume_task || nextN(session_id)
     const unsafeName = unsafeSpoolName('verb', verb) || unsafeSpoolName('session_id', session_id) || unsafeSpoolName('task', n)
     if (unsafeName) return `error: ${unsafeName} -- nothing was written to the spool, so no dispatch was queued`
-    const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })
     const resolvedRoot = resolveDispatchRoot(cwd)
     if (resolvedRoot.error) {
         appendDiagnostic('dispatch-root-refused', { verb, root: resolvedRoot.refused_root, reason: resolvedRoot.refused_reason })
-        return toYaml(resolvedRoot)
+        return yaml.dump(resolvedRoot, { lineWidth: 100 })
     }
     if (resolvedRoot.root_source !== 'cwd') {
         appendDiagnostic('dispatch-root-defaulted', { verb, root: resolvedRoot.root, source: resolvedRoot.root_source })
@@ -1068,6 +1131,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     fs.mkdirSync(outDir, { recursive: true })
     const callStartedAtMs = Date.now()
     let lastWakeSource = 'initial_check'
+    const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })
 
     const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === 'string'
     if (!resume_task && isPlainText && typeof raw_body !== 'string') {
@@ -1076,6 +1140,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             return `error: ${verb} takes a plain-text body -- pass the text as the top-level raw_body argument (a string), e.g. raw_body: "return 1". body is for JSON verbs; here it is accepted only as a string or as an object with exactly one string field among ${PLAIN_TEXT_BODY_FIELDS.join(', ')}`
         }
     }
+
+    const timeoutDiagnostic = timeoutInputDiagnostic(verb, raw_body, timeout_seconds)
+    if (timeoutDiagnostic) return `error: ${timeoutDiagnostic}`
 
     let normalizedBody
     if (!resume_task && !isPlainText) {
@@ -1088,6 +1155,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, globCoerced.value), root, session_id)
     }
 
+    let ownerTransport
     const inPath = path.join(inDir, `${n}.txt`)
     const outPath = path.join(outDir, `${verb}-${n}.json`)
 
@@ -1114,99 +1182,65 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         ensureSpoolRunnerRunning(root)
         startRunnerWatchdog(root)
         if (isPlainText) {
-            publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, raw_body, timeout_seconds))
-        } else if (DEADLINE_AWARE_JSON_VERBS.includes(verb)) {
-            // plugkit strips a leading timeoutMs=<n>\n directive off a JSON body before
-            // parsing it (strip_timeout_ms_prefix_directive) and feeds it to
-            // caller_remaining_ms(), which is how these verbs decide whether to index and
-            // run both search channels or answer with what they have. Sent as JSON only they
-            // never learn the caller's budget, so they index to their own internal budgets
-            // and answer long after the caller stopped waiting.
-            const fullBody = { ...normalizedBody, session_id }
-            publishSpoolRequest(inDir, inPath, n, withTimeoutMsPrefix(verb, JSON.stringify(fullBody), timeout_seconds))
+            ownerTransport = await plainTextOwnerTransport(root, session_id, signal)
+            if (signal?.aborted) return toYaml({ error: 'aborted', owner_transport: ownerTransport, wrote_no_new_dispatch: true })
+            const plaintext = withTimeoutMsPrefix(verb, raw_body, timeout_seconds)
+            publishSpoolRequest(inDir, inPath, n, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
         } else {
             const fullBody = { ...normalizedBody, session_id }
             publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody))
         }
     }
 
-    const requestedTimeoutMs = resume_task ? Math.max(0, (Number(timeout_seconds) || DEFAULT_TIMEOUT_SECONDS) * 1000) : pollTimeoutMs(verb, raw_body, timeout_seconds)
-    const budget = applyClientDeadline(requestedTimeoutMs, Number(timeout_seconds) > 0)
-    const timeoutMs = budget.ms
+    const requestedPollTimeoutMs = resume_task ? timeoutMilliseconds(timeout_seconds, DEFAULT_TIMEOUT_SECONDS) : pollTimeoutMs(verb, raw_body, timeout_seconds)
+    const timeoutMs = Math.min(requestedPollTimeoutMs, MCP_POLL_TIMEOUT_CEILING_MS)
     const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1000)
     const deadline = Date.now() + timeoutMs
 
 
-    const outMarkerPath = `${outPath}.ready`
-
-    const sizeOf = (file) => {
-        try {
-            return fs.statSync(file).size
-        } catch {
-            return null
-        }
-    }
-
-    const outFileComplete = async () => {
-        if (fs.existsSync(outMarkerPath)) return true
-        const first = sizeOf(outPath)
-        if (first === null) return false
-        await sleep(OUT_MARKER_GRACE_MS).catch(() => {})
-        if (fs.existsSync(outMarkerPath)) return true
-        return sizeOf(outPath) === first
-    }
-
-    const renderLandedOut = (parsed, landedAtMs) => {
-        rememberDeliveredInstructionHash(verb, parsed, root, session_id)
-        const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
-        const cleaned = cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
-        let out = cleaned
-        if (cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
-            const { data, ...rest } = cleaned
-            const collides = Object.keys(data).some(k => k in rest)
-            if (!collides) out = { ...rest, ...data }
-        }
-        if (!full_response && carriedNoFailure(out)) out = compactWireResponse(out, outPath)
-        if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
-        else out = withDispatchWait(out, Date.now() - callStartedAtMs)
-        if (out && typeof out === 'object' && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
-            out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
-        }
-        if (include_timing === true || include_timing === 'true') {
-            const timingKey = out && typeof out === 'object' && !Array.isArray(out) && 'mcp_timing' in out ? 'mcp_client_timing' : 'mcp_timing'
-            const timing = {
-                submitted_at_ms: callStartedAtMs,
-                response_observed_at_ms: Date.now(),
-                round_trip_ms: Date.now() - callStartedAtMs,
-                response_wakeup: lastWakeSource,
-                daemon_at_submission: readDaemonLiveness(spoolDir),
-            }
-            out = out && typeof out === 'object' && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
-        }
-        return toYaml(out)
-    }
-
-    const readLandedOutFile = async () => {
+    const readLandedOutFile = () => {
         if (!fs.existsSync(outPath)) return undefined
-        if (!(await outFileComplete())) return undefined
         let landedAtMs = null
+        let opened
         try {
-            landedAtMs = fs.statSync(outPath).mtimeMs
-        } catch {
-            landedAtMs = null
-        }
-        for (let attempt = 1; ; attempt++) {
-            try {
-                const parsed = unpackExecOutputEnvelope(verb, JSON.parse(fs.readFileSync(outPath, 'utf8')))
-                return renderLandedOut(parsed, landedAtMs)
-            } catch (e) {
-                if (attempt >= OUT_READ_ATTEMPTS) {
-                    const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
-                    return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
-                }
-                await sleep(OUT_MARKER_GRACE_MS).catch(() => {})
-                if (!(await outFileComplete())) return undefined
+            opened = openSpoolRegularFile(root, outPath)
+            landedAtMs = opened.mtimeMs
+            const original = JSON.parse(readAllBounded(opened.fd, opened.size))
+            responseValueObserver?.(original)
+            const parsed = full_response ? original : unpackExecOutputEnvelope(verb, original)
+            rememberDeliveredInstructionHash(verb, parsed, root, session_id)
+            const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
+            const cleaned = full_response ? parsed : cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
+            let out = cleaned
+            if (!full_response && cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
+                const { data, ...rest } = cleaned
+                const collides = Object.keys(data).some(k => k in rest)
+                if (!collides) out = { ...rest, ...data }
             }
+            if (ownerTransport && ownerTransport !== 'header-v1' && out && typeof out === 'object' && !Array.isArray(out)) out = { ...out, owner_transport: ownerTransport }
+            if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
+            if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
+            else out = withDispatchWait(out, Date.now() - callStartedAtMs)
+            if (out && typeof out === 'object' && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
+                out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
+            }
+            if (include_timing === true || include_timing === 'true') {
+                const timingKey = out && typeof out === 'object' && !Array.isArray(out) && 'mcp_timing' in out ? 'mcp_client_timing' : 'mcp_timing'
+                const timing = {
+                    submitted_at_ms: callStartedAtMs,
+                    response_observed_at_ms: Date.now(),
+                    round_trip_ms: Date.now() - callStartedAtMs,
+                    response_wakeup: lastWakeSource,
+                    daemon_at_submission: readDaemonLiveness(spoolDir),
+                }
+                out = out && typeof out === 'object' && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
+            }
+            return (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
+        } catch (e) {
+            const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
+            return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
+        } finally {
+            if (opened) fs.closeSync(opened.fd)
         }
     }
 
@@ -1222,60 +1256,40 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const abortedReply = () => toYaml({
         error: 'aborted',
         task: n,
-        dispatch_root: root,
-        root_source: resolvedRoot.root_source,
         in_path: inPath,
         out_path: outPath,
-                ...stateChangingNote(verb),
-        aborted_after_ms: Date.now() - callStartedAtMs,
         request_withdrawn_before_claim: withdrawUnclaimedRequest(),
-        note: `the caller stopped waiting after ${Date.now() - callStartedAtMs}ms; the dispatch itself was NOT cancelled${resume_task ? '' : ' once the daemon claimed it'} and its result still lands in out_path once the daemon finishes. Re-poll the SAME dispatch with resume_task set to this response's task (same verb and cwd, no body) instead of dispatching again -- a re-dispatch queues a second copy of the same work.`,
     })
 
     while (true) {
         if (signal?.aborted) return abortedReply()
-        // A daemon that dies between the preflight and the claim leaves this
-        // dispatch queued_not_yet_claimed for its whole poll budget. Re-ask for
-        // a runner on every wake instead of only once up front: the throttle
-        // inside ensureSpoolRunnerRunning keeps it to one attempt every
-        // ENSURE_INTERVAL_MS, and it is a no-op while the daemon is live.
         ensureSpoolRunnerRunning(root)
-        const landed = await readLandedOutFile()
+        const landed = readLandedOutFile()
         if (landed !== undefined) return landed
         if (Date.now() >= deadline) {
-            // The daemon writes its reply without knowing anyone stopped
-            // waiting, and this loop's own last check was up to pollMs before
-            // the deadline -- so a reply that landed meanwhile is on disk and
-            // invisible to a bare "deadline passed" test. Read first, then
-            // keep reading through the window: a result that exists always
-            // beats reporting a timeout.
             const finalRecheckDeadline = Date.now() + FINAL_OUT_RECHECK_WINDOW_MS
-            while (true) {
-                const landedLate = await readLandedOutFile()
-                if (landedLate !== undefined) return landedLate
-                if (signal?.aborted) return abortedReply()
-                if (Date.now() >= finalRecheckDeadline) break
+            while (Date.now() < finalRecheckDeadline) {
                 try {
                     await sleep(FINAL_OUT_RECHECK_INTERVAL_MS, signal)
                 } catch {
-                    return abortedReply()
+                    break
                 }
+                const landedLate = readLandedOutFile()
+                if (landedLate !== undefined) return landedLate
             }
             return toYaml({
                 timed_out: true,
                 task: n,
+                poll_timeout_ms: timeoutMs,
+                requested_poll_timeout_ms: requestedPollTimeoutMs,
+                poll_timeout_capped: requestedPollTimeoutMs > timeoutMs,
                 resume_task_supported: true,
                 resumed_this_call: Boolean(resume_task),
-                dispatch_root: root,
-                root_source: resolvedRoot.root_source,
                 in_path: inPath,
                 out_path: outPath,
                 final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
-                poll_budget: pollBudgetDisclosure(budget, Date.now() - callStartedAtMs),
                 dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
-                progress: readDispatchWaitProgress(spoolDir, verb, n),
                 daemon: readDaemonLiveness(spoolDir),
-                ...staleChromeTimeoutNote(verb),
             })
         }
         try {

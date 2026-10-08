@@ -1,4 +1,4 @@
-const NOISE_KEYS = new Set(['dispatch_id', 'request_fingerprint'])
+const NOISE_KEYS = new Set(['request_fingerprint'])
 
 function envPositiveInt(name, fallback) {
     const raw = Number(process.env[name])
@@ -15,7 +15,7 @@ const FILE_READ_INLINE_MAX = Math.min(envPositiveInt('GM_MCP_FILE_READ_INLINE_MA
 
 export { PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING }
 
-const NEVER_TRUNCATE_KEYS = new Set(['error', 'reason', 'residuals'])
+const NEVER_TRUNCATE_KEYS = new Set(['error', 'reason', 'residuals', 'dispatch_ledger_error', 'dream_rsi_observation_error', 'detail'])
 
 const NO_KEYS = new Set()
 
@@ -156,6 +156,7 @@ const WIRE_HITS_INLINE_MAX = 4
 const WIRE_CONFIG_CHANGED_INLINE_MAX = 1
 
 const WIRE_CONFIG_CHANGED_KEYS_INLINE_MAX = 3
+const WIRE_PHASE_HISTORY_INLINE_MAX = 5
 
 const WIRE_FULL_PAYLOAD_VIA = 'dispatch with {"full_response": true}'
 
@@ -243,6 +244,10 @@ function compactConfigChanged(rows) {
     })
 }
 
+function compactPhaseHistory(rows) {
+    return Array.isArray(rows) ? rows.slice(-WIRE_PHASE_HISTORY_INLINE_MAX) : rows
+}
+
 const WIRE_SCAN_WARNINGS_INLINE_MAX = 8
 
 function compactSupplyChainScan(scan) {
@@ -261,12 +266,15 @@ function compactSupplyChainScan(scan) {
 
 function compactDreamRsiStrategy(strategy) {
     if (!strategy || typeof strategy !== 'object') return strategy
+    if (strategy.ok === false || strategy.error !== undefined || strategy.error_code !== undefined) return strategy
     const evidence = Array.isArray(strategy.evidence) ? strategy.evidence : []
     return withoutBlankValues({
         selection: strategy.selection,
         observations: strategy.observation_count,
         succeeded: strategy.successful_dispatch_count,
         failed: strategy.failed_dispatch_count,
+        unverified: strategy.unverified_dispatch_count,
+        unscored: strategy.unscored_dispatch_count,
         gate_drift_failures: strategy.gate_drift_failure_count,
         evidence_rows: evidence.length,
     })
@@ -274,6 +282,7 @@ function compactDreamRsiStrategy(strategy) {
 
 function compactDreamRsiReplay(replay) {
     if (!replay || typeof replay !== 'object') return replay
+    if (replay.ok === false || replay.error !== undefined || replay.error_code !== undefined) return replay
     const replays = Array.isArray(replay.replays) ? replay.replays : []
     return withoutBlankValues({
         ok: replay.ok,
@@ -287,6 +296,7 @@ const WIRE_FIELD_COMPACTORS = new Map([
     ['codeinsight_overview', compactCodeinsightOverview],
     ['codeinsight_start', compactCodeinsightStart],
     ['config_changed', compactConfigChanged],
+    ['phase_history', compactPhaseHistory],
     ['supply_chain_scan', compactSupplyChainScan],
     ['dream_rsi_strategy', compactDreamRsiStrategy],
     ['dream_rsi_replay', compactDreamRsiReplay],
@@ -296,12 +306,90 @@ function unchangedByCompaction(before, after) {
     return JSON.stringify(before) === JSON.stringify(after)
 }
 
-export function compactWireResponse(response, outPath) {
+const WIRE_GIT_COMMIT_VERBS = new Set(['git_commit', 'git_finalize'])
+const WIRE_GIT_EXCLUSION_KEYS = new Set(['excluded', 'excluded_but_dirty'])
+const WIRE_GIT_EXCLUSIONS_INLINE_MAX = 5
+
+function gitReceiptCarriesNoFailure(response) {
+    return response.error === undefined && response.error_code === undefined
+        && response.ok !== false && response.timed_out !== true
+        && response.refused !== true && response.status !== 'refused'
+        && response.outcome !== 'refused'
+}
+
+function countOutputRepeatsStructuredCounts(response) {
+    if (response.ok !== true || response.exhaustive !== true || response.output_mode !== 'count'
+        || response.error !== undefined || response.error_code !== undefined
+        || response.errors !== undefined || response.partial_reason !== undefined
+        || response.partial === true || response.complete === false
+        || response.timed_out === true || response.refused === true
+        || response.status === 'refused' || response.outcome === 'refused') return false
+    const { counts, output } = response
+    return Array.isArray(counts) && counts.length > 0 && Array.isArray(output)
+        && counts.length === output.length && counts.every((row, index) =>
+            row && typeof row.path === 'string' && Number.isSafeInteger(row.count) && row.count >= 0
+            && output[index] === `${row.path}:${row.count}`)
+}
+
+
+function equalJsonValues(left, right, depth = 0) {
+    if (left === right) return true
+    if (depth >= 128) return false
+    if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
+    if (Array.isArray(left) !== Array.isArray(right)) return false
+    const keys = Object.keys(left)
+    return keys.length === Object.keys(right).length
+        && keys.every(key => Object.hasOwn(right, key) && equalJsonValues(left[key], right[key], depth + 1))
+}
+
+export function omitRepeatedFaultStdout(response, outPath) {
     if (!response || typeof response !== 'object' || Array.isArray(response)) return response
+    const omitted = []
+    const omitAt = (object, prefix, depth = 0) => {
+        if (!object || typeof object !== 'object' || Array.isArray(object) || depth >= 32) return object
+        let next = object
+        if (object.data && typeof object.data === 'object' && !Array.isArray(object.data)) {
+            const data = omitAt(object.data, prefix + 'data.', depth + 1)
+            if (data !== object.data) next = { ...object, data }
+        }
+        if (typeof object.stdout !== 'string'
+            || !(object.ok === false || object.error !== undefined || object.error_code !== undefined)) return next
+        let parsed
+        try { parsed = JSON.parse(object.stdout) } catch { return next }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return next
+        const keys = Object.keys(parsed)
+        if (!keys.length || !keys.every(key => Object.hasOwn(object, key) && equalJsonValues(parsed[key], object[key]))) return next
+        const { stdout, ...rest } = next
+        omitted.push(prefix + 'stdout')
+        return rest
+    }
+    const result = omitAt(response, '')
+    if (!omitted.length) return response
+    return {
+        ...result,
+        wire_compacted: {
+            ...(result.wire_compacted || {}),
+            omitted: [result.wire_compacted?.omitted, ...omitted].filter(Boolean).join(' '),
+            full_payload_at: outPath,
+            full_payload_via: WIRE_FULL_PAYLOAD_VIA,
+        },
+    }
+}
+
+export function compactWireResponse(response, outPath, receiptVerb = response?.verb) {
+    if (!response || typeof response !== 'object' || Array.isArray(response)) return response
+    const gitReceiptContext = WIRE_GIT_COMMIT_VERBS.has(receiptVerb)
+        && gitReceiptCarriesNoFailure(response)
+    const committedGitReceipt = gitReceiptContext && response.committed === true
+    const redundantCountOutput = countOutputRepeatsStructuredCounts(response)
     const omitted = []
     const shortened = []
     const out = {}
     for (const [key, value] of Object.entries(response)) {
+        if (key === 'output' && redundantCountOutput) {
+            omitted.push(key)
+            continue
+        }
         if (WIRE_OMITTED_KEYS.has(key)) {
             omitted.push(key)
             continue
@@ -324,8 +412,9 @@ export function compactWireResponse(response, outPath) {
         if (fieldCompactor) next = fieldCompactor(next)
         else if (WIRE_HIT_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_HITS_INLINE_MAX).map(excerptRow)
         else if (WIRE_ROW_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.map(excerptRow)
+        else if (committedGitReceipt && WIRE_GIT_EXCLUSION_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_GIT_EXCLUSIONS_INLINE_MAX)
         if (key === 'data' && next && typeof next === 'object' && !Array.isArray(next)) {
-            const inner = compactWireResponse(next, outPath)
+            const inner = compactWireResponse(next, outPath, gitReceiptContext ? receiptVerb : null)
             if (inner !== next) {
                 const { wire_compacted: innerWire, ...innerRest } = inner
                 if (innerWire?.omitted) omitted.push(`data.${innerWire.omitted}`)
@@ -351,4 +440,12 @@ export function compactWireResponse(response, outPath) {
         full_payload_via: WIRE_FULL_PAYLOAD_VIA,
     })
     return out
+}
+
+export const VERBATIM_TEXT_MARKER = '--- data (verbatim, no indentation added) ---'
+
+export function renderVerbatimFileText(out, toYaml) {
+    if (!out || typeof out !== 'object' || Array.isArray(out) || typeof out.data !== 'string') return undefined
+    const { data, ...rest } = out
+    return `${toYaml(rest)}${VERBATIM_TEXT_MARKER}\n${data}`
 }

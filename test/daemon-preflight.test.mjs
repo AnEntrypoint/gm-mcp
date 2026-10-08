@@ -3,10 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-// Set before importing: dispatch.js reads the grace once at module load, and
-// the assertion below is about the verdict, not about waiting 15 s for it.
 process.env.GM_MCP_DAEMON_START_GRACE_MS = '400'
-// The watchdog re-ensures every 5 s, which outlives the lease that holds the runner spawn off.
 process.env.GM_MCP_RUNNER_WATCHDOG = '0'
 const { daemonBootGraceActive, daemonNotRunning, readDaemonLiveness, readSpoolDispatchState, scanSpoolQueue } = await import('../src/dispatch.js')
 
@@ -29,9 +26,6 @@ const scratch = mkdtempSync(path.join(tmpdir(), 'gm-daemon-preflight-'))
 const project = (name) => {
     const dir = path.join(scratch, name, '.gm', 'exec-spool')
     mkdirSync(dir, { recursive: true })
-    // A fresh runner-ensure lease keeps the pre-flight from spawning a runner for this throwaway
-    // project: a spawned one adopts it into the live daemon, whose handles on the tree outlive the
-    // suite and leave the cleanup below failing with ENOTEMPTY or EPERM.
     writeFileSync(path.join(dir, '.runner-ensure.lock'), String(process.pid))
     return dir
 }
@@ -50,9 +44,6 @@ await test('a project that never swept is the registration path, not a dead daem
     assert.equal(await daemonNotRunning(rootOf(dir), dir, undefined), undefined)
 })
 
-// The boot grace is global: while the real daemon has just restarted, a stale
-// heartbeat is expected and the pre-flight must stay quiet. Wait it out so the
-// dead-project assertions below do not flake on the daemon's recycle schedule.
 async function waitOutOfBootGrace() {
     for (let i = 0; i < 45 && daemonBootGraceActive(); i += 1) {
         await sleep(1000)
@@ -100,8 +91,6 @@ await test('a cold project explains the wait instead of blaming git or the daemo
     assert.ok(liveness.note.includes(sharedDaemonRunning ? 'resume_task' : 'no shared daemon process'), liveness.note)
 })
 
-// An unclaimed dispatch used to be explained with three hypotheses. These build
-// a spool by hand so the numbers -- not the prose -- are what gets asserted.
 const queueProject = (name) => {
     const dir = project(name)
     mkdirSync(path.join(dir, 'in', 'instruction'), { recursive: true })
@@ -148,8 +137,6 @@ await test('a project at its claim cap says so plainly', async () => {
     assert.equal(state.cap_saturated, true)
     const note = readSpoolDispatchState(dir, 'instruction', 'mine').note
     assert.ok(note.includes('AT ITS CLAIM CAP'), note)
-    // The census counts the daemon's .inflight claim marker, not raw files:
-    // free a slot and the saturation verdict flips with it.
     const busy0 = path.join(dir, 'in', 'instruction', 'busy-0.txt.inflight')
     rmSync(busy0)
     writeFileSync(path.join(dir, 'in', 'instruction', 'busy-0.txt'), '{}')
@@ -159,10 +146,6 @@ await test('a project at its claim cap says so plainly', async () => {
     assert.equal(withFreeSlot.cap_saturated, false)
 })
 
-// A queued file with free claim budget is only "waiting for the next sweep" for
-// as long as the sweep actually runs. Past the sweep bound the verdict has to be
-// a stalled claim sweep, because the advice differs: keep waiting is right for
-// ordinary queueing and wrong for a pass that is not reaching this project.
 await test('an unclaimed dispatch past the sweep bound is reported as a stalled claim sweep', async () => {
     const dir = queueProject('queue-stalled')
     queueFile(dir, 'instruction', 'mine.txt', 45_000)
@@ -214,8 +197,6 @@ await test('a live daemon block carries the counts it already published', async 
     assert.equal(liveness.gm_processor_capacity, 8)
 })
 
-// A handle on the tree can outlive the process that opened it, so one rmSync is not enough: retry
-// for a bounded time, then fail loudly rather than leave a temp tree behind.
 async function removeScratchTree(dir) {
     for (let attempt = 1; attempt <= 20; attempt += 1) {
         try {
