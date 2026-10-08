@@ -894,6 +894,59 @@ export function readSpoolDispatchState(spoolDir, verb, task) {
     return { state, claimed, queued, ...(stall ?? {}), ...(pressure ?? {}), note }
 }
 
+const DISPATCH_WAIT_LEDGER_FILE = '.dispatch-wait.json'
+
+const DISPATCH_WAIT_STATE_NOTES = {
+    never_claimed: 'the request file is in the spool but the daemon has not claimed it yet',
+    claimed_not_yet_tracked: 'the daemon claimed the request but has not started tracking it yet',
+    claimed_waiting_for_admission: 'the daemon holds the request and is waiting for a shared plugin pool slot',
+    claimed_waiting_for_serial_lane: 'the daemon holds the request and is waiting for this project serial lane (git, store or state)',
+    claimed_waiting_for_tool_queue: 'the daemon holds the request and is waiting in the FIFO queue for this plugin and verb',
+    claimed_running: 'the daemon is executing the request',
+}
+
+export function readDispatchWaitRow(spoolDir, verb, task, outPath) {
+    const ledgerPath = path.join(spoolDir, DISPATCH_WAIT_LEDGER_FILE)
+    const ledger = readJsonFile(ledgerPath)
+    if (!ledger) {
+        return {
+            ledger_path: ledgerPath,
+            row: null,
+            note: `no ${DISPATCH_WAIT_LEDGER_FILE} exists, so the daemon has no unanswered request in this project: the request was already answered or removed. Looked at out_path ${outPath}`,
+        }
+    }
+    const header = {
+        ledger_path: ledgerPath,
+        ledger_age_ms: typeof ledger.ts === 'number' ? Date.now() - ledger.ts : null,
+        daemon_pid: ledger.daemon_pid ?? null,
+        project_in_flight: ledger.project_in_flight ?? null,
+        project_in_flight_cap: ledger.project_in_flight_cap ?? null,
+    }
+    const found = (Array.isArray(ledger.requests) ? ledger.requests : []).find(r => r?.verb === verb && r?.task === task)
+    if (!found) {
+        return {
+            ...header,
+            row: null,
+            note: `${DISPATCH_WAIT_LEDGER_FILE} holds no row for this task, so the request was already answered or removed. Looked at out_path ${outPath}`,
+        }
+    }
+    const stateNote = DISPATCH_WAIT_STATE_NOTES[found.state] ?? 'unrecognized state'
+    return {
+        ...header,
+        row: {
+            state: found.state,
+            state_meaning: stateNote,
+            lane: found.lane ?? null,
+            admission_kind: found.admission_kind ?? null,
+            file_age_ms: found.file_age_ms ?? null,
+            stage_age_ms: found.stage_age_ms ?? null,
+            request_path: found.request_path,
+            claim_path: found.claim_path || null,
+            out_path: found.out_path,
+        },
+    }
+}
+
 const CLAIM_SWEEP_STALL_MS = 30_000
 
 function claimSweepStall(pressure, queued) {
@@ -1295,6 +1348,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 out_path: outPath,
                 final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
                 dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
+                dispatch_wait: readDispatchWaitRow(spoolDir, verb, n, outPath),
                 daemon: readDaemonLiveness(spoolDir),
             })
         }
