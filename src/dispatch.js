@@ -650,7 +650,7 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
 
 const EXEC_FAMILY_VERBS = ['exec_js', 'nodejs', 'javascript', 'node', 'js', 'bash', 'sh', 'shell', 'zsh', 'python', 'py', 'powershell', 'ps1', 'ssh', 'go', 'rust', 'c', 'cpp', 'java', 'deno']
 
-const PLAIN_TEXT_BODY_VERBS = new Set(EXEC_FAMILY_VERBS)
+const PLAIN_TEXT_BODY_VERBS = new Set([...EXEC_FAMILY_VERBS, 'crawl'])
 
 const TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS)
 
