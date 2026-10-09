@@ -19,6 +19,8 @@ const NEVER_TRUNCATE_KEYS = new Set(['error', 'reason', 'residuals', 'dispatch_l
 
 const NO_KEYS = new Set()
 
+const NULL_IS_THE_ANSWER_KEYS = new Set(['concurrency_shortfall'])
+
 const EXPANDED_RECALL_KEYS = new Set(['text'])
 
 const EXEC_OUTPUT_KEYS = new Set(['stdout', 'stderr', 'result'])
@@ -108,6 +110,10 @@ export function cleanResponse(value, keyHint, outPath, plainTextFile, untruncate
         const out = {}
         for (const [k, v] of Object.entries(value)) {
             if (NOISE_KEYS.has(k)) continue
+            if (v === null && NULL_IS_THE_ANSWER_KEYS.has(k)) {
+                out[k] = null
+                continue
+            }
             if (v === null || v === undefined || v === '') continue
             if (v === false && FALSE_IS_ABSENCE_OF_A_PROBLEM_KEYS.has(k)) continue
             if (plainTextFile && k === 'result' && v && typeof v === 'object') {
