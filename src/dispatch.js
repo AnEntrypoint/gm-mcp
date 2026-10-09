@@ -63,6 +63,50 @@ function inlineMaxForVerb({ verb, isPlainText, fullResponse, maxChars }) {
     return undefined
 }
 
+const DEFAULT_REPLY_MAX_CHARS = 24000
+const REPLY_NOTICE_RESERVE_CHARS = 300
+
+function replyMaxChars(maxChars) {
+    const requested = Number(maxChars)
+    if (Number.isFinite(requested) && requested > 0) return Math.min(Math.floor(requested), LONG_TEXT_INLINE_MAX_CEILING)
+    return DEFAULT_REPLY_MAX_CHARS
+}
+
+function capReplyText(text, maxChars, spillPath) {
+    if (text.length <= maxChars) return text
+    fs.writeFileSync(spillPath, text)
+    const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
+    const cut = text.slice(0, budget)
+    const lastBreak = cut.lastIndexOf('\n')
+    const head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
+    return `${head}reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nspill_file: ${spillPath}\n`
+}
+
+function shapeGitStatusReply(verb, body, out) {
+    if (verb !== 'git_status' || !out || typeof out !== 'object' || Array.isArray(out)) return out
+    if (!Array.isArray(out.first_paths)) return out
+    const limit = Number(body?.limit)
+    const hasLimit = body?.limit !== undefined && Number.isFinite(limit) && limit >= 0
+    if (body?.summary === true && !hasLimit) {
+        const { first_paths, first_paths_note, ...rest } = out
+        return { ...rest, first_paths_omitted: first_paths.length }
+    }
+    if (hasLimit && out.first_paths.length > limit) {
+        return { ...out, first_paths: out.first_paths.slice(0, limit), first_paths_omitted: out.first_paths.length - limit }
+    }
+    return out
+}
+
+function withCheckoutCreateHint(verb, body, out) {
+    if (verb !== 'git_checkout' || body?.create !== true || !out || typeof out !== 'object' || out.ok !== false) return out
+    const branch = typeof body.ref === 'string' ? body.ref : ''
+    if (!branch || !/exist/i.test(String(out.error ?? ''))) return out
+    return {
+        ...out,
+        hint: `branch "${branch}" already exists and was not moved. To bring it up to date, fast-forward it with git_merge or git_pull on "${branch}" instead of create:true.`,
+    }
+}
+
 let counter = 0
 function nextN(sessionId) {
     counter += 1
@@ -1089,14 +1133,9 @@ function instructionOwnerKey(root, sessionId) {
 
 const deliveredReplyHashByOwner = new Map()
 
-function withAssertedInstructionHash(verb, body, root, sessionId) {
+function withAssertedInstructionHash(verb, body) {
     if (verb !== 'instruction') return body
-    const owner = instructionOwnerKey(root, sessionId)
-    const knownReply = deliveredReplyHashByOwner.get(owner)
-    const withReply = knownReply && typeof body.known_reply_hash !== 'string' ? { ...body, known_reply_hash: knownReply } : body
-    if (typeof body.instruction_hash === 'string' || typeof body.known_instruction_hash === 'string') return withReply
-    const known = deliveredInstructionHashByOwner.get(owner)
-    return known ? { ...withReply, instruction_hash: known } : withReply
+    return body
 }
 
 function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
@@ -1229,7 +1268,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         if (globCoerced.error) return `error: ${globCoerced.error}`
         const diagnostic = objectBodyDiagnostic(verb, globCoerced.value)
         if (diagnostic) return `error: ${diagnostic}`
-        normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, globCoerced.value), root, session_id)
+        normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, globCoerced.value))
     }
 
     let ownerTransport
@@ -1296,6 +1335,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             }
             if (ownerTransport && ownerTransport !== 'header-v1' && out && typeof out === 'object' && !Array.isArray(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
+            out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, out))
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
             else out = withDispatchWait(out, Date.now() - callStartedAtMs)
             if (out && typeof out === 'object' && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
@@ -1312,7 +1352,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 }
                 out = out && typeof out === 'object' && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
             }
-            return (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
+            const rendered = (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
+                return capReplyText(rendered, replyMaxChars(max_chars), `${outPath}.reply.txt`)
         } catch (e) {
             const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)

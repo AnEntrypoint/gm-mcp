@@ -259,6 +259,15 @@ at launch time.
 | `full_response` | boolean | no | Skip wire compaction and return every field verbatim, with no text field truncated (default: compacted) |
 | `max_chars` | number | no | Per-dispatch cap on how many characters of any one text field come back inline, overriding the defaults below (ceiling `1048576`) |
 
+## Verb tools
+
+Every registry verb is also its own MCP tool. The tool name is the verb name with
+each hyphen replaced by an underscore (`prd-add` becomes `prd_add`,
+`mutable-resolve` becomes `mutable_resolve`; `git_status` and `exec_js` are
+unchanged). The verb tool takes the same parameters as `gm` above except `verb`,
+and forwards to the same dispatch path with that verb set. The registry list
+lives in `src/verbs.js` (`GM_VERBS`). The generic `gm` tool stays registered.
+
 ## Wire compaction
 
 Every dispatch response is compacted before it crosses the wire; nothing is
