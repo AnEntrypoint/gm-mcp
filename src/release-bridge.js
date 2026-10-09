@@ -261,11 +261,17 @@ async function reconcileRunner(release) {
     return { outcome: 'swapped', from: installed.version, to: release.version, sha256: newSha, previous_sha256: installedSha, backup }
 }
 
+// gm.build.json written by the bridge or the runner carries origin "release"; any other record marks a sideload (sideload-plugkit.sh writes none).
+function guestBuildIsSideload(dir) {
+    const file = path.join(dir, GUEST_BUILD_FILE)
+    return existsSync(file) && readJson(file)?.origin !== 'release'
+}
+
 async function reconcileGuest(release) {
     const dir = path.join(agentplugDir(), GUEST_DIR)
     const wasmPath = path.join(dir, INSTALLED_GUEST_FILE)
     const versionPath = path.join(dir, 'gm.version')
-    if (existsSync(path.join(dir, GUEST_SIDELOAD_FILE))) return { outcome: 'skipped', reason: 'local-dev-sideload' }
+    if (existsSync(path.join(dir, GUEST_SIDELOAD_FILE)) || guestBuildIsSideload(dir)) return { outcome: 'skipped', reason: 'local-dev-sideload' }
     const recorded = readText(versionPath)?.trim() ?? null
     if (recorded !== null && !SEMVER.test(recorded)) return { outcome: 'skipped', reason: 'local-dev-sideload', recorded }
     if (existsSync(wasmPath) && recorded === null) return { outcome: 'skipped', reason: 'installed-version-unknown' }
