@@ -1138,6 +1138,11 @@ function withAssertedInstructionHash(verb, body) {
     return body
 }
 
+const INSTRUCTION_HASH_KEYS = ['instruction_hash', 'known_instruction_hash', 'ih']
+function bodyCarriesInstructionHash(body) {
+    return !!body && typeof body === 'object' && INSTRUCTION_HASH_KEYS.some(k => !!body[k])
+}
+
 function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
     if (verb !== 'instruction' || !parsed || parsed.ok === false) return
     const data = parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed
@@ -1338,7 +1343,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, out))
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
             else out = withDispatchWait(out, Date.now() - callStartedAtMs)
-            if (out && typeof out === 'object' && out.instruction_unchanged === true && normalizedBody?.instruction_hash) {
+            if (out && typeof out === 'object' && out.instruction_unchanged === true && bodyCarriesInstructionHash(normalizedBody)) {
                 out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
             }
             if (include_timing === true || include_timing === 'true') {
