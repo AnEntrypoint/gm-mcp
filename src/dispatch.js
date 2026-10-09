@@ -164,7 +164,7 @@ function normalizedObjectBody(verb, body) {
         return { value: parsed }
     }
     if (typeof body !== 'object' || Array.isArray(body)) {
-        return { error: `${verb} body must be a JSON object; received ${Array.isArray(body) ? 'an array' : typeof body}.` }
+        return { error: `${verb} body must be a JSON object; received ${Array.isArray(body) ? 'an array' : typeof body}. Arguments go in the body field as one JSON object, e.g. body: {"path": "src/index.js"}.` }
     }
     return { value: body }
 }

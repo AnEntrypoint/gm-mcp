@@ -14,6 +14,35 @@ function failedDispatchResult(verb, error) {
     return { content: [{ type: 'text', text: `gm-mcp: ${verb} dispatch threw, stdio transport stays up -- ${detail}` }], isError: true }
 }
 
+const EDIT_VERB_PATTERN = /edit|patch|replace|modify/i
+
+function editDistance(left, right) {
+    const row = Array.from({ length: right.length + 1 }, (_, index) => index)
+    for (let i = 1; i <= left.length; i++) {
+        let diagonal = row[0]
+        row[0] = i
+        for (let j = 1; j <= right.length; j++) {
+            const above = row[j]
+            row[j] = Math.min(row[j] + 1, row[j - 1] + 1, diagonal + (left[i - 1] === right[j - 1] ? 0 : 1))
+            diagonal = above
+        }
+    }
+    return row[right.length]
+}
+
+export function nearestGmVerb(verb) {
+    if (EDIT_VERB_PATTERN.test(verb)) return 'fs_write'
+    return GM_VERBS.reduce((best, candidate) => editDistance(verb, candidate) < editDistance(verb, best) ? candidate : best)
+}
+
+function unknownVerbHint(verb, text) {
+    const reply = String(text)
+    if (GM_VERBS.includes(verb) || !reply.includes('unknown_verb')) return reply
+    const nearest = nearestGmVerb(verb)
+    const edit = nearest === 'fs_write' ? ' gm has no edit verb: a whole-file write is the supported edit, so send the complete file with fs_write.' : ''
+    return reply + 'verb_hint: "' + verb + '" is not a gm verb; the nearest existing verb is ' + nearest + '.' + edit + '\n'
+}
+
 export function createServer() {
     const server = new McpServer({ name: 'gm-mcp', version: BUNDLE_VERSION })
     const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`
@@ -95,7 +124,7 @@ export function createServer() {
     }
     const verbDispatch = async (verb, args = {}, extra) => {
         try {
-            const text = await gmDispatch({ ...args, verb }, extra?.signal)
+            const text = unknownVerbHint(verb, await gmDispatch({ ...args, verb }, extra?.signal))
             return { content: [{ type: 'text', text }] }
         } catch (error) {
             return failedDispatchResult(verb, error)
