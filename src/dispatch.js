@@ -412,6 +412,67 @@ export function liveDaemonSweepsProject(spoolDir) {
     return isFreshDaemonTimestamp(globalStatus?.ts) && Number(globalStatus?.pid) === Number(status.pid)
 }
 
+const REGISTRY_PATH = path.join(AGENTPLUG_DIR, 'daemon-registry.txt')
+
+function parseRegistryLeases(text) {
+    const leases = new Map()
+    let legacy = 0
+    for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        const tab = trimmed.indexOf('\t')
+        if (tab < 0) {
+            legacy += 1
+            continue
+        }
+        const entry = trimmed.slice(0, tab).trim()
+        const pids = trimmed.slice(tab + 1).split(',').map((p) => Number(p.trim())).filter((p) => Number.isInteger(p) && p >= 0)
+        if (entry && pids.length) leases.set(entry, pids)
+    }
+    return { leases, legacy }
+}
+
+// The registry is the daemon's list of projects with a live agent: one line per
+// project, "<root>\t<pid>[,<pid>...]". A project is watched only while one of
+// its pids is alive, so this process leases a project the moment an agent
+// dispatches into it and the lease ends when this process exits. The file is
+// written only when the lease list actually changes.
+export function ensureAgentLease(root) {
+    const entry = path.resolve(root)
+    let text = ''
+    try {
+        text = fs.readFileSync(REGISTRY_PATH, 'utf8')
+    } catch {
+        text = ''
+    }
+    const { leases, legacy } = parseRegistryLeases(text)
+    const kept = new Map()
+    let pruned = 0
+    for (const [leasedRoot, pids] of leases) {
+        const live = pids.filter((pid) => pid === 0 || pidAlive(pid) === true)
+        if (live.length === 0) {
+            pruned += 1
+            continue
+        }
+        kept.set(leasedRoot, live)
+    }
+    const mine = kept.get(entry) || []
+    const attached = !mine.includes(process.pid)
+    if (attached) mine.push(process.pid)
+    kept.set(entry, mine)
+    const body = [...kept].map(([leasedRoot, pids]) => `${leasedRoot}\t${pids.join(',')}\n`).join('')
+    if (body === text) return
+    try {
+        fs.mkdirSync(path.dirname(REGISTRY_PATH), { recursive: true })
+        const tmp = `${REGISTRY_PATH}.${process.pid}.tmp`
+        fs.writeFileSync(tmp, body, 'utf8')
+        fs.renameSync(tmp, REGISTRY_PATH)
+        appendDiagnostic(attached ? 'lease-attached' : 'lease-rewritten', { root: entry, pid: process.pid, leased_projects: kept.size, pruned_dead: pruned, pruned_legacy: legacy })
+    } catch (error) {
+        appendDiagnostic('lease-write-failed', { root: entry, error: String(error?.message || error) })
+    }
+}
+
 const GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'spool-launch.lock')
 
 const LAUNCHER_LOCK_UNREADABLE_GRACE_MS = 120_000
@@ -550,7 +611,7 @@ function ensureSpoolRunnerRunning(root) {
     try {
         child = spawn(RUNNER_PATH, ['spool'], {
             cwd: root,
-            env: { ...process.env, GM_TOOLS_DIR: RUNNER_DIR, AGENTPLUG_HOME: AGENTPLUG_DIR, CLAUDE_PROJECT_DIR: root },
+            env: { ...process.env, GM_TOOLS_DIR: RUNNER_DIR, AGENTPLUG_HOME: AGENTPLUG_DIR, CLAUDE_PROJECT_DIR: root, AGENTPLUG_LEASE_PID: String(process.pid) },
             detached: true,
             stdio: 'ignore',
             windowsHide: true,
@@ -1173,6 +1234,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         appendDiagnostic('dispatch-root-defaulted', { verb, root: resolvedRoot.root, source: resolvedRoot.root_source })
     }
     const root = resolvedRoot.root
+    ensureAgentLease(root)
     try {
         maybeStartDevSync(root)
     } catch (error) {
