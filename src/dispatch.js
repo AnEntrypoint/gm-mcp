@@ -405,9 +405,11 @@ export function daemonBootGraceActive() {
 export function liveDaemonSweepsProject(spoolDir) {
     const status = readJsonFile(path.join(spoolDir, '.status.json'))
     if (!status) return false
-    if (!isFreshDaemonTimestamp(status.ts)) return false
-    if (status.pid === undefined) return true
-    return pidAlive(status.pid) === true
+    if (status.pid === undefined) return isFreshDaemonTimestamp(status.ts)
+    if (pidAlive(status.pid) !== true) return false
+    if (isFreshDaemonTimestamp(status.ts)) return true
+    const globalStatus = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    return isFreshDaemonTimestamp(globalStatus?.ts) && Number(globalStatus?.pid) === Number(status.pid)
 }
 
 const GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'spool-launch.lock')
