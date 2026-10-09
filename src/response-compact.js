@@ -53,7 +53,10 @@ const EMPTY_LIST_IS_THE_ANSWER_KEYS = new Set([
     'live_rows',
 ])
 
+const PRD_LISTING_KEYS = new Set(['why'])
+
 export function untruncatedKeysFor(verb, body) {
+    if (verb === 'prd-list') return PRD_LISTING_KEYS
     const expandsRecall = verb === 'recall' && body && typeof body === 'object' && (body.full === true || typeof body.key === 'string')
     return expandsRecall ? EXPANDED_RECALL_KEYS : NO_KEYS
 }
