@@ -19,6 +19,10 @@ const RUNNER_PIN_FILE = 'agentplug-runner.local-build.json'
 const RUNNER_FREEZE_FILE = 'agentplug-runner.no-self-update'
 const RUNNER_FREEZE_ENV = 'AGENTPLUG_NO_SELF_UPDATE'
 const GUEST_SIDELOAD_FILE = 'gm.local-dev-sideload.json'
+const GUEST_BUILD_FILE = 'gm.build.json'
+const RUNNER_VERSION_FILE = 'agentplug-runner.version'
+const LAST_RUNNER_SWAP_FILE = 'last-completed-runner-swap.json'
+const SOURCE_HEAD_LINE = /^source-head:\s*([0-9a-f]{7,40})\s*$/im
 const OFF_VALUES = new Set(['0', 'false', 'no', 'off'])
 const DEFAULT_INTERVAL_MS = 10 * 60 * 1000
 const LOCK_STALE_MS = 15 * 60 * 1000
@@ -111,7 +115,62 @@ async function fetchLatestRelease(repo) {
     const tag = body && typeof body === 'object' ? body.tag_name : undefined
     const version = parseReleaseTag(tag)
     if (!version) throw new Error(`${repo} latest tag ${JSON.stringify(tag)} is not X.Y.Z`)
-    return { repo, version, assets: Array.isArray(body.assets) ? body.assets : [] }
+    return { repo, version, assets: Array.isArray(body.assets) ? body.assets : [], body: typeof body?.body === 'string' ? body.body : '' }
+}
+
+// GitHub reports each asset's digest as `sha256:<hex>`; null when it does not.
+function publishedDigest(release, assetName) {
+    const digest = release.assets.find((candidate) => candidate.name === assetName)?.digest
+    return typeof digest === 'string' && digest.startsWith('sha256:') ? digest.slice('sha256:'.length) : null
+}
+
+// The release body names the commit its build was made from: `source-head: <sha>`.
+export function sourceHeadOf(body) {
+    const found = SOURCE_HEAD_LINE.exec(typeof body === 'string' ? body : '')
+    return found ? found[1].toLowerCase() : null
+}
+
+// The daemon's runner parity check reads these two records. A swap the bridge
+// performs must name the bytes it installed, or the running daemon reports them
+// as installed by neither a completed swap nor a local-build pin.
+function runnerSwapRecorded(version, installedSha) {
+    const home = agentplugDir()
+    const record = readJson(path.join(home, LAST_RUNNER_SWAP_FILE))
+    return record?.version === version && record?.sha256 === installedSha && readText(path.join(home, RUNNER_VERSION_FILE))?.trim() === version
+}
+
+function recordRunnerSwap(version, installedSha) {
+    const home = agentplugDir()
+    mkdirSync(home, { recursive: true })
+    writeAtomic(path.join(home, RUNNER_VERSION_FILE), version)
+    writeAtomic(path.join(home, LAST_RUNNER_SWAP_FILE), `${JSON.stringify({ version, swapped_at_ts: Date.now(), sha256: installedSha })}\n`)
+}
+
+// plugins/gm.build.json names the installed gm build and its source commit, the
+// same shape sideload-plugkit.sh writes for a local build.
+function recordGuestBuild(dir, release, wasmSha256, wasmBytes) {
+    writeAtomic(path.join(dir, GUEST_BUILD_FILE), `${JSON.stringify({
+        plugin: 'gm',
+        version: release.version,
+        source_sha: sourceHeadOf(release.body),
+        wasm_sha256: wasmSha256,
+        wasm_bytes: wasmBytes,
+        installed_at: Math.floor(Date.now() / 1000),
+        origin: 'release',
+    })}\n`)
+}
+
+// Runs when the installed gm already matches the published release: a build that
+// was installed by another updater must still be named by gm.build.json.
+function reconcileGuestBuildRecord(dir, wasmPath, release) {
+    const published = publishedDigest(release, GUEST_ASSET)
+    if (!published || !existsSync(wasmPath)) return
+    const installed = readFileSync(wasmPath)
+    const installedSha = sha256(installed)
+    if (installedSha !== published) return
+    const current = readJson(path.join(dir, GUEST_BUILD_FILE))
+    if (current?.version === release.version && current?.wasm_sha256 === installedSha && current?.source_sha === sourceHeadOf(release.body)) return
+    recordGuestBuild(dir, release, installedSha, installed.length)
 }
 
 function releaseAssetUrl(release, name) {
@@ -191,7 +250,11 @@ async function reconcileRunner(release) {
     const installed = await probeRunner(runnerPath)
     if (!installed) return { outcome: 'skipped', reason: 'installed-version-unknown' }
     if (!installed.release_build) return { outcome: 'skipped', reason: 'local-build' }
-    if (compareVersions(release.version, installed.version) <= 0) return { outcome: 'current', version: installed.version }
+    if (compareVersions(release.version, installed.version) <= 0) {
+        const liveSha = sha256(readFileSync(runnerPath))
+        if (liveSha === publishedDigest(release, asset) && !runnerSwapRecorded(installed.version, liveSha)) recordRunnerSwap(installed.version, liveSha)
+        return { outcome: 'current', version: installed.version }
+    }
     if (readJson(path.join(agentplugDir(), 'daemon-status.json'))?.runner_update_in_progress) {
         return { outcome: 'deferred', reason: 'runner-update-in-progress' }
     }
@@ -213,6 +276,7 @@ async function reconcileRunner(release) {
         throw error
     }
     const backup = swapIn(runnerPath, candidate, `bak-${installed.version}`)
+    recordRunnerSwap(release.version, newSha)
     return { outcome: 'swapped', from: installed.version, to: release.version, sha256: newSha, previous_sha256: installedSha, backup }
 }
 
@@ -224,7 +288,10 @@ async function reconcileGuest(release) {
     const recorded = readText(versionPath)?.trim() ?? null
     if (recorded !== null && !SEMVER.test(recorded)) return { outcome: 'skipped', reason: 'local-dev-sideload', recorded }
     if (existsSync(wasmPath) && recorded === null) return { outcome: 'skipped', reason: 'installed-version-unknown' }
-    if (recorded !== null && compareVersions(release.version, recorded) <= 0) return { outcome: 'current', version: recorded }
+    if (recorded !== null && compareVersions(release.version, recorded) <= 0) {
+        reconcileGuestBuildRecord(dir, wasmPath, release)
+        return { outcome: 'current', version: recorded }
+    }
 
     const { bytes, sha256: newSha } = await fetchVerified(release, GUEST_ASSET)
     if (!WASM_MAGIC.every((byte, index) => bytes[index] === byte)) throw new Error(`${GUEST_ASSET} is not a wasm module`)
@@ -233,6 +300,7 @@ async function reconcileGuest(release) {
     writeFileSync(candidate, bytes, { flag: 'wx' })
     const backup = swapIn(wasmPath, candidate, `bak-${recorded ?? 'unversioned'}`)
     writeAtomic(versionPath, release.version)
+    recordGuestBuild(dir, release, newSha, bytes.length)
     return { outcome: 'swapped', from: recorded, to: release.version, sha256: newSha, backup }
 }
 
