@@ -20,7 +20,7 @@ function isJsonRpcFrame(chunk) {
     }
 }
 
-export function reserveStdoutForJsonRpc() {
+function reserveStdoutForJsonRpc() {
     const stdout = process.stdout
     const write = stdout.write.bind(stdout)
     stdout.write = (chunk, encoding, callback) => {
@@ -70,7 +70,7 @@ export function logSignalExits() {
 // and stdout; once it stops reading, exiting here would trade a recoverable
 // stall for a guaranteed "MCP server has disconnected" that lasts the rest of
 // the session. Stay up, say so once per error kind, and let the client decide.
-export function surviveClientGone() {
+function surviveClientGone() {
     const reported = new Set()
     process.stdout.on('error', (error) => {
         const code = error?.code || 'unknown'

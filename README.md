@@ -174,6 +174,12 @@ before any client asks for it. `GM_MCP_HTTP_SINGLETON=0` opts out,
 `GM_MCP_HTTP_PORT` moves the port. Because no state is carried between requests,
 a restart of the HTTP server never loses an in-flight dispatch.
 
+The HTTP transport has its own stranding failure: if the port is empty when a
+session's client connects, that client answers `MCP server "gm" is not
+connected` for the rest of the session, and no server-side fix re-dials it.
+Restoring the port helps every new session; the stranded session needs `/mcp`
+reconnect or a restart.
+
 ### Across a reboot
 
 Nothing starts the HTTP server at login, so after a reboot the registration points at a dead port until something runs it. `ensure-http` is that something, and it is idempotent: it health-probes the port, starts the shared server only when nothing answers, arms the supervisor, and prints the url either way. Put it wherever your OS runs things at login -- Startup folder, Task Scheduler, a launchd agent, a systemd user unit:

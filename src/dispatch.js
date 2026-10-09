@@ -1,10 +1,12 @@
+import { agentplugDir, spoolDirOf, toolsDir } from './paths.js'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { spawn, execFileSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
 import { maybeStartDevSync } from './dev-sync.js'
+import { gitToplevel } from './git-adapter.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 
 // An exit guard reads this: a process that quits mid-dispatch strands the
@@ -13,15 +15,6 @@ let inflightDispatches = 0
 
 export function inflightDispatchCount() {
     return inflightDispatches
-}
-
-function gitToplevel(dir) {
-    try {
-        const top = execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim()
-        return top ? path.resolve(top) : null
-    } catch {
-        return null
-    }
 }
 
 function projectRootFor(dir) {
@@ -155,7 +148,7 @@ const RESULT_FILE_MAX_BYTES = 4 * 1024 * 1024
 const RESULT_READ_CHUNK_BYTES = 64 * 1024
 
 function spoolFilePath(root, file) {
-    const outDir = path.join(root, '.gm', 'exec-spool', 'out')
+    const outDir = path.join(spoolDirOf(root), 'out')
     const candidate = path.resolve(root, file)
     const absoluteOutDir = path.resolve(outDir)
     const resolvedOutDir = fs.realpathSync(outDir)
@@ -354,9 +347,9 @@ function objectBodyDiagnostic(verb, body) {
     return 'git_merge requires a non-empty body.ref, for example {"ref":"origin/main"}.'
 }
 
-const RUNNER_DIR = path.resolve(process.env.GM_TOOLS_DIR?.trim() || path.join(os.homedir(), '.gm-tools'))
+const RUNNER_DIR = toolsDir()
 const RUNNER_PATH = path.join(RUNNER_DIR, process.platform === 'win32' ? 'agentplug-runner.exe' : 'agentplug-runner')
-const AGENTPLUG_DIR = path.resolve(process.env.AGENTPLUG_HOME?.trim() || path.join(os.homedir(), '.agentplug'))
+const AGENTPLUG_DIR = agentplugDir()
 const GLOBAL_DAEMON_STATUS_PATH = path.join(AGENTPLUG_DIR, 'daemon-status.json')
 const GLOBAL_DAEMON_OWNER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'daemon-owner.lock')
 const GLOBAL_DAEMON_LOG_PATH = path.join(AGENTPLUG_DIR, 'daemon.log')
@@ -471,7 +464,7 @@ function claimGlobalLauncher() {
 }
 
 function claimRunnerEnsure(root) {
-    const lockPath = path.join(root, '.gm', 'exec-spool', '.runner-ensure.lock')
+    const lockPath = path.join(spoolDirOf(root), '.runner-ensure.lock')
     const claim = () => {
         const fd = fs.openSync(lockPath, 'wx', 0o600)
         try {
@@ -528,9 +521,17 @@ export function runnerEnsureInFlight(root, now = Date.now()) {
     return true
 }
 
+const DAEMON_RESPAWN_DISABLED_PATH = path.join(AGENTPLUG_DIR, 'daemon-respawn-disabled')
+
+function daemonRespawnDisabled() {
+    if (process.env.GM_MCP_DAEMON_RESPAWN === '0') return true
+    return fs.existsSync(DAEMON_RESPAWN_DISABLED_PATH)
+}
+
 function ensureSpoolRunnerRunning(root) {
+    if (daemonRespawnDisabled()) return
     if (runnerBinaryMissing()) return
-    if (liveDaemonSweepsProject(path.join(root, '.gm', 'exec-spool'))) {
+    if (liveDaemonSweepsProject(spoolDirOf(root))) {
         consecutiveFailedEnsuresByRoot.delete(root)
         return
     }
@@ -575,7 +576,7 @@ function ensureSpoolRunnerRunning(root) {
     child.on('exit', (code) => settle(code))
     recordRunnerEnsureInflight(root, entry)
     try {
-        fs.writeFileSync(path.join(root, '.gm', 'exec-spool', '.runner-ensure.lock'), `${child.pid} ${now}`, 'utf8')
+        fs.writeFileSync(path.join(spoolDirOf(root), '.runner-ensure.lock'), `${child.pid} ${now}`, 'utf8')
     } catch {
     }
     child.unref()
@@ -687,19 +688,15 @@ function timeoutMilliseconds(timeout_seconds, fallbackSeconds) {
     return Math.min(MAX_TIMER_TIMEOUT_MS, Math.max(1, Math.round(seconds * 1000)))
 }
 
-function timeoutSecondsDiagnostic(timeout_seconds) {
-    if (timeout_seconds === undefined || timeout_seconds === null || timeout_seconds === '') return undefined
-    const seconds = Number(timeout_seconds)
-    if (!Number.isFinite(seconds)) return 'timeout_seconds must be a finite number of seconds'
-    if (seconds <= 0) return undefined
-    const milliseconds = seconds * 1000
-    if (!Number.isSafeInteger(milliseconds) || milliseconds > MAX_TIMER_TIMEOUT_MS) {
-        return `timeout_seconds must not exceed ${MAX_TIMER_TIMEOUT_MS / 1000} seconds`
+function timeoutInputDiagnostic(verb, raw_body, timeout_seconds) {
+    if (timeout_seconds !== undefined && timeout_seconds !== null && timeout_seconds !== '') {
+        const seconds = Number(timeout_seconds)
+        if (!Number.isFinite(seconds)) return 'timeout_seconds must be a finite number of seconds'
+        const milliseconds = seconds * 1000
+        if (seconds > 0 && (!Number.isSafeInteger(milliseconds) || milliseconds > MAX_TIMER_TIMEOUT_MS)) {
+            return `timeout_seconds must not exceed ${MAX_TIMER_TIMEOUT_MS / 1000} seconds`
+        }
     }
-    return undefined
-}
-
-function timeoutDirectiveDiagnostic(verb, raw_body) {
     if (!TIMEOUT_MS_PREFIX_VERBS.has(verb) || typeof raw_body !== 'string' || !TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return undefined
     const bodyPrefix = TIMEOUT_MS_PREFIX_VALUE.exec(raw_body)
     if (!bodyPrefix) return 'timeoutMs must be a decimal millisecond value on its own first line'
@@ -708,10 +705,6 @@ function timeoutDirectiveDiagnostic(verb, raw_body) {
         return `timeoutMs must not exceed ${MAX_EXEC_TIMEOUT_MS} milliseconds`
     }
     return undefined
-}
-
-function timeoutInputDiagnostic(verb, raw_body, timeout_seconds) {
-    return timeoutSecondsDiagnostic(timeout_seconds) || timeoutDirectiveDiagnostic(verb, raw_body)
 }
 
 export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
@@ -727,14 +720,10 @@ export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
     return DEFAULT_TIMEOUT_SECONDS * 1000
 }
 
-function timeoutMsFor(timeout_seconds) {
-    return Math.max(100, timeoutMilliseconds(timeout_seconds, EXEC_DEFAULT_LIMIT_SECONDS))
-}
-
 export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
     if (!TIMEOUT_MS_PREFIX_VERBS.has(verb)) return raw_body
     if (TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return raw_body
-    return `timeoutMs=${timeoutMsFor(timeout_seconds)}\n${raw_body}`
+    return `timeoutMs=${Math.max(100, timeoutMilliseconds(timeout_seconds, EXEC_DEFAULT_LIMIT_SECONDS))}\n${raw_body}`
 }
 
 const DAEMON_HEARTBEAT_STALE_MS = 20000
@@ -1117,7 +1106,7 @@ function ownerHeaderRuntimeIdentity(root) {
         || slots.some(value => value !== null && value !== hash)
         || status.pending_store_swaps?.gm
         || (Array.isArray(status.mixed_version_pools) && status.mixed_version_pools.length)) return null
-    const project = readJsonFile(path.join(root, '.gm', 'exec-spool', '.status.json'))
+    const project = readJsonFile(path.join(spoolDirOf(root), '.status.json'))
     if (project && (project.pid !== status.pid || !isFreshDaemonTimestamp(project.ts, Date.now()))) return null
     return JSON.stringify([root, GLOBAL_DAEMON_STATUS_PATH, status.pid, status.daemon_boot_ts, hash])
 }
@@ -1190,7 +1179,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     } catch (error) {
         appendDiagnostic('dev-sync-trigger-failed', { root, error: String(error?.message || error) })
     }
-    const spoolDir = path.join(root, '.gm', 'exec-spool')
+    const spoolDir = spoolDirOf(root)
     const inDir = path.join(spoolDir, 'in', verb)
     const outDir = path.join(spoolDir, 'out')
     fs.mkdirSync(outDir, { recursive: true })

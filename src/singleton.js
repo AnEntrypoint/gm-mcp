@@ -1,3 +1,4 @@
+import { agentplugDir } from './paths.js'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -12,12 +13,7 @@ const PROBE_TIMEOUT_MS = 1_500
 const STARTUP_WAIT_MS = 20_000
 const STARTUP_POLL_MS = 250
 
-function agentplugDir() {
-    const override = (process.env.AGENTPLUG_HOME || '').trim()
-    return override ? path.resolve(override) : path.join(homedir(), '.agentplug')
-}
-
-export function stateFilePath() {
+function stateFilePath() {
     return path.join(agentplugDir(), STATE_FILE_NAME)
 }
 
@@ -30,19 +26,19 @@ export function httpMcpUrl(port = defaultHttpPort()) {
     return `http://${DEFAULT_HOST}:${port}${MCP_PATH}`
 }
 
-export function healthUrl(port = defaultHttpPort()) {
+function healthUrl(port = defaultHttpPort()) {
     return `http://${DEFAULT_HOST}:${port}${HEALTH_PATH}`
 }
 
 // The entry point this process was started from, so a spawned singleton is the
 // same bundle the client already trusts rather than whatever resolves first.
-export function serverEntryPath() {
+function serverEntryPath() {
     const argv1 = process.argv[1]
     if (argv1 && /\.(mjs|cjs|js)$/i.test(argv1) && existsSync(argv1)) return path.resolve(argv1)
     return fileURLToPath(import.meta.url)
 }
 
-export function readSingletonState(port = defaultHttpPort()) {
+function readSingletonState(port = defaultHttpPort()) {
     try {
         const state = JSON.parse(readFileSync(stateFilePath(), 'utf8'))
         if (state?.port !== port) return null
@@ -52,7 +48,7 @@ export function readSingletonState(port = defaultHttpPort()) {
     }
 }
 
-export function writeSingletonState(state) {
+function writeSingletonState(state) {
     try {
         mkdirSync(path.dirname(stateFilePath()), { recursive: true })
         writeFileSync(stateFilePath(), `${JSON.stringify(state, null, 2)}\n`, 'utf8')

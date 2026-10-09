@@ -1,34 +1,61 @@
-import { spawn, spawnSync } from 'node:child_process'
+import { agentplugDir } from './paths.js'
+import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { runGit } from './git-adapter.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 
 const SYNC_INTERVAL_MS = 10 * 60_000
 const FETCH_TIMEOUT_MS = 120_000
-const GIT_TIMEOUT_MS = 60_000
 const EXCLUDED_FROM_DIRTY = ['.', ':!.gm', ':!.agentplug*']
+// Stamp key for the one-sync-per-interval throttle shared by every root. Absolute
+// paths can never equal it, so it cannot collide with a per-root key.
+const GLOBAL_STAMP_KEY = '*'
 
 function stampPath() {
-    return path.join(homedir(), '.agentplug', 'dev-sync-stamp.json')
+    return path.join(agentplugDir(), 'dev-sync-stamp.json')
 }
 
 function logPath() {
-    return path.join(homedir(), '.agentplug', 'dev-sync.log')
+    return path.join(agentplugDir(), 'dev-sync.log')
 }
 
-function readStamps() {
+function readStampText() {
     try {
-        return JSON.parse(readFileSync(stampPath(), 'utf8'))
+        return readFileSync(stampPath(), 'utf8')
+    } catch {
+        return ''
+    }
+}
+
+function parseStamps(text) {
+    try {
+        const parsed = JSON.parse(text)
+        return parsed && typeof parsed === 'object' ? parsed : {}
     } catch {
         return {}
     }
 }
 
-function git(cwd, args, timeout = GIT_TIMEOUT_MS) {
-    const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout, windowsHide: true })
-    return { ok: result.status === 0, out: (result.stdout || '').trim(), err: (result.stderr || result.error?.message || '').trim() }
+// Writes only when the serialized stamps differ from what is on disk.
+function writeStampsIfChanged(stamps, previousText) {
+    const next = JSON.stringify(stamps)
+    if (next === previousText) return
+    mkdirSync(path.dirname(stampPath()), { recursive: true })
+    writeFileSync(stampPath(), next, 'utf8')
+}
+
+function comparablePath(p) {
+    const resolved = path.resolve(p)
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+// Temporary roots (test fixtures, scratch clones) are never real projects to sync.
+function isUnderTempDir(root) {
+    const rel = path.relative(comparablePath(tmpdir()), comparablePath(root))
+    return rel === '' || (!path.isAbsolute(rel) && rel.split(path.sep)[0] !== '..')
 }
 
 function submodulePaths(root) {
@@ -39,20 +66,20 @@ function submodulePaths(root) {
 
 function syncOne(dir) {
     const rel = path.basename(dir)
-    const fetched = git(dir, ['fetch', 'origin', '--prune', '--quiet'], FETCH_TIMEOUT_MS)
+    const fetched = runGit(dir, ['fetch', 'origin', '--prune', '--quiet'], FETCH_TIMEOUT_MS)
     if (!fetched.ok) return { repo: rel, action: 'fetch-failed', detail: fetched.err }
-    const branch = git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])
+    const branch = runGit(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])
     if (!branch.ok || branch.out !== 'main') return { repo: rel, action: 'skipped-not-main', detail: branch.out }
-    const dirty = git(dir, ['status', '--porcelain', '--ignore-submodules=all', '--', ...EXCLUDED_FROM_DIRTY])
+    const dirty = runGit(dir, ['status', '--porcelain', '--ignore-submodules=all', '--', ...EXCLUDED_FROM_DIRTY])
     if (!dirty.ok) return { repo: rel, action: 'skipped-status-failed', detail: dirty.err }
     if (dirty.out) return { repo: rel, action: 'skipped-dirty', detail: `${dirty.out.split('\n').length} changed path(s); left untouched` }
-    const local = git(dir, ['rev-parse', 'HEAD'])
-    const remote = git(dir, ['rev-parse', 'origin/main'])
+    const local = runGit(dir, ['rev-parse', 'HEAD'])
+    const remote = runGit(dir, ['rev-parse', 'origin/main'])
     if (!local.ok || !remote.ok) return { repo: rel, action: 'skipped-no-origin-main', detail: remote.err || local.err }
     if (local.out === remote.out) return { repo: rel, action: 'up-to-date', detail: local.out.slice(0, 9) }
-    const behind = git(dir, ['merge-base', '--is-ancestor', 'HEAD', 'origin/main'])
+    const behind = runGit(dir, ['merge-base', '--is-ancestor', 'HEAD', 'origin/main'])
     if (!behind.ok) return { repo: rel, action: 'skipped-diverged', detail: `local ${local.out.slice(0, 9)} is not an ancestor of origin/main` }
-    const merged = git(dir, ['merge', '--ff-only', '--quiet', 'origin/main'])
+    const merged = runGit(dir, ['merge', '--ff-only', '--quiet', 'origin/main'])
     if (!merged.ok) return { repo: rel, action: 'ff-failed', detail: merged.err }
     return { repo: rel, action: 'fast-forwarded', detail: `${local.out.slice(0, 9)} -> ${remote.out.slice(0, 9)}` }
 }
@@ -80,21 +107,29 @@ export function runDevSync(root) {
 
 function serverEntry() {
     const argv1 = process.argv[1]
-    if (argv1 && /\.(mjs|cjs|js)$/i.test(argv1) && existsSync(argv1)) return path.resolve(argv1)
+    if (argv1 && /^gm-mcp-server\.(mjs|cjs|js)$/i.test(path.basename(argv1)) && existsSync(argv1)) return path.resolve(argv1)
+    const installed = path.join(homedir(), '.gm-tools', 'gm-mcp-server.mjs')
+    if (existsSync(installed)) return installed
     return fileURLToPath(import.meta.url)
 }
 
-// Runs on dispatch, so a dispatch never waits on git. The stamp is per project and
-// written before the child starts, so concurrent dispatches cannot start a second sync.
+// Runs on dispatch, so a dispatch never waits on git. The stamps are written before the
+// child starts, so concurrent dispatches cannot start a second sync. At most one sync
+// starts per SYNC_INTERVAL_MS across all roots; a real root also keeps its own stamp.
+// Returns true only when a child was started.
 export function maybeStartDevSync(root) {
     if ((process.env.GM_MCP_DEV_SYNC || '').trim() === '0') return false
-    const stamps = readStamps()
+    if (isUnderTempDir(root) || !existsSync(path.join(root, '.git'))) return false
+    const now = Date.now()
+    const stampText = readStampText()
+    const stamps = parseStamps(stampText)
+    const globalLast = Number(stamps[GLOBAL_STAMP_KEY]) || 0
     const last = Number(stamps[root]) || 0
-    if (Date.now() - last < SYNC_INTERVAL_MS) return false
-    stamps[root] = Date.now()
+    if (now - globalLast < SYNC_INTERVAL_MS || now - last < SYNC_INTERVAL_MS) return false
+    stamps[GLOBAL_STAMP_KEY] = now
+    stamps[root] = now
     try {
-        mkdirSync(path.dirname(stampPath()), { recursive: true })
-        writeFileSync(stampPath(), JSON.stringify(stamps), 'utf8')
+        writeStampsIfChanged(stamps, stampText)
     } catch {
         return false
     }
