@@ -3,7 +3,8 @@ import { execFile } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
-import { agentplugDir, compareVersions, selfUpdateFreezeReason, toolsDir } from './self-update.js'
+import { compareVersions, selfUpdateFreezeReason } from './self-update.js'
+import { agentplugDir, toolsDir } from './paths.js'
 import { inflightDispatchCount, pidAlive } from './dispatch.js'
 import { appendDiagnostic } from './server-log.js'
 
@@ -19,7 +20,7 @@ const RUNNER_FREEZE_FILE = 'agentplug-runner.no-self-update'
 const RUNNER_FREEZE_ENV = 'AGENTPLUG_NO_SELF_UPDATE'
 const GUEST_SIDELOAD_FILE = 'gm.local-dev-sideload.json'
 const OFF_VALUES = new Set(['0', 'false', 'no', 'off'])
-const DEFAULT_INTERVAL_MS = 60 * 60 * 1000
+const DEFAULT_INTERVAL_MS = 10 * 60 * 1000
 const LOCK_STALE_MS = 15 * 60 * 1000
 const API_TIMEOUT_MS = 10_000
 const DOWNLOAD_TIMEOUT_MS = 180_000
@@ -61,6 +62,14 @@ function writeAtomic(file, text) {
     }
 }
 
+// Skips the rename when the file already holds these bytes, so a check that
+// changes nothing costs a read instead of a write.
+function writeAtomicIfChanged(file, text) {
+    if (readText(file) === text) return false
+    writeAtomic(file, text)
+    return true
+}
+
 function runnerFileName() {
     return process.platform === 'win32' ? 'agentplug-runner.exe' : 'agentplug-runner'
 }
@@ -99,8 +108,9 @@ async function fetchLatestRelease(repo) {
     })
     if (!response.ok) throw new Error(`HTTP ${response.status} from ${repo} releases/latest`)
     const body = await response.json()
-    const version = parseReleaseTag(body.tag_name)
-    if (!version) throw new Error(`${repo} latest tag ${JSON.stringify(body.tag_name)} is not X.Y.Z`)
+    const tag = body && typeof body === 'object' ? body.tag_name : undefined
+    const version = parseReleaseTag(tag)
+    if (!version) throw new Error(`${repo} latest tag ${JSON.stringify(tag)} is not X.Y.Z`)
     return { repo, version, assets: Array.isArray(body.assets) ? body.assets : [] }
 }
 
@@ -312,7 +322,7 @@ export async function runReleaseBridge() {
             : DEFAULT_INTERVAL_MS
         const lastChecked = Number(state.last_checked_ts) || 0
         if (Date.now() - lastChecked < intervalMs) {
-            writeAtomic(statePath, `${JSON.stringify(state, null, 2)}\n`)
+            writeAtomicIfChanged(statePath, `${JSON.stringify(state, null, 2)}\n`)
             return { outcome: 'checked-recently', next_check_ms: intervalMs - (Date.now() - lastChecked) }
         }
         // Stamp before the network so a failing release channel costs one

@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BUNDLE_VERSION } from './bundle-version.js'
+import { agentplugDir, toolsDir } from './paths.js'
 import { appendDiagnostic } from './server-log.js'
 import { inflightDispatchCount } from './dispatch.js'
 
@@ -24,17 +24,8 @@ const BUNDLE_VERSION_ASSIGNMENT = /BUNDLE_VERSION\s*=\s*["']([^"']+)["']/
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const shortHash = (hex) => hex.slice(0, 12)
 
-export function toolsDir() {
-    return path.resolve(process.env.GM_TOOLS_DIR?.trim() || path.join(homedir(), '.gm-tools'))
-}
-
 function defaultDeployedPath() {
     return path.join(toolsDir(), DEPLOYED_BUNDLE_FILE_NAME)
-}
-
-export function agentplugDir() {
-    const override = (process.env.AGENTPLUG_HOME || '').trim()
-    return override ? path.resolve(override) : path.join(homedir(), '.agentplug')
 }
 
 export function noSelfUpdateFilePath() {
