@@ -47,6 +47,8 @@ const EMPTY_LIST_IS_THE_ANSWER_KEYS = new Set([
     'matches',
     'definitions',
     'references',
+    'candidates',
+    'live_rows',
 ])
 
 export function untruncatedKeysFor(verb, body) {
