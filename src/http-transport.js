@@ -94,7 +94,7 @@ function sendJson(res, status, payload) {
     res.end(body)
 }
 
-export function healthPayload(port) {
+function healthPayload(port) {
     return {
         ok: true,
         service: 'gm-mcp',
