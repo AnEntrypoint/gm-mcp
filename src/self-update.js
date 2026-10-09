@@ -227,9 +227,6 @@ export async function refreshStaleDeployedBundle() {
     const version = versionGuardReason(freshBytes)
     if (version.code) return refuse(version.code, version.reason)
 
-    // The swap only replaces the file the next connect reads, but a dispatch
-    // in flight is the one thing this process must not be doing housework
-    // around: a failure there is indistinguishable from a network stall.
     if (inflightDispatchCount() > 0) return { outcome: 'deferred-dispatch-inflight', dispatches_inflight: inflightDispatchCount() }
 
     replaceDeployedBundle(deployedPath, freshBytes)

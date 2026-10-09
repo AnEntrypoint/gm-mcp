@@ -53,8 +53,6 @@ function readText(file) {
     }
 }
 
-// Every write is a sibling temp file renamed into place, so a reader never sees
-// a torn state or version file.
 function writeAtomic(file, text) {
     const temp = `${file}.${process.pid}.${Date.now()}.tmp`
     try {
@@ -66,8 +64,6 @@ function writeAtomic(file, text) {
     }
 }
 
-// Skips the rename when the file already holds these bytes, so a check that
-// changes nothing costs a read instead of a write.
 function writeAtomicIfChanged(file, text) {
     if (readText(file) === text) return false
     writeAtomic(file, text)
@@ -95,8 +91,6 @@ export function parseSha256Sidecar(text) {
     return /^[0-9a-f]{64}$/.test(token) ? token : null
 }
 
-// Release assets are fetched only from this repository's own GitHub download
-// path over HTTPS, whatever the API response names.
 function assertReleaseAssetUrl(url, repo) {
     const parsed = new URL(url)
     if (parsed.protocol !== 'https:' || parsed.hostname !== 'github.com' || !parsed.pathname.startsWith(`/${repo}/releases/download/`)) {
@@ -118,21 +112,16 @@ async function fetchLatestRelease(repo) {
     return { repo, version, assets: Array.isArray(body.assets) ? body.assets : [], body: typeof body?.body === 'string' ? body.body : '' }
 }
 
-// GitHub reports each asset's digest as `sha256:<hex>`; null when it does not.
 function publishedDigest(release, assetName) {
     const digest = release.assets.find((candidate) => candidate.name === assetName)?.digest
     return typeof digest === 'string' && digest.startsWith('sha256:') ? digest.slice('sha256:'.length) : null
 }
 
-// The release body names the commit its build was made from: `source-head: <sha>`.
 export function sourceHeadOf(body) {
     const found = SOURCE_HEAD_LINE.exec(typeof body === 'string' ? body : '')
     return found ? found[1].toLowerCase() : null
 }
 
-// The daemon's runner parity check reads these two records. A swap the bridge
-// performs must name the bytes it installed, or the running daemon reports them
-// as installed by neither a completed swap nor a local-build pin.
 function runnerSwapRecorded(version, installedSha) {
     const home = agentplugDir()
     const record = readJson(path.join(home, LAST_RUNNER_SWAP_FILE))
@@ -146,8 +135,6 @@ function recordRunnerSwap(version, installedSha) {
     writeAtomic(path.join(home, LAST_RUNNER_SWAP_FILE), `${JSON.stringify({ version, swapped_at_ts: Date.now(), sha256: installedSha })}\n`)
 }
 
-// plugins/gm.build.json names the installed gm build and its source commit, the
-// same shape sideload-plugkit.sh writes for a local build.
 function recordGuestBuild(dir, release, wasmSha256, wasmBytes) {
     writeAtomic(path.join(dir, GUEST_BUILD_FILE), `${JSON.stringify({
         plugin: 'gm',
@@ -160,8 +147,6 @@ function recordGuestBuild(dir, release, wasmSha256, wasmBytes) {
     })}\n`)
 }
 
-// Runs when the installed gm already matches the published release: a build that
-// was installed by another updater must still be named by gm.build.json.
 function reconcileGuestBuildRecord(dir, wasmPath, release) {
     const published = publishedDigest(release, GUEST_ASSET)
     if (!published || !existsSync(wasmPath)) return
@@ -185,8 +170,6 @@ async function download(url) {
     return Buffer.from(await response.arrayBuffer())
 }
 
-// The sidecar is the only integrity reference: a sha256 match proves the bytes
-// are the ones the release published, not who published them.
 async function fetchVerified(release, assetName) {
     const expected = parseSha256Sidecar((await download(releaseAssetUrl(release, `${assetName}.sha256`))).toString('utf8'))
     if (!expected) throw new Error(`${assetName}.sha256 is not a sha256 sidecar`)
@@ -207,8 +190,6 @@ export async function probeRunner(file) {
     }
 }
 
-// The installed file is renamed aside rather than overwritten, which works on
-// Windows for a running image too. The backup is never deleted.
 function swapIn(target, candidate, backupLabel) {
     try {
         let backup = null
@@ -304,8 +285,6 @@ async function reconcileGuest(release) {
     return { outcome: 'swapped', from: recorded, to: release.version, sha256: newSha, backup }
 }
 
-// The daemon's identity comes from this AGENTPLUG_HOME alone: its status file
-// and owner lock must agree, and on Linux the pid must still be a runner image.
 function processIsRunner(pid) {
     if (!existsSync('/proc/self/exe')) return true
     try {
@@ -393,8 +372,6 @@ export async function runReleaseBridge() {
             writeAtomicIfChanged(statePath, `${JSON.stringify(state, null, 2)}\n`)
             return { outcome: 'checked-recently', next_check_ms: intervalMs - (Date.now() - lastChecked) }
         }
-        // Stamp before the network so a failing release channel costs one
-        // attempt per interval, not one per gm-mcp start.
         writeAtomic(statePath, `${JSON.stringify({ ...state, last_checked_ts: Date.now() }, null, 2)}\n`)
 
         let runner

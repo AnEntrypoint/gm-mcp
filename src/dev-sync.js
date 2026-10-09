@@ -10,8 +10,6 @@ import { appendDiagnostic, describeError } from './server-log.js'
 const SYNC_INTERVAL_MS = 10 * 60_000
 const FETCH_TIMEOUT_MS = 120_000
 const EXCLUDED_FROM_DIRTY = ['.', ':!.gm', ':!.agentplug*']
-// Stamp key for the one-sync-per-interval throttle shared by every root. Absolute
-// paths can never equal it, so it cannot collide with a per-root key.
 const GLOBAL_STAMP_KEY = '*'
 
 function stampPath() {
@@ -39,7 +37,6 @@ function parseStamps(text) {
     }
 }
 
-// Writes only when the serialized stamps differ from what is on disk.
 function writeStampsIfChanged(stamps, previousText) {
     const next = JSON.stringify(stamps)
     if (next === previousText) return
@@ -52,8 +49,7 @@ function comparablePath(p) {
     return process.platform === 'win32' ? resolved.toLowerCase() : resolved
 }
 
-// Temporary roots (test fixtures, scratch clones) are never real projects to sync.
-function isUnderTempDir(root) {
+function isTemporaryProjectRoot(root) {
     const rel = path.relative(comparablePath(tmpdir()), comparablePath(root))
     return rel === '' || (!path.isAbsolute(rel) && rel.split(path.sep)[0] !== '..')
 }
@@ -85,10 +81,8 @@ function syncOne(dir) {
 }
 
 export function runDevSync(root) {
-    // The parent goes first: its fast-forward moves the submodule pins, and each
-    // submodule then fast-forwards to origin/main on its own branch rule.
-    const dirs = [root, ...submodulePaths(root).map((p) => path.join(root, p))].filter((d) => existsSync(d))
-    const results = dirs.map((dir) => {
+    const parentThenSubmoduleDirs = [root, ...submodulePaths(root).map((p) => path.join(root, p))].filter((d) => existsSync(d))
+    const results = parentThenSubmoduleDirs.map((dir) => {
         try {
             return syncOne(dir)
         } catch (error) {
@@ -113,13 +107,9 @@ function serverEntry() {
     return fileURLToPath(import.meta.url)
 }
 
-// Runs on dispatch, so a dispatch never waits on git. The stamps are written before the
-// child starts, so concurrent dispatches cannot start a second sync. At most one sync
-// starts per SYNC_INTERVAL_MS across all roots; a real root also keeps its own stamp.
-// Returns true only when a child was started.
 export function maybeStartDevSync(root) {
     if ((process.env.GM_MCP_DEV_SYNC || '').trim() === '0') return false
-    if (isUnderTempDir(root) || !existsSync(path.join(root, '.git'))) return false
+    if (isTemporaryProjectRoot(root) || !existsSync(path.join(root, '.git'))) return false
     const now = Date.now()
     const stampText = readStampText()
     const stamps = parseStamps(stampText)

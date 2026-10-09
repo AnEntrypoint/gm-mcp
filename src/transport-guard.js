@@ -5,9 +5,6 @@ import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 
 const CLIENT_GONE_EXIT_RECHECK_MS = 15_000
 
-// A JSON-RPC frame is always a single JSON object terminated by a newline.
-// Testing the first byte before parsing keeps this off the hot path: a
-// response can be a megabyte and every write goes through here.
 function isJsonRpcFrame(chunk) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8')
     if (buffer.length === 0 || buffer[0] !== 0x7b) return false
@@ -38,9 +35,6 @@ function reserveStdoutForJsonRpc() {
     return stdout
 }
 
-// Nothing here exits. The transport outlives every async fault: a dispatch is
-// a spool ticket somebody is waiting on, and killing the process loses both
-// the reply and the only record of why.
 export function keepServingOnAsyncFailure() {
     const report = (label) => (error) => {
         appendDiagnostic(label, { error: describeError(error), dispatches_inflight: inflightDispatchCount() })
@@ -54,9 +48,6 @@ export function keepServingOnAsyncFailure() {
     })
 }
 
-// A stdio server is killed more often than it chooses to die, and the default
-// handlers leave no trace. Name the signal on the way out, then behave exactly
-// as node would have.
 export function logSignalExits() {
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
         process.on(signal, () => {
@@ -66,10 +57,6 @@ export function logSignalExits() {
     }
 }
 
-// A dead pipe is not a reason to die. Claude Code owns this process's stdin
-// and stdout; once it stops reading, exiting here would trade a recoverable
-// stall for a guaranteed "MCP server has disconnected" that lasts the rest of
-// the session. Stay up, say so once per error kind, and let the client decide.
 function surviveClientGone() {
     const reported = new Set()
     process.stdout.on('error', (error) => {

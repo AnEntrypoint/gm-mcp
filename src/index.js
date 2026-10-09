@@ -21,9 +21,7 @@ export function wantsHttpTransport() {
     return (process.env.GM_MCP_TRANSPORT || '').trim().toLowerCase() === 'http'
 }
 
-// Opt-in (GM_MCP_HTTP_SINGLETON=1): seeding starts a detached HTTP server that
-// outlives the session, so a plain stdio session never leaves one behind.
-function seedHttpSingletonInBackground() {
+function seedHttpSingletonWhenOptedIn() {
     if ((process.env.GM_MCP_HTTP_SINGLETON || '').trim() !== '1') return
     ensureHttpSingleton()
         .then((result) => {
@@ -47,7 +45,7 @@ export async function main() {
 
     await server.connect(transport)
     console.error('gm-mcp: connected, serving on stdio')
-    seedHttpSingletonInBackground()
+    seedHttpSingletonWhenOptedIn()
     refreshStaleDeployedBundleInBackground()
     runReleaseBridgeInBackground()
 }

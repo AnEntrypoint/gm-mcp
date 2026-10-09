@@ -15,18 +15,11 @@ export function logFilePath() {
     return path.join(toolsDir(), LOG_FILE_NAME)
 }
 
-// Rotation renames instead of rewriting, so a capped log costs no data writes.
-// The rename replaces any earlier previous generation, so at most two files of
-// about MAX_LOG_BYTES each exist.
 function rotateOversizedLog(file) {
     if (statSync(file).size <= MAX_LOG_BYTES) return
     renameSync(file, `${file}.1`)
 }
 
-// A record repeats the last line written for its event and fields (ms and
-// inflight vary per dispatch and are excluded from the key). Repeats inside the
-// window are counted, not written; the count is reported as a repeat-suppressed
-// line the next time that key is written.
 function repeatKey(event, fields) {
     const kept = {}
     for (const name of Object.keys(fields).sort()) {
@@ -52,8 +45,6 @@ function admitRecord(event, fields, now) {
     return { write: true, suppressed: previous?.suppressed ?? 0 }
 }
 
-// The host discards this process's stderr, so a drop leaves nothing behind
-// unless the record also lands on disk.
 export function appendDiagnostic(event, fields = {}) {
     const now = Date.now()
     const ts = new Date(now).toISOString()

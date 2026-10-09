@@ -1,9 +1,4 @@
 #!/usr/bin/env node
-// Usage: node scripts/pool-observe-served-witness.mjs [--project=<dir>] [--client=<gm-mcp-server.mjs>]
-//        [--served=<yaml>] [--save=<yaml>] [--empty=<dir>]
-// Checks the pool-observe output that the served gm-mcp client prints against the
-// candidate contract of rs-plugkit orchestrator/pool_rank.rs. Prints RESULT: PASS only
-// when every check holds, and exits 0 only then.
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'

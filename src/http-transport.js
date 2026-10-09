@@ -26,25 +26,16 @@ export function httpListenOptions() {
     return { port: Number.isInteger(port) && port > 0 ? port : DEFAULT_PORT, host: host || DEFAULT_HOST }
 }
 
-// MCP says a server that cannot serve the version a client asks for answers in
-// the version it does. The bundled SDK does the opposite: `initialize` is exempt
-// from its `mcp-protocol-version` check, but every later POST -- notifications,
-// tools/list, tools/call -- is rejected 400 when the header names a version
-// newer than the SDK knows (2026-07-28 is what current Claude Code sends). The
-// client therefore connects, then reads as dead: no tool call is ever served.
-// Speak the newest version we do support instead of refusing the request.
 const SERVED_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 
 function normalizeProtocolVersion(req) {
     const requested = req.headers['mcp-protocol-version']
     if (typeof requested !== 'string' || SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) return
     req.headers['mcp-protocol-version'] = SERVED_PROTOCOL_VERSION
-    // The web Request the SDK sees is built from `rawHeaders`, not from the
-    // parsed `headers` map, so both have to carry the served version.
-    const raw = req.rawHeaders
-    if (Array.isArray(raw)) {
-        for (let i = 0; i + 1 < raw.length; i += 2) {
-            if (typeof raw[i] === 'string' && raw[i].toLowerCase() === 'mcp-protocol-version') raw[i + 1] = SERVED_PROTOCOL_VERSION
+    const rawHeaders = req.rawHeaders
+    if (Array.isArray(rawHeaders)) {
+        for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
+            if (typeof rawHeaders[i] === 'string' && rawHeaders[i].toLowerCase() === 'mcp-protocol-version') rawHeaders[i + 1] = SERVED_PROTOCOL_VERSION
         }
     }
     appendDiagnostic('http-protocol-version-normalized', { requested, served: SERVED_PROTOCOL_VERSION })
@@ -56,12 +47,7 @@ function rejectOversizedBody(req, res) {
     return true
 }
 
-// A fresh server and transport per request is the SDK's own stateless shape:
-// one shared stateless transport answers its first request and then 500s every
-// later one, which would be a worse failure than the stdio drop it replaces.
-// Nothing is carried between requests, so a client that vanishes mid-call can
-// never leave the server holding state for a session that is gone.
-async function serveMcpRequest(req, res) {
+async function serveStatelessMcpRequest(req, res) {
     if (req.method !== 'POST') {
         sendJson(res, 405, { error: `stateless transport serves no ${req.method} stream; POST JSON-RPC to ${MCP_PATH}` })
         return
@@ -107,9 +93,6 @@ function healthPayload(port) {
     }
 }
 
-// Stateless: no session id, so a client that drops its connection and comes
-// back is just another request. Nothing here is tied to a client's lifetime,
-// which is the whole reason this transport survives what kills stdio.
 export async function startHttpServer({ port, host } = {}) {
     keepServingOnAsyncFailure()
     logSignalExits()
@@ -132,7 +115,7 @@ export async function startHttpServer({ port, host } = {}) {
                 sendJson(res, 404, { error: `no route for ${req.method} ${path}`, mcp_path: MCP_PATH })
                 return
             }
-            await serveMcpRequest(req, res)
+            await serveStatelessMcpRequest(req, res)
         } catch (error) {
             appendDiagnostic('http-request-failed', { path, method: req.method, error: describeError(error) })
             if (res.headersSent) {
