@@ -119,11 +119,11 @@ await testAsync('the HTTP transport answers request after request', async () => 
 
         const first = await rpc('tools/list', {})
         assert.equal(first.status, 200)
-        assert.deepEqual(first.body.result.tools.map((t) => t.name).sort(), ['gm', 'gm_instruction'])
+        assert.deepEqual(first.body.result.tools.map((t) => t.name).sort(), ['gm', 'gm_instruction', 'gm_result'])
 
         const second = await rpc('tools/list', {})
         assert.equal(second.status, 200)
-        assert.equal(second.body.result.tools.length, 2)
+        assert.equal(second.body.result.tools.length, 3)
 
         const missing = await fetch(`${base}/nope`)
         assert.equal(missing.status, 404)
