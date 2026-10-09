@@ -464,21 +464,105 @@ const LEASES_DIR = path.join(AGENTPLUG_DIR, 'leases')
 // "<key>.<pid>.lease" holding the project root. The daemon is woken by the
 // folder change itself, drops the lease when the pid dies, and nothing is
 // written once the lease file exists.
-export function ensureAgentLease(root) {
+export function ensureAgentLease(root, sessionId) {
     const entry = path.resolve(root)
-    const key = createHash('sha256').update(entry.toLowerCase()).digest('hex').slice(0, 16)
+    const key = leaseKeyFor(entry)
     const file = path.join(LEASES_DIR, `${key}.${process.pid}.lease`)
     try {
-        if (fs.existsSync(file)) return
-        fs.mkdirSync(LEASES_DIR, { recursive: true })
-        const tmp = `${file}.tmp`
-        fs.writeFileSync(tmp, entry, 'utf8')
-        fs.renameSync(tmp, file)
-        appendDiagnostic('lease-attached', { root: entry, pid: process.pid, lease_file: file })
+        if (!fs.existsSync(file)) {
+            fs.mkdirSync(LEASES_DIR, { recursive: true })
+            writeFileAtomically(file, entry)
+            appendDiagnostic('lease-attached', { root: entry, pid: process.pid, lease_file: file })
+        }
+        if (sessionId) recordLeaseSession(key, process.pid, sessionId)
     } catch (error) {
         appendDiagnostic('lease-write-failed', { root: entry, error: String(error?.message || error) })
     }
 }
+
+function leaseKeyFor(root) {
+    return createHash('sha256').update(path.resolve(root).toLowerCase()).digest('hex').slice(0, 16)
+}
+
+function writeFileAtomically(file, text) {
+    const tmp = `${file}.tmp`
+    fs.writeFileSync(tmp, text, 'utf8')
+    fs.renameSync(tmp, file)
+}
+
+function readTextOrNull(file) {
+    try {
+        return fs.readFileSync(file, 'utf8')
+    } catch {
+        return null
+    }
+}
+
+function leaseSessionSidecarName(key, pid, sessionId) {
+    const tag = createHash('sha256').update(sessionId).digest('hex').slice(0, 16)
+    return `${key}.${pid}.${tag}.session`
+}
+
+function recordLeaseSession(key, pid, sessionId) {
+    const file = path.join(LEASES_DIR, leaseSessionSidecarName(key, pid, sessionId))
+    if (readTextOrNull(file) !== sessionId) writeFileAtomically(file, sessionId)
+}
+
+const LEASE_SESSION_SIDECAR = /^([0-9a-f]{16})\.(\d+)\.([0-9a-f]{16})\.session$/
+
+export function leaseSessionsFor(root) {
+    const key = leaseKeyFor(root)
+    let names
+    try {
+        names = fs.readdirSync(LEASES_DIR)
+    } catch (error) {
+        return error?.code === 'ENOENT' ? [] : null
+    }
+    const sessions = []
+    for (const name of names) {
+        const match = LEASE_SESSION_SIDECAR.exec(name)
+        if (!match || match[1] !== key) continue
+        const pid = Number(match[2])
+        const sidecar = path.join(LEASES_DIR, name)
+        if (!fs.existsSync(path.join(LEASES_DIR, `${key}.${pid}.lease`))) {
+            try {
+                fs.rmSync(sidecar, { force: true })
+            } catch {
+            }
+            continue
+        }
+        const sessionId = readTextOrNull(sidecar)?.trim()
+        if (!sessionId) continue
+        sessions.push({ session_id: sessionId, pid, live: pidAlive(pid) === true })
+    }
+    return sessions
+}
+
+export function explicitBodySessionId(body) {
+    const value = body && typeof body === 'object' && !Array.isArray(body) ? body.SESSION_ID : undefined
+    return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+export function applySessionLeaseVerdict(reply, { body, root }) {
+    const target = reply && typeof reply === 'object' && reply.data && typeof reply.data === 'object' && !Array.isArray(reply.data) ? reply.data : reply
+    if (!target || typeof target !== 'object' || Array.isArray(target)) return reply
+    if (!('session_owner_before_this_dispatch' in target) && !('session_mismatch' in target)) return reply
+    const owner = typeof target.session_owner_before_this_dispatch === 'string' && target.session_owner_before_this_dispatch ? target.session_owner_before_this_dispatch : null
+    const incoming = explicitBodySessionId(body) || (typeof target.session_id === 'string' && target.session_id ? target.session_id : null)
+    const leases = leaseSessionsFor(root)
+    const ownerLeases = leases === null || owner === null ? null : leases.filter(lease => lease.session_id === owner)
+    const liveLease = ownerLeases?.find(lease => lease.live) ?? null
+    const namedLease = liveLease ?? ownerLeases?.[0] ?? null
+    const identityDiffers = Boolean(owner && incoming && incoming !== owner)
+    target.session_mismatch = identityDiffers && (ownerLeases === null || liveLease !== null)
+    target.session_owner_lease = owner === null ? null : {
+        session_id: owner,
+        pid: namedLease?.pid ?? null,
+        live: ownerLeases === null ? null : liveLease !== null,
+    }
+    return reply
+}
+
 const GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'spool-launch.lock')
 
 const LAUNCHER_LOCK_UNREADABLE_GRACE_MS = 120_000
@@ -1227,6 +1311,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
 async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal, responseValueObserver) {
     if (!verb) return 'error: verb required'
     if (typeof session_id === 'string') session_id = session_id.trim()
+    session_id = explicitBodySessionId(body) || session_id
     if (!session_id) return 'error: session_id required'
     const n = resume_task || nextN(session_id)
     const unsafeName = unsafeSpoolName('verb', verb) || unsafeSpoolName('session_id', session_id) || unsafeSpoolName('task', n)
@@ -1240,7 +1325,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         appendDiagnostic('dispatch-root-defaulted', { verb, root: resolvedRoot.root, source: resolvedRoot.root_source })
     }
     const root = resolvedRoot.root
-    ensureAgentLease(root)
+    ensureAgentLease(root, session_id)
     try {
         maybeStartDevSync(root)
     } catch (error) {
@@ -1309,6 +1394,10 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             publishSpoolRequest(inDir, inPath, n, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
         } else {
             const fullBody = { ...normalizedBody, session_id }
+            if (verb === 'instruction') {
+                const leases = leaseSessionsFor(root)
+                if (leases) fullBody._lease_sessions = leases.filter(lease => lease.live).map(({ session_id: leaseSession, pid }) => ({ session_id: leaseSession, pid }))
+            }
             publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody))
         }
     }
@@ -1329,6 +1418,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             const original = JSON.parse(readAllBounded(opened.fd, opened.size))
             responseValueObserver?.(original)
             const parsed = full_response ? original : unpackExecOutputEnvelope(verb, original)
+            applySessionLeaseVerdict(parsed, { body: normalizedBody ?? body, root })
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
             const cleaned = full_response ? parsed : cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
