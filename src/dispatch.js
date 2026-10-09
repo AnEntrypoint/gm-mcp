@@ -77,9 +77,6 @@ const SPOOL_COMPONENT_BYTE_LIMITS = {
 }
 
 export function unsafeSpoolName(role, value) {
-    if (role === 'session_id' && (typeof value !== 'string' || !/^[A-Za-z0-9_.-]{1,150}$/.test(value) || value === '.' || value === '..')) {
-        return 'session_id must be 1-150 ASCII letters, digits, dots, underscores or hyphens, excluding dot components'
-    }
     if (typeof value !== 'string' || !value) return null
     if (value.includes('\0') || /[\r\n]/.test(value) || value === '.' || value === '..' || value.includes('/') || value.includes('\\')) {
         return `${role} ${JSON.stringify(value)} is not a single spool name component: it carries a NUL byte, a line break, a path separator, or is a dot component`
@@ -409,8 +406,8 @@ export function liveDaemonSweepsProject(spoolDir) {
     const status = readJsonFile(path.join(spoolDir, '.status.json'))
     if (!status) return false
     if (!isFreshDaemonTimestamp(status.ts)) return false
-    const alive = pidAlive(status.pid)
-    return alive === true
+    if (status.pid === undefined) return true
+    return pidAlive(status.pid) === true
 }
 
 const GLOBAL_LAUNCHER_LOCK_PATH = path.join(AGENTPLUG_DIR, 'spool-launch.lock')
