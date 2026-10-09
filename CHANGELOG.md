@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased - prd-list keeps the full why
+
+`prd-list` rows keep their `why` text in full: `response-compact` exempts that key for the `prd-list` verb, so a long `why` is no longer replaced by a spool-file pointer. The runtime folds repeated blocks of one id to the last block, so `prd-list` with an id returns one row. `BUNDLE_VERSION` moves to 0.2.19.
+
 ## Unreleased - empty pool answers stay visible
 
 `response-compact` used to drop an empty array under every key, so an empty `pool-observe` `candidates` or `live_rows` printed as a missing key and read to the orchestrator as null. Both keys are now in `EMPTY_LIST_IS_THE_ANSWER_KEYS`, so an empty list prints as `[]`. The ranking itself lives in rs-plugkit (`pool_rank.rs`): node-first, then severity, then recency, outcome and refuted rows excluded, and the candidate list is no longer capped. `BUNDLE_VERSION` moves to 0.2.18.
