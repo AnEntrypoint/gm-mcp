@@ -1,6 +1,4 @@
-// Every gm spool verb the runner registry declares (`health` subsystems).
-// Each one is served as its own MCP tool named by verbToolName().
-export const GM_VERBS = [
+export const RUNNER_REGISTRY_VERBS = [
     'fs_read', 'fs_write', 'fs_readdir', 'fs_stat', 'fetch', 'env_get', 'kv_get', 'kv_put', 'kv_query',
     'git_status', 'branch_status', 'git_push', 'git_add', 'git_commit', 'git_amend', 'git_finalize', 'git_log',
     'git_diff', 'git_show', 'git_fetch', 'git_branch', 'git_remote', 'git_checkout', 'git_merge', 'git_merge_abort',
@@ -23,8 +21,6 @@ export const GM_VERBS = [
     'cache_invalidate', 'cache_stats', 'learn', 'chrome',
 ]
 
-// Naming rule: hyphens become underscores; the tool name maps back to the verb
-// by reversing nothing else, so the dispatch target is the registry name.
 export function verbToolName(verb) {
     return verb.replace(/-/g, '_')
 }

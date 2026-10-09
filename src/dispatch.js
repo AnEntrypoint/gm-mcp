@@ -10,8 +10,6 @@ import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 
-// An exit guard reads this: a process that quits mid-dispatch strands the
-// spool ticket it already wrote and drops the reply nobody else will poll for.
 let inflightDispatches = 0
 
 export function inflightDispatchCount() {
@@ -25,13 +23,6 @@ function projectRootFor(dir) {
 
 const DEFAULT_CWD_ENV_VARS = ['GM_MCP_DEFAULT_CWD', 'CLAUDE_PROJECT_DIR']
 
-// A cwd-less dispatch used to resolve against this server's own process.cwd().
-// One shared HTTP gm-mcp server serves every project (138 measured) and was
-// started from the user's home directory, which is not a git repo -- so every
-// cwd-less dispatch silently registered and ran in $HOME/.gm: instruction
-// state, PRD rows and last-instruction-hash files all landed in the wrong
-// project while the caller's own spool stayed empty, which reads exactly like
-// "the daemon never answered". An explicit root, or a loud refusal.
 function resolveDispatchRoot(cwd) {
     if (typeof cwd === 'string' && cwd.trim()) return { root: projectRootFor(cwd.trim()), root_source: 'cwd' }
     for (const name of DEFAULT_CWD_ENV_VARS) {
@@ -459,11 +450,6 @@ export function liveDaemonSweepsProject(spoolDir) {
 
 const LEASES_DIR = path.join(AGENTPLUG_DIR, 'leases')
 
-// The daemon watches a project only while an agent is attached to it. An agent
-// attaches by writing one small file per (project, pid) into the leases folder:
-// "<key>.<pid>.lease" holding the project root. The daemon is woken by the
-// folder change itself, drops the lease when the pid dies, and nothing is
-// written once the lease file exists.
 export function ensureAgentLease(root, sessionId) {
     const entry = path.resolve(root)
     const key = leaseKeyFor(entry)
@@ -477,6 +463,16 @@ export function ensureAgentLease(root, sessionId) {
         if (sessionId) recordLeaseSession(key, process.pid, sessionId)
     } catch (error) {
         appendDiagnostic('lease-write-failed', { root: entry, error: String(error?.message || error) })
+    }
+}
+
+function refreshCallerHeartbeat(root, sessionId) {
+    const heartbeat = path.join(root, '.gm', 'pool', `${sessionId}.live`)
+    try {
+        const now = new Date()
+        fs.utimesSync(heartbeat, now, now)
+    } catch (error) {
+        if (error?.code !== 'ENOENT') appendDiagnostic('heartbeat-refresh-failed', { heartbeat, error: String(error?.message || error) })
     }
 }
 
@@ -1326,6 +1322,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     }
     const root = resolvedRoot.root
     ensureAgentLease(root, session_id)
+    refreshCallerHeartbeat(root, session_id)
     try {
         maybeStartDevSync(root)
     } catch (error) {

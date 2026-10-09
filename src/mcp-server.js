@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { gmDispatch, gmResult } from './dispatch.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
-import { GM_VERBS, verbToolName } from './verbs.js'
+import { RUNNER_REGISTRY_VERBS, verbToolName } from './verbs.js'
 
 const numberLike = z.union([z.number(), z.string()])
 const booleanLike = z.union([z.boolean(), z.string()])
@@ -32,12 +32,12 @@ function editDistance(left, right) {
 
 export function nearestGmVerb(verb) {
     if (EDIT_VERB_PATTERN.test(verb)) return 'fs_write'
-    return GM_VERBS.reduce((best, candidate) => editDistance(verb, candidate) < editDistance(verb, best) ? candidate : best)
+    return RUNNER_REGISTRY_VERBS.reduce((best, candidate) => editDistance(verb, candidate) < editDistance(verb, best) ? candidate : best)
 }
 
 function unknownVerbHint(verb, text) {
     const reply = String(text)
-    if (GM_VERBS.includes(verb) || !reply.includes('unknown_verb')) return reply
+    if (RUNNER_REGISTRY_VERBS.includes(verb) || !reply.includes('unknown_verb')) return reply
     const nearest = nearestGmVerb(verb)
     const edit = nearest === 'fs_write' ? ' gm has no edit verb: a whole-file write is the supported edit, so send the complete file with fs_write.' : ''
     return reply + 'verb_hint: "' + verb + '" is not a gm verb; the nearest existing verb is ' + nearest + '.' + edit + '\n'
@@ -143,7 +143,7 @@ export function createServer() {
         async (args = {}, extra) => verbDispatch(args?.verb ?? 'unknown', args, extra)
     )
 
-    for (const verb of GM_VERBS) {
+    for (const verb of RUNNER_REGISTRY_VERBS) {
         server.registerTool(
             verbToolName(verb),
             {
