@@ -30,9 +30,7 @@ function healthUrl(port = defaultHttpPort()) {
     return `http://${DEFAULT_HOST}:${port}${HEALTH_PATH}`
 }
 
-// The entry point this process was started from, so a spawned singleton is the
-// same bundle the client already trusts rather than whatever resolves first.
-function serverEntryPath() {
+function launchedEntryPath() {
     const argv1 = process.argv[1]
     if (argv1 && /\.(mjs|cjs|js)$/i.test(argv1) && existsSync(argv1)) return path.resolve(argv1)
     return fileURLToPath(import.meta.url)
@@ -78,7 +76,7 @@ async function waitForHealth(port, timeoutMs) {
 }
 
 function spawnSingleton(port) {
-    const entry = serverEntryPath()
+    const entry = launchedEntryPath()
     const child = spawn(process.execPath, [entry, '--http', '--port', String(port)], {
         cwd: homedir(),
         detached: true,
@@ -93,9 +91,6 @@ function spawnSingleton(port) {
     return child.pid ?? null
 }
 
-// One shared server per machine, keyed by port. The health probe is the
-// authority -- a stale state file naming a dead pid means the port is free,
-// so the next caller starts a fresh one instead of trusting the file.
 export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs = STARTUP_WAIT_MS } = {}) {
     const live = await probeHealth(port)
     if (live) {
@@ -114,10 +109,10 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
     const pid = spawnSingleton(port)
     const health = await waitForHealth(port, timeoutMs)
     if (!health) {
-        appendDiagnostic('http-singleton-start-failed', { port, spawned_pid: pid, entry: serverEntryPath() })
+        appendDiagnostic('http-singleton-start-failed', { port, spawned_pid: pid, entry: launchedEntryPath() })
         return { url: null, port, pid, reused: false, error: `no healthy gm-mcp HTTP server on port ${port} after ${timeoutMs} ms` }
     }
     writeSingletonState({ port, pid: health.pid ?? pid, url: httpMcpUrl(port), ts: Date.now(), reused: false })
-    appendDiagnostic('http-singleton-started', { port, pid: health.pid ?? pid, entry: serverEntryPath() })
+    appendDiagnostic('http-singleton-started', { port, pid: health.pid ?? pid, entry: launchedEntryPath() })
     return { url: httpMcpUrl(port), port, pid: health.pid ?? pid, reused: false, version: health.version ?? null }
 }

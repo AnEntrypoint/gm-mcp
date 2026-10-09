@@ -266,7 +266,7 @@ each hyphen replaced by an underscore (`prd-add` becomes `prd_add`,
 `mutable-resolve` becomes `mutable_resolve`; `git_status` and `exec_js` are
 unchanged). The verb tool takes the same parameters as `gm` above except `verb`,
 and forwards to the same dispatch path with that verb set. The registry list
-lives in `src/verbs.js` (`GM_VERBS`). The generic `gm` tool stays registered.
+lives in `src/verbs.js` (`RUNNER_REGISTRY_VERBS`). The generic `gm` tool stays registered.
 
 ## Wire compaction
 
