@@ -20,7 +20,7 @@ export const GM_VERBS = [
     'task-stop', 'task-output', 'memorize-continue', 'fsm-vendor', 'fsm-validate', 'predicates-md',
     'fsm-propose-override',
     'health', 'config_resolve', 'dataflow_resolve', 'status', 'close', 'filter', 'cache_get', 'cache_put',
-    'cache_invalidate', 'cache_stats', 'learn',
+    'cache_invalidate', 'cache_stats', 'learn', 'chrome',
 ]
 
 // Naming rule: hyphens become underscores; the tool name maps back to the verb
