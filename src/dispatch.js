@@ -63,14 +63,61 @@ function replyMaxChars(maxChars) {
     return DEFAULT_REPLY_MAX_CHARS
 }
 
-function capReplyText(text, maxChars, spillPath) {
+// A char cut lands wherever the budget runs out, which for a `matches` list is the middle of the
+// array: the caller sees a short list and no way to tell it from a complete one. So when the reply
+// carries `matches`, the cut is made on the ARRAY, not on the rendered text, and the notice names
+// what was kept and what existed. Everything else still falls back to the plain char cut.
+function capReplyText(text, maxChars, spillPath, out, toYaml) {
     if (text.length <= maxChars) return text
     fs.writeFileSync(spillPath, text)
     const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
-    const cut = text.slice(0, budget)
-    const lastBreak = cut.lastIndexOf('\n')
-    const head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
-    return `${head}reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nspill_file: ${spillPath}\n`
+    // `matches` rides either at the top of the reply or inside `data`, whichever shape the verb
+    // answered with, so the trim has to rebuild the shape it found instead of assuming one.
+    const nested = !Array.isArray(out?.matches)
+        && out?.data !== null && typeof out?.data === 'object' && !Array.isArray(out.data)
+        && Array.isArray(out.data.matches)
+    const all = nested ? out.data.matches : (Array.isArray(out?.matches) ? out.matches : undefined)
+    let head = text
+    let matchesTotal
+    let matchesReturned
+    if (all && typeof toYaml === 'function') {
+        const renderKept = kept => (nested
+            ? toYaml({ ...out, data: { ...out.data, matches: all.slice(0, kept) } })
+            : toYaml({ ...out, matches: all.slice(0, kept) }))
+        matchesTotal = all.length
+        // The array handed to this layer is already a sample when the scan itself overflowed: it
+        // reports the true total as `matches_omitted` (or the artifact's `match_count`), and the
+        // `count` line's leading number is the fall-back. Take the largest, so `matches_total` is
+        // what existed in the scan, never what survived far enough to reach this layer.
+        const holder = nested ? out.data : out
+        let declared = Number(holder?.matches_omitted)
+        if (!Number.isFinite(declared)) declared = Number(holder?.result_artifact?.match_count)
+        if (!Number.isFinite(declared)) {
+            const fromCount = String(holder?.count ?? '').match(/^(\d+)/)
+            declared = fromCount ? Number(fromCount[1]) : NaN
+        }
+        if (Number.isFinite(declared) && declared > matchesTotal) matchesTotal = declared
+        let low = 0
+        let high = all.length
+        while (low < high) {
+            const mid = Math.ceil((low + high) / 2)
+            if (renderKept(mid).length <= budget) low = mid
+            else high = mid - 1
+        }
+        matchesReturned = low
+        head = renderKept(low)
+    }
+    if (head.length > budget) {
+        const cut = head.slice(0, budget)
+        const lastBreak = cut.lastIndexOf('\n')
+        head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
+    }
+    let notice = `reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nspill_file: ${spillPath}\n`
+    if (matchesTotal !== undefined && matchesReturned < matchesTotal) {
+        notice += `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n`
+        notice += `matches_note: the matches list above is NOT complete -- it holds ${matchesReturned} of ${matchesTotal}, because this reply was cut at max_chars=${maxChars}; the full list is in result_artifact.path when one was reported and in spill_file for the entries cut here, or raise max_chars, or scope with "path"/"glob" and union the per-subtree results.\n`
+    }
+    return `${head}${notice}`
 }
 
 function shapeGitStatusReply(verb, body, out) {
@@ -1482,7 +1529,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 out = out && typeof out === 'object' && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
             }
             const rendered = (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
-                return capReplyText(rendered, replyMaxChars(max_chars), `${outPath}.reply.txt`)
+                return capReplyText(rendered, replyMaxChars(max_chars), `${outPath}.reply.txt`, out, toYaml)
         } catch (e) {
             const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
