@@ -159,10 +159,14 @@ function isRunningFromDeployedBundle(deployedPath) {
     return canonicalPath(fileURLToPath(import.meta.url)) === canonicalPath(deployedPath)
 }
 
+function checkIntervalMs() {
+    const fromEnv = Number(process.env.GM_MCP_SELF_UPDATE_INTERVAL_MS)
+    return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : DEFAULT_CHECK_INTERVAL_MS
+}
+
 function checkedRecently(stampPath) {
-    const intervalMs = Number(process.env.GM_MCP_SELF_UPDATE_INTERVAL_MS ?? DEFAULT_CHECK_INTERVAL_MS)
     if (!existsSync(stampPath)) return false
-    return Date.now() - statSync(stampPath).mtimeMs < intervalMs
+    return Date.now() - statSync(stampPath).mtimeMs < checkIntervalMs()
 }
 
 function touch(stampPath) {
@@ -246,4 +250,11 @@ export function refreshStaleDeployedBundleInBackground() {
             appendDiagnostic('self-update-failed', { error: error?.message ? String(error.message) : String(error) })
             console.error(`gm-mcp: bundle staleness check failed (${error.message}); keeping the deployed copy`)
         })
+}
+
+export function scheduleStaleDeployedBundleChecks() {
+    refreshStaleDeployedBundleInBackground()
+    const timer = setInterval(refreshStaleDeployedBundleInBackground, checkIntervalMs())
+    timer.unref()
+    return timer
 }
