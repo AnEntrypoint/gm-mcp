@@ -63,14 +63,157 @@ function replyMaxChars(maxChars) {
     return DEFAULT_REPLY_MAX_CHARS
 }
 
-function capReplyText(text, maxChars, spillPath) {
+const FS_READ_RANGE_PAIRS = [['startLine', 'endLine', false], ['start', 'end', false], ['from', 'to', false], ['offset', 'limit', true], ['line', 'lines', true]]
+const FS_READ_COUNT_KEYS = ['count', 'limit', 'lines']
+const FS_READ_END_KEYS = ['endLine', 'end', 'to']
+const FS_READ_RANGE_BASIS = '1-based, inclusive on both ends'
+const FS_READ_ACCEPTED_KEYS = ['startLine', 'endLine', 'start', 'end', 'count', 'from', 'to', 'offset', 'limit', 'line', 'lines']
+const FS_READ_ACCEPTED_PAIRS = 'startLine/endLine, start/end, start/count, from/to, offset/limit, line/lines'
+const FS_READ_KNOWN_NON_RANGE_KEYS = new Set(['path', 'file', 'allowOutsideRoot', 'allow_outside_root', 'session_id', 'max_bytes', 'maxBytes', 'encoding', 'verbose'])
+const FS_READ_RANGE_LOOKING_PATTERNS = [
+    /^(start|begin|first|from|head|offset)(_?(line|lines|row|rows|index|idx|number|num|no|n))?$/,
+    /^(end|last|to|tail|until|thru|through)(_?(line|lines|row|rows|index|idx|number|num|no|n))?$/,
+    /^(line|lines|row|rows|limit|count|maxlines|numlines|nlines)$/,
+    /^(range|linerange|linesrange|rangestart|rangeend|startline|endline|startrow|endrow)$/,
+]
+
+function fsReadUnknownRangeKeys(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return []
+    return Object.keys(body)
+        .filter((key) => !FS_READ_ACCEPTED_KEYS.includes(key) && !FS_READ_KNOWN_NON_RANGE_KEYS.has(key))
+        .filter((key) => FS_READ_RANGE_LOOKING_PATTERNS.some((pattern) => pattern.test(key.toLowerCase().replace(/[^a-z0-9]/g, ''))))
+        .sort()
+}
+
+function fsReadUnknownRangeReply(verb, unknown) {
+    const named = unknown.map((key) => JSON.stringify(key)).join(', ')
+    return {
+        ok: false,
+        verb,
+        error: `fs_read does not recognise the range key(s) ${named}, and an unrecognised range is never dropped silently: the whole file would come back looking like a successful ranged read. Accepted keys are ${FS_READ_ACCEPTED_PAIRS} -- all ${FS_READ_RANGE_BASIS}, and limit/count/lines is a number of lines, not an end line.`,
+        unknown_range_keys: unknown,
+        accepted_range_keys: FS_READ_ACCEPTED_KEYS,
+    }
+}
+
+function fsReadLineNumber(value) {
+    if (value === undefined || value === null || value === '') return undefined
+    const parsed = typeof value === 'number' ? value : Number(String(value).trim())
+    return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined
+}
+
+function fsReadRequestedRange(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+    const has = (key) => body[key] !== undefined && body[key] !== null && body[key] !== ''
+    const pair = FS_READ_RANGE_PAIRS.find(([first, second]) => has(first) || has(second))
+    if (!pair) {
+        if (!has('count')) return null
+        return { start: 1, end: undefined, count: fsReadLineNumber(body.count) ?? 0, startKey: 'start' }
+    }
+    const [startKey, endKey, endKeyIsCount] = pair
+    let end
+    let count
+    if (has(endKey)) {
+        const value = fsReadLineNumber(body[endKey]) ?? 0
+        if (endKeyIsCount) count = value
+        else end = value
+    }
+    if (end === undefined && count === undefined) {
+        for (const key of FS_READ_COUNT_KEYS) {
+            if (key === endKey || !has(key)) continue
+            count = fsReadLineNumber(body[key]) ?? 0
+            break
+        }
+    }
+    if (end === undefined && count === undefined) {
+        for (const key of FS_READ_END_KEYS) {
+            if (key === endKey || !has(key)) continue
+            end = fsReadLineNumber(body[key]) ?? 0
+            break
+        }
+    }
+    if (end === undefined && count === undefined && has('count') && 'count' !== endKey) count = fsReadLineNumber(body.count) ?? 0
+    return { start: fsReadLineNumber(body[startKey]) ?? 1, end, count, startKey }
+}
+
+export function applyFsReadRangeFallback(verb, body, out) {
+    if (verb !== 'fs_read') return out
+    if (!out || typeof out !== 'object' || Array.isArray(out)) return out
+    const guestRanged = Number.isFinite(Number(out.start_line)) || Number.isFinite(Number(out.returned_lines)) || typeof out.content === 'string'
+    if (guestRanged) return out
+    const requested = fsReadRequestedRange(body)
+    if (!requested) {
+        const unknown = fsReadUnknownRangeKeys(body)
+        return unknown.length === 0 ? out : fsReadUnknownRangeReply(verb, unknown)
+    }
+    if (out.ok === false) return out
+    const requestedNote = `${requested.startKey} ${requested.start}${requested.end !== undefined ? ` to ${requested.end}` : requested.count !== undefined ? ` plus ${requested.count} lines` : ''}`
+    if (typeof out.data !== 'string') {
+        return {
+            ...out,
+            range_applied: false,
+            range_requested: requestedNote,
+            range_note: `this fs_read reply carries no file text to slice, so the whole file would come back while the caller asked for ${requestedNote}; re-read with the same range keys, or drop them to read the whole file`,
+        }
+    }
+    const path = typeof out.path === 'string' ? out.path : String(body?.path ?? 'the file')
+    const file = out.data
+    const lines = file.length === 0 ? [] : file.replace(/\n$/, '').split('\n')
+    const totalLines = lines.length
+    const { start, end: requestedEnd, count, startKey } = requested
+    if (start < 1) return { ok: false, verb, error: `invalid range: "${startKey}" (${start}) must be at least 1 -- every fs_read range alias is ${FS_READ_RANGE_BASIS}` }
+    if (count !== undefined && count < 1) return { ok: false, verb, error: `invalid range: "count" (${count}) must be at least 1 -- limit/count/lines is a number of lines, not an end line` }
+    if (totalLines === 0) return { ok: false, verb, error: `invalid range: ${path} has 0 lines, so no line range can be read from it` }
+    if (start > totalLines) return { ok: false, verb, error: `invalid range: "${startKey}" (${start}) is past the end of ${path}, which has ${totalLines} lines, so 1-${totalLines} is the whole readable range` }
+    if (requestedEnd !== undefined && requestedEnd < start) return { ok: false, verb, error: `invalid range: the last line requested (${requestedEnd}) is before the first line requested (${start}) -- every fs_read range alias is ${FS_READ_RANGE_BASIS}` }
+    const end = Math.min(requestedEnd ?? (count ? start + count - 1 : totalLines), totalLines)
+    const content = lines.slice(start - 1, end).join('\n')
+    return {
+        ok: true,
+        verb,
+        path,
+        content,
+        total_lines: totalLines,
+        range_basis: FS_READ_RANGE_BASIS,
+        start_line: start,
+        end_line: end,
+        returned_lines: content.length === 0 ? 0 : content.split('\n').length,
+        has_more_lines: end < totalLines,
+        truncated_at_bytes: false,
+        offset: start - 1,
+        ...(end < requestedEnd ? { end_line_requested: requestedEnd, clamped_to_total_lines: true } : {}),
+        ...(end < totalLines ? { next_start_line: end + 1 } : {}),
+    }
+}
+
+export function fsReadSpillNote(out, text) {
+    if (!out || typeof out !== 'object' || Array.isArray(out)) return ''
+    const total = Number(out.total_lines)
+    const start = Number(out.start_line)
+    const end = Number(out.end_line)
+    const returned = Number(out.returned_lines)
+    if (Number.isFinite(start) && Number.isFinite(end) && Number.isFinite(total)) {
+        const lines = Number.isFinite(returned) ? returned : (text.length === 0 ? 0 : text.split('\n').length)
+        const note = [`spill_range: lines ${start}-${end} of ${total} (1-based, inclusive)`, `spill_lines: ${lines}`]
+        if (end < total) note.push(`next_range: {"startLine":${end + 1},"endLine":${total}}`)
+        return note.join('\n') + '\n'
+    }
+    if (out.verb === 'fs_read' && typeof out.data === 'string') {
+        const body = out.data.length === 0 ? '' : out.data.replace(/\n$/, '')
+        const lines = body.length === 0 ? 0 : body.split('\n').length
+        return `spill_range: lines 1-${lines} of ${lines} (1-based, inclusive)\nspill_lines: ${lines}\n`
+    }
+    return ''
+}
+
+function capReplyText(text, maxChars, spillPath, spillNote = '') {
     if (text.length <= maxChars) return text
     fs.writeFileSync(spillPath, text)
     const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
     const cut = text.slice(0, budget)
     const lastBreak = cut.lastIndexOf('\n')
     const head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
-    return `${head}reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nspill_file: ${spillPath}\n`
+    return `${head}reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nspill_file: ${spillPath}\n${spillNote}`
 }
 
 function shapeGitStatusReply(verb, body, out) {
@@ -140,19 +283,167 @@ function publishSpoolRequest(inDir, inPath, task, body) {
     }
 }
 
-function normalizedObjectBody(verb, body) {
+const JSON_CONTROL_CHARACTER_ESCAPES = { '\n': '\\n', '\r': '\\r', '\t': '\\t', '\b': '\\b', '\f': '\\f' }
+
+const JSON_OBJECT_TEXT = /^\s*\{/
+
+function nextNonWhitespaceIndex(text, from) {
+    for (let index = from; index < text.length; index += 1) {
+        const character = text[index]
+        if (character !== ' ' && character !== '\n' && character !== '\r' && character !== '\t') return index
+    }
+    return -1
+}
+
+function keyTokenFollows(text, from) {
+    const quote = nextNonWhitespaceIndex(text, from)
+    if (quote < 0 || text[quote] !== '"') return false
+    let index = quote + 1
+    while (index < text.length && text[index] !== '"') {
+        if (text[index] === '\\') index += 1
+        index += 1
+    }
+    const colon = nextNonWhitespaceIndex(text, index + 1)
+    return colon >= 0 && text[colon] === ':'
+}
+
+function stringLiteralEndsAt(text, quoteIndex) {
+    const next = nextNonWhitespaceIndex(text, quoteIndex + 1)
+    if (next < 0) return true
+    const character = text[next]
+    if (character === ':' || character === '}' || character === ']') return true
+    if (character === ',') return keyTokenFollows(text, next + 1)
+    return false
+}
+
+function repairedJsonStringLiterals(text) {
+    let out = ''
+    let inString = false
+    let escaped = false
+    for (let index = 0; index < text.length; index += 1) {
+        const character = text[index]
+        if (!inString) {
+            if (character === '"') inString = true
+            out += character
+            continue
+        }
+        if (escaped) {
+            out += character
+            escaped = false
+            continue
+        }
+        if (character === '\\') {
+            out += character
+            escaped = true
+            continue
+        }
+        if (character !== '"') {
+            const code = character.charCodeAt(0)
+            out += code >= 0x20 ? character : JSON_CONTROL_CHARACTER_ESCAPES[character] || `\\u${code.toString(16).padStart(4, '0')}`
+            continue
+        }
+        if (stringLiteralEndsAt(text, index)) {
+            out += character
+            inString = false
+            continue
+        }
+        out += '\\"'
+    }
+    return out
+}
+
+function decodedJsonText(text) {
+    try {
+        return { value: JSON.parse(text) }
+    } catch {
+        const repaired = repairedJsonStringLiterals(text)
+        try {
+            return { value: JSON.parse(repaired) }
+        } catch (error) {
+            return { error, scanned: repaired }
+        }
+    }
+}
+
+function jsonFieldCoveringPosition(text, position) {
+    let key = null
+    let keyStart = -1
+    let valueStart = -1
+    let expectingKey = true
+    let inString = false
+    let escaped = false
+    let depth = 0
+    const openContainers = []
+    for (let index = 0; index < text.length; index += 1) {
+        const character = text[index]
+        if (inString) {
+            if (escaped) {
+                escaped = false
+            } else if (character === '\\') {
+                escaped = true
+            } else if (character === '"') {
+                inString = false
+                if (depth === 1 && keyStart >= 0 && key === null) key = text.slice(keyStart + 1, index)
+            }
+            continue
+        }
+        if (character === '"') {
+            if (depth === 1 && expectingKey) {
+                keyStart = index
+                expectingKey = false
+            }
+            inString = true
+            continue
+        }
+        if (character === '{' || character === '[') {
+            if (depth === 1 && valueStart >= 0) openContainers.push(key)
+            depth += 1
+            continue
+        }
+        if (character === '}' || character === ']') {
+            depth -= 1
+            if (depth > 1) continue
+            if (depth === 1) {
+                openContainers.pop()
+                continue
+            }
+            if (valueStart >= 0 && key && position >= valueStart && position <= index) return key
+            valueStart = -1
+            key = null
+            expectingKey = true
+            continue
+        }
+        if (character === ':' && depth === 1 && key !== null && valueStart < 0) {
+            valueStart = index + 1
+            continue
+        }
+        if (character === ',' && depth === 1) {
+            if (valueStart >= 0 && key && position >= valueStart && position <= index) return key
+            valueStart = -1
+            key = null
+            expectingKey = true
+        }
+    }
+    if (valueStart >= 0 && key && position >= valueStart) return key
+    return null
+}
+
+export function normalizedObjectBody(verb, body) {
     if (body === undefined || body === null) return { value: {} }
     if (typeof body === 'string') {
-        let parsed
-        try {
-            parsed = JSON.parse(body)
-        } catch (error) {
-            return { error: `${verb} body is a JSON string that cannot be parsed: ${error.message}. Pass body as an object, or pass a valid JSON object string.` }
+        const decoded = decodedJsonText(body)
+        if (decoded.value === undefined) {
+            if (!JSON_OBJECT_TEXT.test(body)) return { rawText: body }
+            const position = Number((/at position (\d+)/.exec(decoded.error.message) || [])[1])
+            const field = Number.isInteger(position) ? jsonFieldCoveringPosition(decoded.scanned, position) : null
+
+            const repairHint = 'Quote each newline as \\n inside the JSON string (or pass the lines as an array), or pass body as an object instead of a JSON string'
+            return { error: `${verb} body${field ? `.${field}` : ''} is not valid JSON: ${decoded.error.message}. ${repairHint}.` }
         }
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            return { error: `${verb} body string must decode to a JSON object; received ${Array.isArray(parsed) ? 'an array' : typeof parsed}.` }
+        if (!decoded.value || typeof decoded.value !== 'object' || Array.isArray(decoded.value)) {
+            return { error: `${verb} body string must decode to a JSON object; received ${Array.isArray(decoded.value) ? 'an array' : typeof decoded.value}.` }
         }
-        return { value: parsed }
+        return { value: decoded.value }
     }
     if (typeof body !== 'object' || Array.isArray(body)) {
         return { error: `${verb} body must be a JSON object; received ${Array.isArray(body) ? 'an array' : typeof body}. Arguments go in the body field as one JSON object, e.g. body: {"path": "src/index.js"}.` }
@@ -322,7 +613,7 @@ function resultField(value, field) {
 }
 
 function parseResultDocument(text) {
-    const body = text.replace(/^\uFEFF/, '').replace(/^\s*---[ \t]*\r?\n/, '')
+    const body = text.replace(/^﻿/, '').replace(/^\s*---[ \t]*\r?\n/, '')
     try {
         return JSON.parse(body)
     } catch (jsonError) {
@@ -393,7 +684,12 @@ function plainTextFromBody(body) {
     if (typeof body === 'string') return body
     if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined
     const present = PLAIN_TEXT_BODY_FIELDS.filter(field => typeof body[field] === 'string')
-    return present.length === 1 ? body[present[0]] : undefined
+    if (present.length === 0) return undefined
+    const chosen = present[0]
+    if (present.length > 1 && present.some(field => body[field] !== body[chosen])) {
+        appendDiagnostic('plain-text-body-field-chosen', { chosen, present })
+    }
+    return body[chosen]
 }
 
 const GLOB_FILTER_FIELDS = ['glob', 'path_glob', 'include']
@@ -428,10 +724,21 @@ export function withGlobFiltersCoerced(verb, body) {
     return { value: coerced }
 }
 
-function objectBodyDiagnostic(verb, body) {
-    if (verb === 'prd-add' && body.help !== true && (typeof body.id !== 'string' || !body.id.trim())) {
-        return 'prd-add requires a non-empty body.id. A blank id would create an unaddressable PRD row; provide a stable identifier before dispatching, or send {"help": true} for the usage.'
+const PRD_ADD_SLUG_SOURCE_FIELDS = ['subject', 'title', 'name', 'task', 'goal', 'description', 'notes']
+const PRD_ADD_MINIMAL_BODY = '{"id":"kebab-case-slug","subject":"one line of intent"}'
+
+function prdAddIdDiagnostic(body) {
+    if (body.help === true) return undefined
+    if (typeof body.id === 'string') {
+        if (body.id.trim()) return undefined
+        return `prd-add requires a non-empty body.id: body.id is present but blank. Send ${PRD_ADD_MINIMAL_BODY}, or drop id and send {"subject":"one line of intent"} so the id is derived from it. Send {"help": true} for every field.`
     }
+    if (PRD_ADD_SLUG_SOURCE_FIELDS.some(field => typeof body[field] === 'string' && body[field].trim())) return undefined
+    return `prd-add requires body.id -- the missing key is "id". Send ${PRD_ADD_MINIMAL_BODY}, or omit id and send {"subject":"one line of intent"}: the id is then derived from the first non-empty one of ${PRD_ADD_SLUG_SOURCE_FIELDS.join(', ')}, and a body with no text anywhere cannot derive one. Send {"help": true} for every field.`
+}
+
+function objectBodyDiagnostic(verb, body) {
+    if (verb === 'prd-add') return prdAddIdDiagnostic(body)
     if (verb !== 'git_merge' || typeof body.ref === 'string' && body.ref.trim()) return undefined
     if (typeof body.branch === 'string' && body.branch.trim()) {
         return 'git_merge requires body.ref. body.branch is not a git_merge field; call again with {"ref":"' + body.branch + '"}.'
@@ -1404,7 +1711,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     if (!resume_task && isPlainText && typeof raw_body !== 'string') {
         raw_body = plainTextFromBody(body)
         if (typeof raw_body !== 'string') {
-            return `error: ${verb} takes a plain-text body -- pass the text as the top-level raw_body argument (a string), e.g. raw_body: "return 1". body is for JSON verbs; here it is accepted only as a string or as an object with exactly one string field among ${PLAIN_TEXT_BODY_FIELDS.join(', ')}`
+            const carried = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body).join(', ') || 'none' : typeof body
+            return `error: ${verb} takes a plain-text body -- pass the text as the top-level raw_body argument (a string), e.g. raw_body: "ls -la". body is accepted here too: as a plain string ("ls -la"), or as an object carrying one of ${PLAIN_TEXT_BODY_FIELDS.join(', ')}; when it carries several of them the first of those names wins. This body carried none of them (keys: ${carried}).`
         }
     }
 
@@ -1412,14 +1720,19 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     if (timeoutDiagnostic) return `error: ${timeoutDiagnostic}`
 
     let normalizedBody
+    let rawBodyText
     if (!resume_task && !isPlainText) {
         const normalized = normalizedObjectBody(verb, body)
         if (normalized.error) return `error: ${normalized.error}`
-        const globCoerced = withGlobFiltersCoerced(verb, normalized.value)
-        if (globCoerced.error) return `error: ${globCoerced.error}`
-        const diagnostic = objectBodyDiagnostic(verb, globCoerced.value)
-        if (diagnostic) return `error: ${diagnostic}`
-        normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, globCoerced.value))
+        if (normalized.rawText !== undefined) {
+            rawBodyText = normalized.rawText
+        } else {
+            const globCoerced = withGlobFiltersCoerced(verb, normalized.value)
+            if (globCoerced.error) return `error: ${globCoerced.error}`
+            const diagnostic = objectBodyDiagnostic(verb, globCoerced.value)
+            if (diagnostic) return `error: ${diagnostic}`
+            normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, globCoerced.value))
+        }
     }
 
     let ownerTransport
@@ -1453,6 +1766,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (signal?.aborted) return toYaml({ error: 'aborted', owner_transport: ownerTransport, wrote_no_new_dispatch: true })
             const plaintext = withTimeoutMsPrefix(verb, raw_body)
             publishSpoolRequest(inDir, inPath, n, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
+        } else if (rawBodyText !== undefined) {
+            publishSpoolRequest(inDir, inPath, n, rawBodyText)
         } else {
             const fullBody = { ...normalizedBody, session_id }
             if (verb === 'instruction') {
@@ -1482,7 +1797,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             applySessionLeaseVerdict(parsed, { body: normalizedBody ?? body, root })
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
-            const cleaned = full_response ? parsed : cleanResponse(parsed, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
+            const ranged = full_response ? parsed : applyFsReadRangeFallback(verb, normalizedBody, parsed)
+            const cleaned = full_response ? parsed : cleanResponse(ranged, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
             let out = cleaned
             if (!full_response && cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
                 const { data, ...rest } = cleaned
@@ -1509,7 +1825,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 out = out && typeof out === 'object' && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
             }
             const rendered = (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
-                return capReplyText(rendered, replyMaxChars(max_chars), `${outPath}.reply.txt`)
+            const spillNote = verb === 'fs_read' ? fsReadSpillNote(out, rendered) : ''
+                return capReplyText(rendered, replyMaxChars(max_chars), `${outPath}.reply.txt`, spillNote)
         } catch (e) {
             const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
