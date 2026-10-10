@@ -91,13 +91,13 @@ export function createServer() {
     server.registerTool(
         'gm_result',
         {
-            description: 'Read a bounded page from a GM spool result named by a truncation notice. result_file may be an absolute path to any project\'s .gm/exec-spool/out/*.json -- not only the project this server was started in -- or a path/name resolved against cwd. limit is an integer from 1 through 16000 (default 12000); page a longer field with offset and the returned next_offset.',
+            description: 'Read a bounded page from a GM spool result named by a truncation notice. result_file may be an absolute path to any project\'s .gm/exec-spool/out spill file -- the *.json result or the *.json.reply.txt reply envelope a truncation notice names -- not only the project this server was started in, or a path/name resolved against cwd. limit is an integer from 1 through 16000 (default 12000); page a longer field with offset and the returned next_offset.',
             inputSchema: {
-                result_file: z.string().describe('Absolute path of the spilled .gm/exec-spool/out/*.json a truncation notice named, or a path/name relative to cwd (a bare file name is also looked up under <cwd>/.gm/exec-spool/out).'),
+                result_file: z.string().describe('Absolute path of the spilled .gm/exec-spool/out result a truncation notice named (a *.json result or a *.json.reply.txt reply envelope), or a path/name relative to cwd (a bare file name is also looked up under <cwd>/.gm/exec-spool/out).'),
                 cwd: z.string().optional().describe('Project root holding the .gm/exec-spool that produced this result. Relative result_file names are resolved against it, so pass it whenever the result came from another project; default is this server\'s own root.'),
                 root: z.string().optional().describe('Alias of cwd.'),
                 projectPath: z.string().optional().describe('Alias of cwd.'),
-                field: z.string().optional().describe('Field to read out of the result JSON (dot path, e.g. "diff"); omit it for the whole file.'),
+                field: z.string().optional().describe('Field to read out of the result document (dot path, e.g. "diff"); omit it for the whole file. JSON and YAML spill files both work.'),
                 offset: numberLike.optional().describe('Character offset to start from (0-based). Use the next_offset of the previous page.'),
                 limit: numberLike.optional().describe('Characters to return: an integer from 1 through 16000 (default 12000).'),
             },
