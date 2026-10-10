@@ -330,6 +330,17 @@ pointer and the caller had to fall back to a host file-read tool. `fs_read`'s
 own `max_bytes`/`offset`/`limit` are daemon-side and were never the problem --
 they were being cut down again on the way out.
 
+A line range belongs to the `fs_read` request itself:
+`{"path":"src/dsp/audio_thread.cpp","startLine":1040,"endLine":1100}` -- or
+`start`/`end`, `start`/`count`, `from`/`to`, `offset`/`limit`, `line`/`lines`,
+at the top level or inside `body` -- returns just those lines, 1-based and
+inclusive on both ends, with `total_lines`, `start_line`, `end_line` and a
+`next_start_line` to page on. `limit`/`count`/`lines` is a number of lines, not
+an end line. A range-looking key that is not one of them is an error naming the
+accepted keys, never a silent whole file, and a range that could not be applied
+says so with `range_applied: false`. Without any range key the whole file comes
+back, unchanged.
+
 The plain-text-body budget exists because that response *is* the script's
 output: truncating it at 400 chars meant nearly every `exec_js` call needed a
 second round trip (a file read) to see its own `stdout`. Raise or lower either
@@ -368,7 +379,7 @@ produced. The exec family is `exec_js` (aliases `nodejs`, `javascript`, `node`, 
 
 For these verbs the server adds the line itself when `raw_body` lacks one:
 
-- the value is `timeout_seconds * 1000` (default 300000), floored at 100
+- the value is 300000 (`EXEC_DEFAULT_LIMIT_SECONDS`), the daemon default; `timeout_seconds` never changes it and sets only the poll budget
 - a `raw_body` that already starts with `timeoutMs=<ms>` or `timeout_ms=<ms>`
   (leading whitespace allowed) is sent unchanged -- an explicit line wins
 
