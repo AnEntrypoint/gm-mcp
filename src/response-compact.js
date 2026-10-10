@@ -51,12 +51,19 @@ const EMPTY_LIST_IS_THE_ANSWER_KEYS = new Set([
     'references',
     'candidates',
     'live_rows',
+    'launch',
 ])
 
 const PRD_LISTING_KEYS = new Set(['why'])
 
+const POOL_BRIEF_KEYS = new Set(['brief'])
+
+const HELP_TEXT_KEYS = new Set(['parameters'])
+
 export function untruncatedKeysFor(verb, body) {
+    if (body && typeof body === 'object' && body.help === true) return HELP_TEXT_KEYS
     if (verb === 'prd-list') return PRD_LISTING_KEYS
+    if (verb === 'pool-brief') return POOL_BRIEF_KEYS
     const expandsRecall = verb === 'recall' && body && typeof body === 'object' && (body.full === true || typeof body.key === 'string')
     return expandsRecall ? EXPANDED_RECALL_KEYS : NO_KEYS
 }

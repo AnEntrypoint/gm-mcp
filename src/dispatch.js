@@ -370,8 +370,8 @@ export function withGlobFiltersCoerced(verb, body) {
 }
 
 function objectBodyDiagnostic(verb, body) {
-    if (verb === 'prd-add' && (typeof body.id !== 'string' || !body.id.trim())) {
-        return 'prd-add requires a non-empty body.id. A blank id would create an unaddressable PRD row; provide a stable identifier before dispatching.'
+    if (verb === 'prd-add' && body.help !== true && (typeof body.id !== 'string' || !body.id.trim())) {
+        return 'prd-add requires a non-empty body.id. A blank id would create an unaddressable PRD row; provide a stable identifier before dispatching, or send {"help": true} for the usage.'
     }
     if (verb !== 'git_merge' || typeof body.ref === 'string' && body.ref.trim()) return undefined
     if (typeof body.branch === 'string' && body.branch.trim()) {
@@ -866,10 +866,10 @@ export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
     return DEFAULT_TIMEOUT_SECONDS * 1000
 }
 
-export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
+export function withTimeoutMsPrefix(verb, raw_body) {
     if (!TIMEOUT_MS_PREFIX_VERBS.has(verb)) return raw_body
     if (TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return raw_body
-    return `timeoutMs=${Math.max(100, timeoutMilliseconds(timeout_seconds, EXEC_DEFAULT_LIMIT_SECONDS))}\n${raw_body}`
+    return `timeoutMs=${EXEC_DEFAULT_LIMIT_SECONDS * 1000}\n${raw_body}`
 }
 
 const DAEMON_HEARTBEAT_STALE_MS = 20000
@@ -1387,7 +1387,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         if (isPlainText) {
             ownerTransport = await plainTextOwnerTransport(root, session_id, signal)
             if (signal?.aborted) return toYaml({ error: 'aborted', owner_transport: ownerTransport, wrote_no_new_dispatch: true })
-            const plaintext = withTimeoutMsPrefix(verb, raw_body, timeout_seconds)
+            const plaintext = withTimeoutMsPrefix(verb, raw_body)
             publishSpoolRequest(inDir, inPath, n, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
         } else {
             const fullBody = { ...normalizedBody, session_id }
