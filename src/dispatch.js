@@ -179,6 +179,7 @@ const RESULT_CHUNK_DEFAULT_CHARACTERS = 12000
 const RESULT_CHUNK_MAX_CHARACTERS = 16000
 const RESULT_FILE_MAX_BYTES = 4 * 1024 * 1024
 const RESULT_READ_CHUNK_BYTES = 64 * 1024
+const REPLY_SPILL_SUFFIX = '.reply.txt'
 
 function isSpoolOutDirectory(dir) {
     return path.basename(dir) === 'out'
@@ -187,6 +188,11 @@ function isSpoolOutDirectory(dir) {
 }
 
 function spoolFileCandidates(root, file) {
+    const exact = spoolExactCandidates(root, file)
+    return exact.flatMap(candidate => candidate.endsWith(REPLY_SPILL_SUFFIX) ? [candidate] : [candidate, candidate + REPLY_SPILL_SUFFIX])
+}
+
+function spoolExactCandidates(root, file) {
     if (path.isAbsolute(file)) return [path.resolve(file)]
     const underRoot = path.resolve(root, file)
     const bare = !/[\\/]/.test(file)
@@ -214,7 +220,7 @@ function spoolFilePath(root, file) {
         try {
             return validateSpoolFile(candidate)
         } catch (error) {
-            failure = error
+            if (!failure || !candidate.endsWith(REPLY_SPILL_SUFFIX)) failure = error
         }
     }
     throw failure
@@ -315,6 +321,22 @@ function resultField(value, field) {
     throw new Error(`field "${field}" was not found; omit field to read the complete raw response`)
 }
 
+function parseResultDocument(text) {
+    const body = text.replace(/^\uFEFF/, '').replace(/^\s*---[ \t]*\r?\n/, '')
+    try {
+        return JSON.parse(body)
+    } catch (jsonError) {
+        let parsed
+        try {
+            parsed = yaml.load(body)
+        } catch {
+            throw jsonError
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw jsonError
+        return parsed
+    }
+}
+
 function wholeNumber(value) {
     if (typeof value === 'number') return Number.isInteger(value) ? value : undefined
     if (typeof value === 'string' && /^[0-9]+$/.test(value.trim())) return Number(value.trim())
@@ -339,7 +361,7 @@ export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_
             let nextOffset
             let resolvedField
             if (field) {
-                const selected = resultField(JSON.parse(readAllBounded(fd, size)), field)
+                const selected = resultField(parseResultDocument(readAllBounded(fd, size)), field)
                 content = JSON.stringify(selected.value, null, 2)
                 resolvedField = selected.path
                 totalCharacters = content.length
