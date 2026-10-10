@@ -3,7 +3,7 @@ import { createServer } from './mcp-server.js'
 import { installStdioGuards } from './transport-guard.js'
 import { startHttpServer, httpListenOptions } from './http-transport.js'
 import { ensureHttpSingleton } from './singleton.js'
-import { refreshStaleDeployedBundleInBackground } from './self-update.js'
+import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runReleaseBridgeInBackground } from './release-bridge.js'
 
 export { createServer } from './mcp-server.js'
@@ -33,6 +33,7 @@ function seedHttpSingletonWhenOptedIn() {
 export async function main() {
     if (wantsHttpTransport()) {
         await startHttpServer(httpListenOptions())
+        scheduleStaleDeployedBundleChecks()
         runReleaseBridgeInBackground()
         return
     }
@@ -46,7 +47,7 @@ export async function main() {
     await server.connect(transport)
     console.error('gm-mcp: connected, serving on stdio')
     seedHttpSingletonWhenOptedIn()
-    refreshStaleDeployedBundleInBackground()
+    scheduleStaleDeployedBundleChecks()
     runReleaseBridgeInBackground()
 }
 
