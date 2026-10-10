@@ -30,7 +30,7 @@ const GIT_COMMIT_TOP_LEVEL_FIELD_TYPES = {
 const GIT_COMMIT_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(GIT_COMMIT_TOP_LEVEL_FIELDS.map((key) => [key, GIT_COMMIT_TOP_LEVEL_FIELD_TYPES[key].optional()
     .describe(`Top-level alias of body.${key} for git_finalize/git_commit: folded into body when body does not already name it.`)]))
 for (const verb of ['git_finalize', 'git_commit']) VERB_EXTRA_FIELDS[verb] = GIT_COMMIT_TOP_LEVEL_FIELDS_ZOD
-const VERB_DESCRIPTION_EXTRA = { fs_read: ` Line ranges are 1-based and inclusive on both ends: ${FS_READ_RANGE_ALIASES.join(', ')} are accepted at the top level and folded into body. ${FS_READ_RANGE_PAIR_HELP} Without any of them the whole file is returned, unchanged.` }
+const VERB_DESCRIPTION_EXTRA = { fs_read: ` Line ranges are 1-based and inclusive on both ends: ${FS_READ_RANGE_ALIASES.join(', ')} are accepted at the top level and folded into body, and the same keys inside body work identically. ${FS_READ_RANGE_PAIR_HELP} A range-looking key that is not one of them is an error naming the accepted keys rather than a silent whole file. Without any of them the whole file is returned, unchanged.` }
 const VERB_TOP_LEVEL_ALIASES = { fs_read: FS_READ_RANGE_ALIASES, git_finalize: GIT_COMMIT_TOP_LEVEL_FIELDS, git_commit: GIT_COMMIT_TOP_LEVEL_FIELDS }
 for (const verb of ['git_finalize', 'git_commit']) {
     VERB_DESCRIPTION_EXTRA[verb] = ` ${GIT_COMMIT_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body.`
