@@ -53,6 +53,23 @@ function readText(file) {
     }
 }
 
+const UTF8_BOM = '\u{FEFF}'
+const stripBom = (text) => (typeof text === 'string' && text.startsWith(UTF8_BOM) ? text.slice(UTF8_BOM.length) : text)
+
+function readVersionText(file) {
+    const text = readText(file)
+    return text == null ? null : stripBom(text).trim()
+}
+
+function clearBomMisclassifiedSideloadMarker(dir) {
+    const markerPath = path.join(dir, GUEST_SIDELOAD_FILE)
+    const marker = readJson(markerPath)
+    if (!marker || typeof marker.installed_marker !== 'string') return
+    if (!SEMVER.test(stripBom(marker.installed_marker).trim())) return
+    rmSync(markerPath, { force: true })
+    appendDiagnostic('guest-sideload-marker-cleared', { file: markerPath, installed_marker: marker.installed_marker })
+}
+
 function writeAtomic(file, text) {
     const temp = `${file}.${process.pid}.${Date.now()}.tmp`
     try {
@@ -125,7 +142,7 @@ export function sourceHeadOf(body) {
 function runnerSwapRecorded(version, installedSha) {
     const home = agentplugDir()
     const record = readJson(path.join(home, LAST_RUNNER_SWAP_FILE))
-    return record?.version === version && record?.sha256 === installedSha && readText(path.join(home, RUNNER_VERSION_FILE))?.trim() === version
+    return record?.version === version && record?.sha256 === installedSha && readVersionText(path.join(home, RUNNER_VERSION_FILE)) === version
 }
 
 function recordRunnerSwap(version, installedSha) {
@@ -270,8 +287,9 @@ async function reconcileGuest(release) {
     const dir = path.join(agentplugDir(), GUEST_DIR)
     const wasmPath = path.join(dir, INSTALLED_GUEST_FILE)
     const versionPath = path.join(dir, 'gm.version')
+    clearBomMisclassifiedSideloadMarker(dir)
     if (existsSync(path.join(dir, GUEST_SIDELOAD_FILE)) || guestBuildIsSideload(dir)) return { outcome: 'skipped', reason: 'local-dev-sideload' }
-    const recorded = readText(versionPath)?.trim() ?? null
+    const recorded = readVersionText(versionPath)
     if (recorded !== null && !SEMVER.test(recorded)) return { outcome: 'skipped', reason: 'local-dev-sideload', recorded }
     if (existsSync(wasmPath) && recorded === null) return { outcome: 'skipped', reason: 'installed-version-unknown' }
     if (recorded !== null && compareVersions(release.version, recorded) <= 0) {
