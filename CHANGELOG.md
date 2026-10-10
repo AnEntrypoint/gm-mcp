@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased - gm_result reads a spilled result from the project that produced it
+
+`gm_result` resolved `result_file` against the `.gm/exec-spool/out` of the project this server was started in, so the absolute path a truncation notice prints -- `C:\dev\other\.gm\exec-spool\out\git_diff-<...>.json field 'diff'` after a dispatch whose `cwd` was `C:\dev\other` -- was refused with "spool file must name a file inside this project's .gm/exec-spool/out directory", and both the bare name and the `.gm/exec-spool/out/<name>` form resolved against that same wrong root. It now accepts any absolute path that lands inside a `.gm/exec-spool/out` directory, whichever project owns it: the containing directory is checked by name and again after `realpath`, so a `..` segment, a symlink out of the spool and a hardlink are still refused, and the 4 MiB size and `nlink === 1` checks are unchanged. A relative or bare name resolves against the new optional `cwd` (alias `root`/`projectPath`, default this server's own root), and a bare name is additionally looked up under `<cwd>/.gm/exec-spool/out`. `offset` and `limit` now coerce from numeric strings, which the tool schema already advertised as `numberLike`, and the tool description states the 1..16000 `limit` cap that only the error text used to disclose. The coerced values are what the paging arithmetic then uses: `next_offset` used to be computed from the raw arguments, so a numeric-string `limit` on a field read answered `next_offset: '0200'`. Verb spill pointers themselves were never cwd-relative: `response-compact` names the dispatch root's own absolute out-file, so `git_diff` and every other spilling verb needed no change. `BUNDLE_VERSION` moves to 0.2.22.
+
+## Unreleased - the exec limit no longer follows timeout_seconds
+
+`withTimeoutMsPrefix` used to write `timeoutMs=<timeout_seconds * 1000>` into an exec-family body that had no prefix, so a `timeout_seconds: 240` poll also killed the child at 240 s with `exec_timeout`. The wrapper now writes the daemon default (300000), as the README and the MCP tool description say: `timeout_seconds` sets only the poll budget. A longer run puts `timeoutMs=<ms>` (up to 900000) on the first line of the body.
+
 ## Unreleased - prd-list keeps the full why
 
 `prd-list` rows keep their `why` text in full: `response-compact` exempts that key for the `prd-list` verb, so a long `why` is no longer replaced by a spool-file pointer. The runtime folds repeated blocks of one id to the last block, so `prd-list` with an id returns one row. `BUNDLE_VERSION` moves to 0.2.19.
