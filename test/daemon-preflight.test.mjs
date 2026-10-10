@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 process.env.GM_MCP_DAEMON_START_GRACE_MS = '400'
 process.env.GM_MCP_RUNNER_WATCHDOG = '0'
+const agentplugHome = mkdtempSync(path.join(tmpdir(), 'gm-agentplug-home-'))
+process.env.AGENTPLUG_HOME = agentplugHome
 const { daemonBootGraceActive, daemonNotRunning, readDaemonLiveness, readSpoolDispatchState, scanSpoolQueue } = await import('../src/dispatch.js')
 
 let passed = 0
@@ -30,6 +32,7 @@ const project = (name) => {
     return dir
 }
 const writeStatus = (dir, status) => writeFileSync(path.join(dir, '.status.json'), JSON.stringify(status))
+const writeGlobalStatus = (status) => writeFileSync(path.join(agentplugHome, 'daemon-status.json'), JSON.stringify(status))
 const rootOf = (spoolDir) => path.resolve(spoolDir, '..', '..')
 const exitedPid = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8', windowsHide: true }).pid
 
@@ -63,6 +66,19 @@ await test('a stale heartbeat from a dead pid reports daemon-not-running', async
     assert.ok(existsSync(result.checked_status_file))
     assert.ok(result.daemon_log.endsWith('daemon.log'))
     assert.ok(result.spool_log.endsWith('.watcher.log'))
+})
+
+await test('a stale heartbeat from a pid that still owns the live daemon is not reported as down', async () => {
+    const staleTs = Date.now() - 5 * 60_000
+    writeGlobalStatus({ pid: process.pid, ts: staleTs, active_projects: 1 })
+    const dir = project('stale-but-live')
+    writeStatus(dir, { pid: process.pid, ts: staleTs })
+    const liveness = readDaemonLiveness(dir)
+    assert.equal(liveness.alive, true)
+    assert.equal(liveness.pid_alive, true)
+    assert.ok(liveness.heartbeat_age_ms > 60_000, String(liveness.heartbeat_age_ms))
+    assert.equal(await daemonNotRunning(rootOf(dir), dir, undefined), undefined)
+    writeGlobalStatus({})
 })
 
 await test('a runner_update_in_progress handoff still dispatches', async () => {
@@ -211,4 +227,5 @@ async function removeScratchTree(dir) {
 }
 
 await removeScratchTree(scratch)
+await removeScratchTree(agentplugHome)
 console.log(`\n${passed} passed, ${process.exitCode ? 'FAILED' : '0 failed'}`)
