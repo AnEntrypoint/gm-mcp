@@ -55,9 +55,6 @@ function runNode(args, timeoutMs = 30_000) {
     })
 }
 
-// A dead pipe used to be a reason to exit, which is exactly the failure being
-// fixed: the client stops reading, the server dies, and the tool is gone for
-// the rest of the session. A server that outlives its pipe can be reconnected.
 await testAsync('a stdout EPIPE does not take the server down', async () => {
     const script = [
         `import { installStdioGuards } from ${JSON.stringify(pathToFileURL(GUARD_PATH).href)}`,
@@ -90,9 +87,6 @@ test('the HTTP transport defaults to the documented localhost port', () => {
     assert.equal(options.host, '127.0.0.1')
 })
 
-// The bug this transport exists to avoid: one shared stateless transport
-// answers its first request and then 500s every later one, which would be a
-// worse failure than the stdio drop it replaces.
 await testAsync('the HTTP transport answers request after request', async () => {
     const started = await startHttpServer({ port: 0, host: '127.0.0.1' })
     const port = started.server.address().port

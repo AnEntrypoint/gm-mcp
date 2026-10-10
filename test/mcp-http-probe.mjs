@@ -1,6 +1,3 @@
-// Probe the live gm HTTP MCP endpoint exactly the way a Claude Code client does:
-// initialize -> notifications/initialized -> tools/list -> tools/call, then idle
-// and call again. Run: node test/mcp-http-probe.mjs [port] [idleSeconds]
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 

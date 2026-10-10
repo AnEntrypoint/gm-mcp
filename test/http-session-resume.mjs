@@ -1,15 +1,3 @@
-// Verifies the gm HTTP transport keeps a long-lived client session usable.
-// Runs against a throwaway port so the live singleton on 8787 is untouched.
-//
-//   node test/http-session-resume.mjs [port] [idleSeconds]
-//
-// Checks, in order:
-//   1. initialize + tools/list + tools/call round trip
-//   2. an idle gap far longer than node's old 5 s keepAliveTimeout
-//   3. the same client still works after that gap (no session expiry, no reap)
-//   4. an empty POST is answered 202, never a 400 that a client reads as fatal
-//   5. GET is a labelled heartbeat carrying `retry:`, DELETE with an unknown
-//      session id is not a 404
 import { spawn } from 'node:child_process'
 import { connect } from 'node:net'
 import { mkdtempSync, readFileSync } from 'node:fs'
@@ -21,7 +9,8 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const bundle = path.join(here, '..', 'bin', 'gm-mcp-server.js')
-const port = Number(process.argv[2] || 8791)
+const THROWAWAY_PORT = 8791
+const port = Number(process.argv[2] || THROWAWAY_PORT)
 const idleSeconds = Number(process.argv[3] || 20)
 const logPath = path.join(mkdtempSync(path.join(tmpdir(), 'gm-mcp-verify-')), 'server.log')
 
@@ -42,10 +31,10 @@ child.stderr.on('data', () => {})
 async function waitForHealth(timeoutMs = 20_000) {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-        try {
-            const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) })
-            if (r.ok && (await r.json()).ok === true) return true
-        } catch { /* not up yet */ }
+        const healthy = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) })
+            .then(async (r) => r.ok && (await r.json()).ok === true)
+            .catch(() => false)
+        if (healthy) return true
         await new Promise((r) => setTimeout(r, 250))
     }
     return false
@@ -97,9 +86,6 @@ try {
         'http-empty-body-ignored',
     )
 
-    // A client that opens a GET stream anyway (the 0.2.5 client always did) gets
-    // a heartbeat, not a 405 it may read as fatal. The `retry:` field is what
-    // stops an ended stream from being re-GETted in a hot loop, so assert it.
     const get = await fetch(url, { headers: { accept: 'text/event-stream' } })
     const reader = get.body.getReader()
     const firstChunk = new TextDecoder().decode((await reader.read()).value ?? new Uint8Array())
@@ -117,9 +103,6 @@ try {
     const after = await client.callTool({ name: 'gm', arguments: args })
     check('the original client still works after all of that', !after.isError)
 
-    // The old node default closed an idle keep-alive socket after 5 s, which is
-    // a client losing the socket it was about to reuse. Prove one socket can sit
-    // idle well past that and still carry a request.
     const idleSocket = await new Promise((resolve, reject) => {
         const socket = connect({ host: '127.0.0.1', port })
         socket.once('connect', () => resolve(socket))
