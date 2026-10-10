@@ -180,16 +180,44 @@ const RESULT_CHUNK_MAX_CHARACTERS = 16000
 const RESULT_FILE_MAX_BYTES = 4 * 1024 * 1024
 const RESULT_READ_CHUNK_BYTES = 64 * 1024
 
-function spoolFilePath(root, file) {
-    const outDir = path.join(spoolDirOf(root), 'out')
-    const candidate = path.resolve(root, file)
-    const absoluteOutDir = path.resolve(outDir)
-    const resolvedOutDir = fs.realpathSync(outDir)
-    const relative = path.relative(absoluteOutDir, candidate)
-    if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-        throw new Error('spool file must name a file inside this project\'s .gm/exec-spool/out directory')
+function isSpoolOutDirectory(dir) {
+    return path.basename(dir) === 'out'
+        && path.basename(path.dirname(dir)) === 'exec-spool'
+        && path.basename(path.dirname(path.dirname(dir))) === '.gm'
+}
+
+function spoolFileCandidates(root, file) {
+    if (path.isAbsolute(file)) return [path.resolve(file)]
+    const underRoot = path.resolve(root, file)
+    const bare = !/[\\/]/.test(file)
+    return bare ? [underRoot, path.resolve(root, '.gm', 'exec-spool', 'out', file)] : [underRoot]
+}
+
+function validateSpoolFile(candidate) {
+    const dir = path.dirname(candidate)
+    if (!isSpoolOutDirectory(dir)) throw new Error(`spool file must name a file inside a .gm/exec-spool/out directory: ${candidate}`)
+    if (!fs.existsSync(candidate)) throw new Error(`spool file does not exist: ${candidate}`)
+    const resolvedOutDir = fs.realpathSync(dir)
+    const resolvedFile = fs.realpathSync(candidate)
+    if (!isSpoolOutDirectory(resolvedOutDir) || path.dirname(resolvedFile) !== resolvedOutDir) {
+        throw new Error(`spool file resolves outside the .gm/exec-spool/out directory that names it: ${candidate}`)
     }
     return { candidate, resolvedOutDir }
+}
+
+function spoolFilePath(root, file) {
+    const named = String(file ?? '')
+    if (!named) throw new Error('spool file must name a file inside a .gm/exec-spool/out directory')
+    if (named.split(/[\\/]+/).includes('..')) throw new Error('spool file must name a file inside a .gm/exec-spool/out directory: ".." is not allowed')
+    let failure
+    for (const candidate of spoolFileCandidates(root, named)) {
+        try {
+            return validateSpoolFile(candidate)
+        } catch (error) {
+            failure = error
+        }
+    }
+    throw failure
 }
 
 function openedDescriptorPath(fd) {
@@ -287,15 +315,24 @@ function resultField(value, field) {
     throw new Error(`field "${field}" was not found; omit field to read the complete raw response`)
 }
 
-export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_DEFAULT_CHARACTERS, cwd }) {
-    const root = cwd || process.cwd()
+function wholeNumber(value) {
+    if (typeof value === 'number') return Number.isInteger(value) ? value : undefined
+    if (typeof value === 'string' && /^[0-9]+$/.test(value.trim())) return Number(value.trim())
+    return undefined
+}
+
+export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_DEFAULT_CHARACTERS, cwd, root, projectPath }) {
+    const namedRoot = [cwd, root, projectPath].find(value => typeof value === 'string' && value.trim())
+    const rootDir = namedRoot ? path.resolve(namedRoot.trim()) : path.resolve(process.cwd())
     const toYaml = value => yaml.dump(value, { lineWidth: 100 })
     if (typeof result_file !== 'string' || !result_file) return toYaml({ error: 'result_file required' })
     if (field !== undefined && (typeof field !== 'string' || !field)) return toYaml({ error: 'field must be a non-empty string when provided' })
-    if (!Number.isInteger(offset) || offset < 0) return toYaml({ error: 'offset must be a non-negative integer' })
-    if (!Number.isInteger(limit) || limit < 1 || limit > RESULT_CHUNK_MAX_CHARACTERS) return toYaml({ error: `limit must be an integer from 1 through ${RESULT_CHUNK_MAX_CHARACTERS}` })
+    const pageOffset = wholeNumber(offset)
+    const pageLimit = wholeNumber(limit)
+    if (pageOffset === undefined || pageOffset < 0) return toYaml({ error: 'offset must be a non-negative integer' })
+    if (pageLimit === undefined || pageLimit < 1 || pageLimit > RESULT_CHUNK_MAX_CHARACTERS) return toYaml({ error: `limit must be an integer from 1 through ${RESULT_CHUNK_MAX_CHARACTERS}` })
     try {
-        const { fd, file, size } = openResultFile(root, result_file)
+        const { fd, file, size } = openResultFile(rootDir, result_file)
         try {
             let content
             let totalCharacters
@@ -306,15 +343,15 @@ export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_
                 content = JSON.stringify(selected.value, null, 2)
                 resolvedField = selected.path
                 totalCharacters = content.length
-                nextOffset = offset + limit < totalCharacters ? offset + limit : undefined
+                nextOffset = pageOffset + pageLimit < totalCharacters ? pageOffset + pageLimit : undefined
             } else {
-                ({ content, totalCharacters, nextOffset } = readUtf8Page(fd, size, offset, limit))
+                ({ content, totalCharacters, nextOffset } = readUtf8Page(fd, size, pageOffset, pageLimit))
             }
-            const page = field ? content.slice(offset, offset + limit) : content
+            const page = field ? content.slice(pageOffset, pageOffset + pageLimit) : content
             return toYaml({
                 result_file: file,
                 ...(resolvedField ? { field: resolvedField } : {}),
-                offset,
+                offset: pageOffset,
                 returned_characters: page.length,
                 total_characters: totalCharacters,
                 ...(nextOffset === undefined ? { complete: true } : { next_offset: nextOffset }),
