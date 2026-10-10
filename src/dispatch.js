@@ -482,7 +482,7 @@ export function liveDaemonSweepsProject(spoolDir) {
     if (pidAlive(status.pid) !== true) return false
     if (isFreshDaemonTimestamp(status.ts)) return true
     const globalStatus = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
-    return isFreshDaemonTimestamp(globalStatus?.ts) && Number(globalStatus?.pid) === Number(status.pid)
+    return Number(globalStatus?.pid) === Number(status.pid) || Number(status.pid) === globalDaemonPid()
 }
 
 const LEASES_DIR = path.join(AGENTPLUG_DIR, 'leases')
@@ -960,17 +960,20 @@ export function readDaemonLiveness(spoolDir) {
     }
         const now = Date.now()
     const globalStatus = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
+    const pid = typeof status.pid === 'number' ? status.pid : Number(status.pid) || null
+    const pidAliveFlag = pidAlive(pid)
     const projectFresh = isFreshDaemonTimestamp(status.ts, now)
     const globalFresh = isFreshDaemonTimestamp(globalStatus?.ts, now)
-    const sameLiveDaemon = globalFresh && Number(status.pid) === Number(globalStatus.pid)
-    const useGlobalHeartbeat = !projectFresh && sameLiveDaemon
+    const sameDaemon = Number(status.pid) === Number(globalStatus?.pid) || Number(pid) === globalDaemonPid()
+    const sameLiveDaemon = globalFresh && sameDaemon
+    const pidOwnsDaemon = pidAliveFlag === true && sameDaemon
+    const useGlobalHeartbeat = !projectFresh && (sameLiveDaemon || pidOwnsDaemon)
     const heartbeatTs = useGlobalHeartbeat ? globalStatus.ts : status.ts
     const heartbeatAgeMs = timestampAgeMs(heartbeatTs, now)
-    const pid = typeof status.pid === 'number' ? status.pid : Number(status.pid) || null
-        const pidAliveFlag = pidAlive(pid)
-        const alive = pidAliveFlag === true && (projectFresh || sameLiveDaemon)
+    const alive = pidAliveFlag === true && (projectFresh || sameLiveDaemon || pidOwnsDaemon)
     const busyForMs = typeof status.busy_until === 'number' ? status.busy_until - now : null
     const busy = busyForMs !== null && busyForMs > 0
+    const staleProjectHeartbeat = alive && !projectFresh
     const note = !alive
         ? runnerBinaryMissing()
             ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed`
@@ -979,7 +982,9 @@ export function readDaemonLiveness(spoolDir) {
                 : `daemon heartbeat is ${heartbeatAgeMs} ms stale (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) -- it is down, hung, or has not registered this project; its own log is ${GLOBAL_DAEMON_LOG_PATH} (this project's spool log is ${path.join(spoolDir, '.watcher.log')}) and it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}; this is not necessarily this dispatch's fault`
         : busy
             ? 'daemon is alive and still actively working on this project'
-            : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that'
+            : staleProjectHeartbeat
+                ? `daemon is alive: its own heartbeat for this project is ${timestampAgeMs(status.ts, now)} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms), which is expected for an idle project -- a project heartbeat only refreshes while the daemon is sweeping that project -- but pid ${pid} is alive and still owns this machine's daemon, so nothing is down`
+                : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that'
     const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note }
     if (pid !== null) liveness.pid = pid
     if (pidAliveFlag !== null) liveness.pid_alive = pidAliveFlag
