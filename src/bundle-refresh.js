@@ -9,8 +9,6 @@ const HANDOVER_GRACE_MS = 500
 
 const shortHash = (hex) => String(hex ?? '').slice(0, 12)
 
-// The port has to be free before the replacement can bind it, so the listening
-// socket is closed first and taken back only if the replacement never shows up.
 async function releasePort(server) {
     if (!server) return
     try {
@@ -43,11 +41,6 @@ async function takePortBack(server, host, port) {
     }
 }
 
-// A long-lived server is the process that most needs a refreshed bundle and the
-// one that would otherwise never see it: it was started from the old bytes and
-// keeps running them. The replacement binds the port and answers health before
-// this process leaves, so the port is only briefly unbound -- and it is taken
-// back if the replacement never arrives.
 export async function handOverToRefreshedBundle({ host = DEFAULT_HOST, port = DEFAULT_PORT, server = null, result = {} } = {}) {
     const { from, to, version, url } = result
     appendDiagnostic('bundle-refreshed', { port, url: url ?? null, from: from ?? null, to: to ?? null, version: version ?? null })

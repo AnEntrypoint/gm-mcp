@@ -130,9 +130,6 @@ export async function startHttpServer({ port, host } = {}) {
         socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
     })
 
-    // A listen failure is the whole process's reason for dying, so it is
-    // recorded before the throw reaches the top level: EADDRINUSE means another
-    // server owns this port, EACCES that the host refused it.
     try {
         await new Promise((resolve, reject) => {
             server.once('error', reject)
