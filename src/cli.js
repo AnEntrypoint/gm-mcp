@@ -4,7 +4,7 @@ import { gmDispatch } from './dispatch.js'
 import { runDevSync } from './dev-sync.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
-import { defaultHttpPort, ensureHttpSingleton, httpMcpUrl, probeHealth } from './singleton.js'
+import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs } from './singleton.js'
 
 const DISPATCH_USAGE = `gm-mcp ${BUNDLE_VERSION} dispatch <verb> [--body <json|@file|->] [--raw <text|@file|->] [payload]
 
@@ -93,6 +93,13 @@ function resolvePayloadValue(value) {
 }
 
 async function dispatchCommand() {
+    // A dispatch reaches gm with no MCP client involved, and agents run it
+    // constantly, so it doubles as the revival path for a shared HTTP server
+    // that has died. Awaited so the seed is not lost to this process's own
+    // exit, but `wait: false`: the spawn is detached and unref'd, so a caller
+    // that will never talk to the server does not pay its startup wait.
+    await ensureHttpSingleton({ port: defaultHttpPort(), wait: false }).catch(() => {})
+
     const argv = process.argv.slice(3)
     if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
         console.log(DISPATCH_USAGE)
@@ -188,7 +195,25 @@ const COMMANDS = {
             return 1
         }
         console.log(`gm-mcp ${BUNDLE_VERSION}: ${result.reused ? 'reusing' : 'started'} the shared HTTP server (pid ${result.pid}) -- ${result.url}`)
+        // Armed on every run, including one that found a server already up: a
+        // supervisor that was killed comes back on the next probe of this
+        // command instead of leaving the durable transport unwatched.
+        const supervision = ensureHttpSupervisor({ port })
+        if (supervision.started) {
+            console.log(`gm-mcp ${BUNDLE_VERSION}: armed the http supervisor (pid ${supervision.pid}, probing every ${Math.round(supervisorIntervalMs() / 1000)}s) -- it restarts ${result.url} when /health stops answering`)
+        } else {
+            console.log(`gm-mcp ${BUNDLE_VERSION}: supervisor ${supervision.reason}${supervision.pid ? ` (pid ${supervision.pid})` : ''}`)
+        }
         return 0
+    },
+    'http-supervise': async () => {
+        const portFlag = Number(flagValue('port'))
+        const port = Number.isInteger(portFlag) && portFlag > 0 ? portFlag : defaultHttpPort()
+        const seconds = Number(flagValue('interval'))
+        const intervalMs = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : supervisorIntervalMs()
+        const result = await runHttpSupervisor({ port, intervalMs })
+        console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.reason}`)
+        return result.supervised === false ? 1 : 0
     },
     'http-status': async () => {
         const port = defaultHttpPort()
@@ -210,6 +235,9 @@ usage:
                                    (stateless, so a dropped client is just another request)
   gm-mcp-server.js ensure-http     start the shared HTTP server if none is listening and print its url
   gm-mcp-server.js http-status     report whether the shared HTTP server is answering
+  gm-mcp-server.js http-supervise [--port N] [--interval S]
+                                   watch the shared HTTP server forever and restart it when
+                                   /health stops answering (ensure-http arms one for you)
   gm-mcp-server.js dispatch <verb> [--body <json>] [--raw <text>] [--cwd <dir>] [--no-ignore] [--help]
                                    run a gm dispatch from the shell and print its reply,
                                    with no MCP client involved
