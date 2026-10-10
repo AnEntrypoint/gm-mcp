@@ -93,11 +93,6 @@ function resolvePayloadValue(value) {
 }
 
 async function dispatchCommand() {
-    // A dispatch reaches gm with no MCP client involved, and agents run it
-    // constantly, so it doubles as the revival path for a shared HTTP server
-    // that has died. Awaited so the seed is not lost to this process's own
-    // exit, but `wait: false`: the spawn is detached and unref'd, so a caller
-    // that will never talk to the server does not pay its startup wait.
     await ensureHttpSingleton({ port: defaultHttpPort(), wait: false }).catch(() => {})
 
     const argv = process.argv.slice(3)
@@ -195,9 +190,6 @@ const COMMANDS = {
             return 1
         }
         console.log(`gm-mcp ${BUNDLE_VERSION}: ${result.reused ? 'reusing' : 'started'} the shared HTTP server (pid ${result.pid}) -- ${result.url}`)
-        // Armed on every run, including one that found a server already up: a
-        // supervisor that was killed comes back on the next probe of this
-        // command instead of leaving the durable transport unwatched.
         const supervision = ensureHttpSupervisor({ port })
         if (supervision.started) {
             console.log(`gm-mcp ${BUNDLE_VERSION}: armed the http supervisor (pid ${supervision.pid}, probing every ${Math.round(supervisorIntervalMs() / 1000)}s) -- it restarts ${result.url} when /health stops answering`)

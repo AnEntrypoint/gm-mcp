@@ -23,16 +23,9 @@ export function wantsHttpTransport() {
     return (process.env.GM_MCP_TRANSPORT || '').trim().toLowerCase() === 'http'
 }
 
-// Whatever transport this process was started on, it leaves a shared HTTP
-// server behind: an agent host configured with the HTTP url never starts one,
-// so a session whose port was never opened has no gm tools at all. Never
-// awaited -- the spawn is detached and unref'd, so a stdio session is neither
-// slowed nor held open by it.
 function seedHttpSingletonInBackground({ skipPort = null } = {}) {
     if (!httpSingletonEnabled()) return null
     const port = defaultHttpPort()
-    // This process is already that server; seeding would spawn a second one to
-    // die on EADDRINUSE.
     if (skipPort !== null && Number(skipPort) === port) {
         appendDiagnostic('http-singleton-self', { port, pid: process.pid })
         return null
@@ -50,8 +43,6 @@ export async function main() {
         const { host, port } = httpListenOptions()
         const { server } = await startHttpServer({ host, port })
         seedHttpSingletonInBackground({ skipPort: port })
-        // This process is the only thing that knows the port is meant to be
-        // up, so it arms the watcher that keeps it up after it is gone.
         ensureHttpSupervisor({ port })
         scheduleStaleDeployedBundleChecks((result) => handOverToRefreshedBundle({ host, port, server, result }))
         runReleaseBridgeInBackground()
