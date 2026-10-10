@@ -45,10 +45,6 @@ export function keepServingOnAsyncFailure() {
     process.stdin.on('error', report('stdin-error'))
     process.stderr.on('error', report('stderr-error'))
     process.on('exit', (code) => {
-        // uptime_ms carries this record past the log's repeat filter, which
-        // ignores pid: two servers exiting with the same code inside one
-        // minute each have to leave their own line, or the second death is
-        // invisible in the file and only ever reaches a stderr nobody kept.
         appendDiagnostic('exit', {
             code,
             uptime_ms: Date.now() - startedAt,

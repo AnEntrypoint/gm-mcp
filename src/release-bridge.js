@@ -261,7 +261,6 @@ async function reconcileRunner(release) {
     return { outcome: 'swapped', from: installed.version, to: release.version, sha256: newSha, previous_sha256: installedSha, backup }
 }
 
-// gm.build.json written by the bridge or the runner carries origin "release"; any other record marks a sideload (sideload-plugkit.sh writes none).
 function guestBuildIsSideload(dir) {
     const file = path.join(dir, GUEST_BUILD_FILE)
     return existsSync(file) && readJson(file)?.origin !== 'release'

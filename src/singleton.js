@@ -14,9 +14,6 @@ const PROBE_TIMEOUT_MS = 1_500
 const STARTUP_WAIT_MS = 20_000
 const STARTUP_POLL_MS = 250
 const SUPERVISOR_INTERVAL_MS = 15_000
-// A supervisor proves it is alive by refreshing its own state file on every
-// pass. A recorded pid alone is not liveness: an exited pid can be recycled,
-// and a re-arm that trusts it leaves the port unwatched for good.
 const SUPERVISOR_STATE_STALE_MS = 60_000
 const OFF_VALUES = new Set(['0', 'false', 'no', 'off'])
 
@@ -42,9 +39,6 @@ function envValue(name) {
     return raw === '' ? null : raw
 }
 
-// Opt-out, not opt-in. An agent host registered with the HTTP url never
-// launches this server, so when nothing is listening its connection fails for
-// the whole session and every gm tool is simply absent.
 export function httpSingletonEnabled() {
     for (const name of ['GM_MCP_NO_HTTP_SINGLETON', 'GM_MCP_HTTP_SINGLETON_OFF']) {
         const value = envValue(name)
@@ -78,8 +72,6 @@ function writeSingletonState(state) {
     }
 }
 
-// A recorded pid nobody answers for is history, not a claim on the port: drop
-// the file so no later reader takes a dead pid for a live server.
 function dropSingletonState() {
     try {
         rmSync(stateFilePath(), { force: true })
@@ -98,9 +90,6 @@ export async function probeHealth(port, timeoutMs = PROBE_TIMEOUT_MS) {
     }
 }
 
-// `excludePid` stops a caller accepting its own health answer as proof a
-// replacement is up: a server handing its port over is still the one answering
-// on it until it lets go.
 export async function waitForHealth(port, timeoutMs, excludePid = null) {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
@@ -111,8 +100,6 @@ export async function waitForHealth(port, timeoutMs, excludePid = null) {
     return null
 }
 
-// The singleton outlives whoever started it, so its stderr goes to the log
-// rather than to the pipe of a caller that is about to exit.
 function childStdio() {
     try {
         const file = logFilePath()
@@ -132,8 +119,6 @@ export function spawnServerProcess({ port = defaultHttpPort(), host = DEFAULT_HO
         detached: true,
         stdio,
         windowsHide: true,
-        // The child is the singleton: seeding from inside it would mean a
-        // server spawning a server on the port it already holds.
         env: { ...process.env, GM_MCP_TRANSPORT: 'http', GM_MCP_HTTP_SINGLETON: '0' },
     })
     if (fd !== null) closeSync(fd)
@@ -144,13 +129,6 @@ export function spawnServerProcess({ port = defaultHttpPort(), host = DEFAULT_HO
     return child.pid ?? null
 }
 
-// One shared server per machine, keyed by port. The health probe is the
-// authority -- a stale state file naming a dead pid means the port is free,
-// so the next caller starts a fresh one instead of trusting the file.
-//
-// `wait: false` is the shape for a short-lived caller: the server is spawned
-// detached and the caller returns at once instead of paying the startup wait of
-// a server it will not use itself.
 export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs = STARTUP_WAIT_MS, wait = true } = {}) {
     const live = await probeHealth(port)
     if (live) {
@@ -193,9 +171,6 @@ export function supervisorIntervalMs() {
     return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : SUPERVISOR_INTERVAL_MS
 }
 
-// Opt-out, like the singleton. A server nobody watches is the outage this
-// exists to end: nothing on the http registration's path starts the server, so
-// one that dies stays dead for every session that connects after it.
 export function supervisorEnabled() {
     const value = envValue('GM_MCP_HTTP_SUPERVISOR')
     return !(value !== null && OFF_VALUES.has(value))
@@ -210,7 +185,6 @@ function readSupervisorState(port) {
     }
 }
 
-// Atomic rename, so a reader never sees a half-written claim on the port.
 function writeSupervisorState(state) {
     const file = supervisorStateFilePath(state?.port)
     try {
@@ -229,11 +203,6 @@ function supervisorRunning(state, now = Date.now()) {
     return typeof state.ts === 'number' && now - state.ts < staleAfter
 }
 
-// One detached sibling per port that owns revival: it asks /health on a timer
-// and runs the same start path when the answer stops coming, so a server that
-// dies comes back with no session, no cron job and no human -- including one
-// killed too hard to write its own exit line. Detached and unref'd because a
-// supervisor parented by the caller dies with the caller's tree.
 export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
     if (!supervisorEnabled()) return { port, pid: null, started: false, reason: 'disabled' }
     const recorded = readSupervisorState(port)
@@ -246,8 +215,6 @@ export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = su
         detached: true,
         stdio,
         windowsHide: true,
-        // Inherited by every server this supervisor starts, so a restarted
-        // server does not arm a second supervisor that would race this one.
         env: { ...process.env, GM_MCP_HTTP_SUPERVISOR: '0' },
     })
     if (fd !== null) closeSync(fd)
@@ -259,10 +226,6 @@ export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = su
     return { port, pid: child.pid ?? null, started: true, reason: 'spawned' }
 }
 
-// The supervisor's own main loop, run in the foreground so a service manager
-// can hold it as its command. Two supervisors on one port are harmless rather
-// than fatal: the revival path is `ensureHttpSingleton`, which probes before it
-// spawns, so the loser of a claim race only ever finds a server already up.
 export async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
     const recorded = readSupervisorState(port)
     if (supervisorRunning(recorded)) {
@@ -281,9 +244,6 @@ export async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs =
         if (health) {
             serverPid = health.pid ?? serverPid
         } else if (await probeHealth(port)) {
-            // One probe that times out is not proof of death: an index pass or
-            // a dispatch storm holds a busy server past the probe's budget, and
-            // spawning then only makes a duplicate that dies on EADDRINUSE.
             appendDiagnostic('http-singleton-probe-false-negative', { port, pid: serverPid })
         } else {
             const previousPid = serverPid
@@ -300,8 +260,6 @@ export async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs =
     }
 }
 
-// Never awaited and never fatal: seeding is a side job for a caller that only
-// wanted to serve, so it must neither block it nor take it down with it.
 export function ensureHttpSingletonInBackground(options = {}) {
     if (!httpSingletonEnabled()) return null
     return ensureHttpSingleton(options)

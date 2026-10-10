@@ -238,9 +238,6 @@ export async function refreshStaleDeployedBundle() {
     return { outcome: 'refreshed', from: deployedHash, to: freshHash, url, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
 }
 
-// `onRefreshed` is how a long-lived server picks the new bundle up: without it
-// this process keeps running the bytes it was started from until someone else
-// restarts it.
 export function refreshStaleDeployedBundleInBackground(onRefreshed = null) {
     refreshStaleDeployedBundle()
         .then(async (result) => {
