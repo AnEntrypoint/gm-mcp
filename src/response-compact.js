@@ -463,7 +463,14 @@ export function compactWireResponse(response, outPath, receiptVerb = response?.v
 export const VERBATIM_TEXT_MARKER = '--- data (verbatim, no indentation added) ---'
 
 export function renderVerbatimFileText(out, toYaml) {
-    if (!out || typeof out !== 'object' || Array.isArray(out) || typeof out.data !== 'string') return undefined
-    const { data, ...rest } = out
-    return `${toYaml(rest)}${VERBATIM_TEXT_MARKER}\n${data}`
+    if (!out || typeof out !== 'object' || Array.isArray(out)) return undefined
+    if (typeof out.data === 'string') {
+        const { data, ...rest } = out
+        return `${toYaml(rest)}${VERBATIM_TEXT_MARKER}\n${data}`
+    }
+    if (out.verb === 'fs_read' && typeof out.content === 'string') {
+        const { content, ...rest } = out
+        return `${toYaml(rest)}${VERBATIM_TEXT_MARKER}\n${content}`
+    }
+    return undefined
 }

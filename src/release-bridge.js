@@ -56,15 +56,11 @@ function readText(file) {
 const UTF8_BOM = '\u{FEFF}'
 const stripBom = (text) => (typeof text === 'string' && text.startsWith(UTF8_BOM) ? text.slice(UTF8_BOM.length) : text)
 
-// A .version file written with a UTF-8 BOM reads as "\u{FEFF}0.1.1520"; the BOM is an encoding
-// artifact, not a developer sideload marker, so it is stripped before any semver test or compare.
 function readVersionText(file) {
     const text = readText(file)
     return text == null ? null : stripBom(text).trim()
 }
 
-// A marker written only because the .version file carried a BOM is a misclassification, not a
-// developer sideload: drop it so the guest can upgrade again.
 function clearBomMisclassifiedSideloadMarker(dir) {
     const markerPath = path.join(dir, GUEST_SIDELOAD_FILE)
     const marker = readJson(markerPath)
@@ -282,7 +278,6 @@ async function reconcileRunner(release) {
     return { outcome: 'swapped', from: installed.version, to: release.version, sha256: newSha, previous_sha256: installedSha, backup }
 }
 
-// gm.build.json written by the bridge or the runner carries origin "release"; any other record marks a sideload (sideload-plugkit.sh writes none).
 function guestBuildIsSideload(dir) {
     const file = path.join(dir, GUEST_BUILD_FILE)
     return existsSync(file) && readJson(file)?.origin !== 'release'

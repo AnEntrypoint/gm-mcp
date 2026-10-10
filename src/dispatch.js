@@ -136,10 +136,38 @@ function fsReadRequestedRange(body) {
     return { start: fsReadLineNumber(body[startKey]) ?? 1, end, count, startKey }
 }
 
+export function fsReadRangeCanonicalBody(verb, body) {
+    if (verb !== 'fs_read') return body
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return body
+    const requested = fsReadRequestedRange(body)
+    if (!requested) return body
+    const { start, end, count } = requested
+    if (start < 1) return body
+    if (end !== undefined && end < start) return body
+    if (count !== undefined && count < 1) return body
+    const canonical = {}
+    for (const [key, value] of Object.entries(body)) {
+        if (FS_READ_ACCEPTED_KEYS.includes(key)) continue
+        canonical[key] = value
+    }
+    canonical.startLine = start
+    const last = end ?? (count === undefined ? undefined : start + count - 1)
+    if (last !== undefined) canonical.endLine = last
+    return canonical
+}
+
+function fsReadReplyFields(out) {
+    const nested = out.data
+    if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return out
+    const { data, ...rest } = out
+    return Object.keys(nested).some((key) => key in rest) ? rest : { ...rest, ...nested }
+}
+
 export function applyFsReadRangeFallback(verb, body, out) {
     if (verb !== 'fs_read') return out
     if (!out || typeof out !== 'object' || Array.isArray(out)) return out
-    const guestRanged = Number.isFinite(Number(out.start_line)) || Number.isFinite(Number(out.returned_lines)) || typeof out.content === 'string'
+    const fields = fsReadReplyFields(out)
+    const guestRanged = Number.isFinite(Number(fields.start_line)) || Number.isFinite(Number(fields.returned_lines)) || typeof fields.content === 'string'
     if (guestRanged) return out
     const requested = fsReadRequestedRange(body)
     if (!requested) {
@@ -1731,7 +1759,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (globCoerced.error) return `error: ${globCoerced.error}`
             const diagnostic = objectBodyDiagnostic(verb, globCoerced.value)
             if (diagnostic) return `error: ${diagnostic}`
-            normalizedBody = withAssertedInstructionHash(verb, withCodesearchScalarsCoerced(verb, globCoerced.value))
+            const coerced = withCodesearchScalarsCoerced(verb, globCoerced.value)
+            normalizedBody = withAssertedInstructionHash(verb, fsReadRangeCanonicalBody(verb, coerced))
         }
     }
 
