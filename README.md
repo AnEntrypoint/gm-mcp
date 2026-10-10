@@ -168,11 +168,13 @@ node C:\Users\user\.gm-tools\gm-mcp-server.mjs http-status          # is it answ
 node C:\Users\user\.gm-tools\gm-mcp-server.mjs --http --port 8787   # run it in the foreground
 ```
 
-A stdio server seeds it too: on start it health-probes the port and spawns the
-shared HTTP server detached if nothing answers, so the durable transport is up
-before any client asks for it. `GM_MCP_HTTP_SINGLETON=0` opts out,
-`GM_MCP_HTTP_PORT` moves the port. Because no state is carried between requests,
-a restart of the HTTP server never loses an in-flight dispatch.
+Every entry point seeds it: a stdio server, an HTTP server started on another
+port and a `dispatch` run all health-probe the port and spawn the shared server
+detached when nothing answers, so the durable transport is up before any client
+asks for it and comes back by itself after a crash. `GM_MCP_HTTP_SINGLETON=0`
+(or `GM_MCP_NO_HTTP_SINGLETON=1`) opts out, `GM_MCP_HTTP_PORT` moves the port.
+Because no state is carried between requests, a restart of the HTTP server
+never loses an in-flight dispatch.
 
 The HTTP transport has its own stranding failure: if the port is empty when a
 session's client connects, that client answers `MCP server "gm" is not
@@ -200,6 +202,25 @@ node ~/.gm-tools/gm-mcp-server.mjs http-supervise [--port N] [--interval S]
 It is the same loop in the foreground, so it is also what a service manager wants as its command. Two supervisors never share a port: a second one finds the first one's pid in the state file and exits with `another supervisor owns this port`.
 
 State, both under `~/.agentplug` (`$AGENTPLUG_HOME` moves it): `gm-mcp-http.json` holds the server's pid and url, `gm-mcp-http-supervisor-<port>.json` the supervisor's. The health probe is the authority, so a stale file naming a dead pid never blocks a fresh start.
+
+### Installing that boot hook from the repo
+
+`scripts/install-autostart.mjs` writes the `ensure-http` call into the places this
+repository cannot hold itself -- the login/boot hook and the user crontab -- and
+then starts the server so the port is live immediately:
+
+```bash
+node scripts/install-autostart.mjs          # install, refresh, and ensure one is listening
+node scripts/install-autostart.mjs --check  # show what would change
+node scripts/install-autostart.mjs --uninstall
+```
+
+It is idempotent: every line it writes sits inside a marker block that a later
+run replaces wholesale, and it never starts a second server (the `ensure-http`
+health probe is the authority). `--hook`, `--cron-file`, `--log` and `--entry`
+move the targets; `--no-hook` or `--no-cron` skips one. The crontab it installs
+carries a `@reboot` entry and a five-minute entry, so a server that dies between
+invocations is back within five minutes even when nothing else runs gm.
 
 ## Development
 

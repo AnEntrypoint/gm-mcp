@@ -69,7 +69,6 @@ function clearBomMisclassifiedSideloadMarker(dir) {
     rmSync(markerPath, { force: true })
     appendDiagnostic('guest-sideload-marker-cleared', { file: markerPath, installed_marker: marker.installed_marker })
 }
-
 function writeAtomic(file, text) {
     const temp = `${file}.${process.pid}.${Date.now()}.tmp`
     try {

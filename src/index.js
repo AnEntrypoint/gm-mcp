@@ -2,9 +2,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createServer } from './mcp-server.js'
 import { installStdioGuards } from './transport-guard.js'
 import { startHttpServer, httpListenOptions } from './http-transport.js'
-import { ensureHttpSingleton } from './singleton.js'
+import { defaultHttpPort, ensureHttpSingletonInBackground, ensureHttpSupervisor, httpSingletonEnabled } from './singleton.js'
+import { handOverToRefreshedBundle } from './bundle-refresh.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runReleaseBridgeInBackground } from './release-bridge.js'
+import { appendDiagnostic, describeError } from './server-log.js'
 
 export { createServer } from './mcp-server.js'
 
@@ -21,19 +23,28 @@ export function wantsHttpTransport() {
     return (process.env.GM_MCP_TRANSPORT || '').trim().toLowerCase() === 'http'
 }
 
-function seedHttpSingletonWhenOptedIn() {
-    if ((process.env.GM_MCP_HTTP_SINGLETON || '').trim() !== '1') return
-    ensureHttpSingleton()
-        .then((result) => {
-            if (result?.url) return
-        })
-        .catch(() => {})
+function seedHttpSingletonInBackground({ skipPort = null } = {}) {
+    if (!httpSingletonEnabled()) return null
+    const port = defaultHttpPort()
+    if (skipPort !== null && Number(skipPort) === port) {
+        appendDiagnostic('http-singleton-self', { port, pid: process.pid })
+        return null
+    }
+    try {
+        return ensureHttpSingletonInBackground({ port })
+    } catch (error) {
+        appendDiagnostic('http-singleton-seed-failed', { port, error: describeError(error) })
+        return null
+    }
 }
 
 export async function main() {
     if (wantsHttpTransport()) {
-        await startHttpServer(httpListenOptions())
-        scheduleStaleDeployedBundleChecks()
+        const { host, port } = httpListenOptions()
+        const { server } = await startHttpServer({ host, port })
+        seedHttpSingletonInBackground({ skipPort: port })
+        ensureHttpSupervisor({ port })
+        scheduleStaleDeployedBundleChecks((result) => handOverToRefreshedBundle({ host, port, server, result }))
         runReleaseBridgeInBackground()
         return
     }
@@ -46,7 +57,7 @@ export async function main() {
 
     await server.connect(transport)
     console.error('gm-mcp: connected, serving on stdio')
-    seedHttpSingletonWhenOptedIn()
+    seedHttpSingletonInBackground()
     scheduleStaleDeployedBundleChecks()
     runReleaseBridgeInBackground()
 }

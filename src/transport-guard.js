@@ -39,12 +39,17 @@ export function keepServingOnAsyncFailure() {
     const report = (label) => (error) => {
         appendDiagnostic(label, { error: describeError(error), dispatches_inflight: inflightDispatchCount() })
     }
+    const startedAt = Date.now()
     process.on('uncaughtException', report('uncaught-exception'))
     process.on('unhandledRejection', report('unhandled-rejection'))
     process.stdin.on('error', report('stdin-error'))
     process.stderr.on('error', report('stderr-error'))
     process.on('exit', (code) => {
-        appendDiagnostic('exit', { code, dispatches_inflight: inflightDispatchCount() })
+        appendDiagnostic('exit', {
+            code,
+            uptime_ms: Date.now() - startedAt,
+            dispatches_inflight: inflightDispatchCount(),
+        })
     })
 }
 
