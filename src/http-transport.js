@@ -130,13 +130,23 @@ export async function startHttpServer({ port, host } = {}) {
         socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
     })
 
-    await new Promise((resolve, reject) => {
-        server.once('error', reject)
-        server.listen(port, host, () => {
-            server.removeListener('error', reject)
-            resolve()
+    try {
+        await new Promise((resolve, reject) => {
+            server.once('error', reject)
+            server.listen(port, host, () => {
+                server.removeListener('error', reject)
+                resolve()
+            })
         })
-    })
+    } catch (error) {
+        appendDiagnostic('http-listen-failed', {
+            host,
+            port,
+            code: error?.code ?? null,
+            error: describeError(error),
+        })
+        throw error
+    }
 
     appendDiagnostic('http-start', { host, port, path: MCP_PATH, pid: process.pid, version: BUNDLE_VERSION })
     console.error(`gm-mcp ${BUNDLE_VERSION}: serving streamable HTTP on http://${host}:${port}${MCP_PATH} (stateless)`)
