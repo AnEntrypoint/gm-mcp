@@ -234,14 +234,68 @@ export function fsReadSpillNote(out, text) {
     return ''
 }
 
-function capReplyText(text, maxChars, spillPath, spillNote = '') {
+function replyMatchesHolder(out) {
+    if (Array.isArray(out?.matches)) return out
+    if (out?.data !== null && typeof out?.data === 'object' && !Array.isArray(out.data) && Array.isArray(out.data.matches)) return out.data
+    return null
+}
+
+function declaredMatchesTotal(holder) {
+    const omitted = Number(holder?.matches_omitted)
+    if (Number.isFinite(omitted)) return omitted
+    const artifactCount = Number(holder?.result_artifact?.match_count)
+    if (Number.isFinite(artifactCount)) return artifactCount
+    const leadingCount = String(holder?.count ?? '').match(/^(\d+)/)
+    return leadingCount ? Number(leadingCount[1]) : NaN
+}
+
+function scanMatchesTotal(holder, sampleLength) {
+    const declared = declaredMatchesTotal(holder)
+    return Number.isFinite(declared) && declared > sampleLength ? declared : sampleLength
+}
+
+function renderMatchesKept(out, holder, kept, toYaml) {
+    const keptMatches = holder.matches.slice(0, kept)
+    return holder === out
+        ? toYaml({ ...out, matches: keptMatches })
+        : toYaml({ ...out, data: { ...out.data, matches: keptMatches } })
+}
+
+function largestMatchesKeptWithinBudget(out, holder, budget, toYaml) {
+    let low = 0
+    let high = holder.matches.length
+    while (low < high) {
+        const mid = Math.ceil((low + high) / 2)
+        if (renderMatchesKept(out, holder, mid, toYaml).length <= budget) low = mid
+        else high = mid - 1
+    }
+    return low
+}
+
+function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
     if (text.length <= maxChars) return text
     fs.writeFileSync(spillPath, text)
     const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
-    const cut = text.slice(0, budget)
-    const lastBreak = cut.lastIndexOf('\n')
-    const head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
-    return `${head}reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nspill_file: ${spillPath}\n${spillNote}`
+    const holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
+    let head = text
+    let matchesTotal
+    let matchesReturned
+    if (holder) {
+        matchesReturned = largestMatchesKeptWithinBudget(out, holder, budget, toYaml)
+        matchesTotal = scanMatchesTotal(holder, holder.matches.length)
+        head = renderMatchesKept(out, holder, matchesReturned, toYaml)
+    }
+    if (head.length > budget) {
+        const cut = head.slice(0, budget)
+        const lastBreak = cut.lastIndexOf('\n')
+        head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
+    }
+    let notice = `reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nspill_file: ${spillPath}\n${spillNote}`
+    if (matchesTotal !== undefined && matchesReturned < matchesTotal) {
+        notice += `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n`
+        notice += `matches_note: the matches list above is NOT complete -- it holds ${matchesReturned} of ${matchesTotal}, because this reply was cut at max_chars=${maxChars}; the full list is in result_artifact.path when one was reported and in spill_file for the entries cut here, or raise max_chars, or scope with "path"/"glob" and union the per-subtree results.\n`
+    }
+    return `${head}${notice}`
 }
 
 function shapeGitStatusReply(verb, body, out) {
@@ -1855,7 +1909,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             }
             const rendered = (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
             const spillNote = verb === 'fs_read' ? fsReadSpillNote(out, rendered) : ''
-                return capReplyText(rendered, replyMaxChars(max_chars), `${outPath}.reply.txt`, spillNote)
+            return capReplyText(rendered, replyMaxChars(max_chars), `${outPath}.reply.txt`, out, toYaml, spillNote)
         } catch (e) {
             const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
