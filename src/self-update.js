@@ -238,13 +238,19 @@ export async function refreshStaleDeployedBundle() {
     return { outcome: 'refreshed', from: deployedHash, to: freshHash, url, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
 }
 
-export function refreshStaleDeployedBundleInBackground() {
+// `onRefreshed` is how a long-lived server picks the new bundle up: without it
+// this process keeps running the bytes it was started from until someone else
+// restarts it.
+export function refreshStaleDeployedBundleInBackground(onRefreshed = null) {
     refreshStaleDeployedBundle()
-        .then((result) => {
+        .then(async (result) => {
             appendDiagnostic('self-update-check', result)
-            if (result.outcome === 'refreshed') {
-                console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} (${result.version}) from ${result.url}; takes effect on next connect (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`)
+            if (result.outcome !== 'refreshed') return
+            if (onRefreshed) {
+                await onRefreshed(result)
+                return
             }
+            console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} (${result.version}) from ${result.url}; takes effect on next connect (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`)
         })
         .catch((error) => {
             appendDiagnostic('self-update-failed', { error: error?.message ? String(error.message) : String(error) })
@@ -252,9 +258,9 @@ export function refreshStaleDeployedBundleInBackground() {
         })
 }
 
-export function scheduleStaleDeployedBundleChecks() {
-    refreshStaleDeployedBundleInBackground()
-    const timer = setInterval(refreshStaleDeployedBundleInBackground, checkIntervalMs())
+export function scheduleStaleDeployedBundleChecks(onRefreshed = null) {
+    refreshStaleDeployedBundleInBackground(onRefreshed)
+    const timer = setInterval(() => refreshStaleDeployedBundleInBackground(onRefreshed), checkIntervalMs())
     timer.unref()
     return timer
 }

@@ -39,12 +39,21 @@ export function keepServingOnAsyncFailure() {
     const report = (label) => (error) => {
         appendDiagnostic(label, { error: describeError(error), dispatches_inflight: inflightDispatchCount() })
     }
+    const startedAt = Date.now()
     process.on('uncaughtException', report('uncaught-exception'))
     process.on('unhandledRejection', report('unhandled-rejection'))
     process.stdin.on('error', report('stdin-error'))
     process.stderr.on('error', report('stderr-error'))
     process.on('exit', (code) => {
-        appendDiagnostic('exit', { code, dispatches_inflight: inflightDispatchCount() })
+        // uptime_ms carries this record past the log's repeat filter, which
+        // ignores pid: two servers exiting with the same code inside one
+        // minute each have to leave their own line, or the second death is
+        // invisible in the file and only ever reaches a stderr nobody kept.
+        appendDiagnostic('exit', {
+            code,
+            uptime_ms: Date.now() - startedAt,
+            dispatches_inflight: inflightDispatchCount(),
+        })
     })
 }
 
