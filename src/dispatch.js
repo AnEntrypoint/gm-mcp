@@ -369,6 +369,11 @@ const JSON_CONTROL_CHARACTER_ESCAPES = { '\n': '\\n', '\r': '\\r', '\t': '\\t', 
 
 const JSON_OBJECT_TEXT = /^\s*\{/
 
+// Every one of these is what an unescaped backslash, quote or stray brace in a hand-written JSON
+// string body looks like to JSON.parse; the repair hint has to name the escape, not the newline
+// trick that only applies to a raw line break inside a value.
+const ESCAPE_LOOKING_JSON_ERROR = /Bad escaped character|Unterminated string|Unexpected non-whitespace|Unexpected token|Expected ',' or '\}'/
+
 function nextNonWhitespaceIndex(text, from) {
     for (let index = from; index < text.length; index += 1) {
         const character = text[index]
@@ -389,12 +394,29 @@ function keyTokenFollows(text, from) {
     return colon >= 0 && text[colon] === ':'
 }
 
-function stringLiteralEndsAt(text, quoteIndex) {
+// A "}" that follows a quote is not evidence that the quote ends the literal: in
+// {"query":"a"}b"} the "}" belongs to the value, and treating it as the closing brace cuts the
+// value to "a" and leaves "}b" as junk that then fails the parse with an unrelated message. A
+// closer ends the literal only when it really closes every container still open and nothing but
+// whitespace follows, which is a check against the container stack rather than a guess from the
+// character.
+function closesEveryOpenContainer(text, fromIndex, openContainers) {
+    let index = fromIndex
+    for (let depth = openContainers.length; depth > 0; depth -= 1) {
+        const closer = openContainers[depth - 1] === '{' ? '}' : ']'
+        if (index < 0 || index >= text.length || text[index] !== closer) return false
+        index = nextNonWhitespaceIndex(text, index + 1)
+    }
+    return index < 0
+}
+
+function stringLiteralEndsAt(text, quoteIndex, openContainers) {
     const next = nextNonWhitespaceIndex(text, quoteIndex + 1)
     if (next < 0) return true
     const character = text[next]
-    if (character === ':' || character === '}' || character === ']') return true
+    if (character === ':') return true
     if (character === ',') return keyTokenFollows(text, next + 1)
+    if (character === '}' || character === ']') return closesEveryOpenContainer(text, next, openContainers)
     return false
 }
 
@@ -402,9 +424,12 @@ function repairedJsonStringLiterals(text) {
     let out = ''
     let inString = false
     let escaped = false
+    const openContainers = []
     for (let index = 0; index < text.length; index += 1) {
         const character = text[index]
         if (!inString) {
+            if (character === '{' || character === '[') openContainers.push(character)
+            else if ((character === '}' || character === ']') && openContainers.length > 0) openContainers.pop()
             if (character === '"') inString = true
             out += character
             continue
@@ -424,7 +449,7 @@ function repairedJsonStringLiterals(text) {
             out += code >= 0x20 ? character : JSON_CONTROL_CHARACTER_ESCAPES[character] || `\\u${code.toString(16).padStart(4, '0')}`
             continue
         }
-        if (stringLiteralEndsAt(text, index)) {
+        if (stringLiteralEndsAt(text, index, openContainers)) {
             out += character
             inString = false
             continue
@@ -519,8 +544,10 @@ export function normalizedObjectBody(verb, body) {
             const position = Number((/at position (\d+)/.exec(decoded.error.message) || [])[1])
             const field = Number.isInteger(position) ? jsonFieldCoveringPosition(decoded.scanned, position) : null
 
-            const repairHint = 'Quote each newline as \\n inside the JSON string (or pass the lines as an array), or pass body as an object instead of a JSON string'
-            return { error: `${verb} body${field ? `.${field}` : ''} is not valid JSON: ${decoded.error.message}. ${repairHint}.` }
+            const repairHint = ESCAPE_LOOKING_JSON_ERROR.test(decoded.error.message)
+                ? 'a backslash or a double quote inside a JSON string body must itself be escaped: one backslash is written \\\\ and one quote is written \\", so a regex like \\} has to reach the body as \\\\}; the same value is far simpler as an object body, where the client escapes it for you'
+                : 'quote each newline as \\n inside the JSON string (or pass the lines as an array), or pass body as an object instead of a JSON string'
+            return { error: `${verb} body${field ? `.${field}` : ''} is not valid JSON: ${decoded.error.message}. Repair it: ${repairHint}.` }
         }
         if (!decoded.value || typeof decoded.value !== 'object' || Array.isArray(decoded.value)) {
             return { error: `${verb} body string must decode to a JSON object; received ${Array.isArray(decoded.value) ? 'an array' : typeof decoded.value}.` }

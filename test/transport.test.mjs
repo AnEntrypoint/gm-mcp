@@ -114,7 +114,11 @@ await testAsync('the HTTP transport answers request after request', async () => 
         const first = await rpc('tools/list', {})
         assert.equal(first.status, 200)
         const firstNames = first.body.result.tools.map((t) => t.name).sort()
-        assert.deepEqual(['gm', 'gm_instruction', 'gm_result'].filter((name) => !firstNames.includes(name)), [])
+        // The served surface is the one codemode tool: every gm verb is reached through it, so it is
+        // the name a stateless HTTP client can rely on and the name that has to survive request
+        // after request.
+        assert.deepEqual(['gm_codemode'].filter((name) => !firstNames.includes(name)), [])
+        assert.ok(firstNames.length > 0)
 
         const second = await rpc('tools/list', {})
         assert.equal(second.status, 200)
