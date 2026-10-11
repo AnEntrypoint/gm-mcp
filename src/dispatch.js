@@ -1894,6 +1894,13 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         })
     }
 
+    // Computed before the request is published: the daemon's lane wait is bounded by the budget this
+    // caller is actually going to poll for, so the channel rides the body it publishes. Without it a
+    // caller passing timeout_seconds: 240 was still answered at the lane's own 120s, a timer it
+    // could neither see nor raise.
+    const requestedPollTimeoutMs = resume_task ? timeoutMilliseconds(timeout_seconds, DEFAULT_TIMEOUT_SECONDS) : pollTimeoutMs(verb, raw_body, timeout_seconds)
+    const timeoutMs = Math.min(requestedPollTimeoutMs, MCP_POLL_TIMEOUT_CEILING_MS)
+
     if (!resume_task) {
         const unavailable = runnerUnavailable(root, spoolDir)
         if (unavailable) return toYaml(unavailable)
@@ -1910,6 +1917,11 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             publishSpoolRequest(inDir, inPath, n, rawBodyText)
         } else {
             const fullBody = { ...normalizedBody, session_id }
+            // Reserved: the runner strips this member before it hashes the body for the lane's FIFO
+            // identity and before it hands the body to the plugin, so the channel is invisible to
+            // both. Only a JSON body carries it -- an extra line in a plain-text script body would
+            // be script the caller never wrote.
+            fullBody._agentplug_lane_wait_ms = timeoutMs
             if (verb === 'instruction') {
                 const leases = leaseSessionsFor(root)
                 if (leases) fullBody._lease_sessions = leases.filter(lease => lease.live).map(({ session_id: leaseSession, pid }) => ({ session_id: leaseSession, pid }))
@@ -1918,8 +1930,6 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         }
     }
 
-    const requestedPollTimeoutMs = resume_task ? timeoutMilliseconds(timeout_seconds, DEFAULT_TIMEOUT_SECONDS) : pollTimeoutMs(verb, raw_body, timeout_seconds)
-    const timeoutMs = Math.min(requestedPollTimeoutMs, MCP_POLL_TIMEOUT_CEILING_MS)
     const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1000)
     const deadline = Date.now() + timeoutMs
 
