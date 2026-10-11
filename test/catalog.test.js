@@ -4,6 +4,9 @@ import process from 'node:process'
 import test from 'node:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { RUNNER_REGISTRY_VERBS, verbToolName } from '../src/verbs.js'
+
+const EXPECTED_TOOLS = ['gm', 'gm_instruction', 'gm_result', ...RUNNER_REGISTRY_VERBS.map(verbToolName)].sort()
 
 test('the bundled server advertises every public MCP tool', { timeout: 10_000 }, async () => {
     const transport = new StdioClientTransport({
@@ -18,7 +21,7 @@ test('the bundled server advertises every public MCP tool', { timeout: 10_000 },
         const { tools } = await client.listTools()
         assert.deepEqual(
             tools.map(({ name }) => name).sort(),
-            ['gm', 'gm_instruction', 'gm_result'],
+            EXPECTED_TOOLS,
         )
     } finally {
         await client.close()
