@@ -3,7 +3,9 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { launcherLockMayBeReclaimed, liveDaemonSweepsProject, pidAlive, recordRunnerEnsureInflight, runnerEnsureInFlight } from '../src/dispatch.js'
+const agentplugHome = mkdtempSync(path.join(tmpdir(), 'gm-agentplug-home-'))
+process.env.AGENTPLUG_HOME = agentplugHome
+const { launcherLockMayBeReclaimed, liveDaemonSweepsProject, pidAlive, recordRunnerEnsureInflight, runnerEnsureInFlight } = await import('../src/dispatch.js')
 
 let passed = 0
 function test(name, fn) {
@@ -39,6 +41,14 @@ test('a fresh heartbeat from a dead daemon is not a live sweeper', () => {
     const dir = spool('dead-pid')
     writeStatus(dir, { pid: exitedPid, ts: Date.now() })
     assert.equal(liveDaemonSweepsProject(dir), false)
+})
+
+test('a dead project pid is still swept when this machine shared daemon is live', () => {
+    writeFileSync(path.join(agentplugHome, 'daemon-status.json'), JSON.stringify({ pid: process.pid, ts: Date.now(), active_projects: 3 }))
+    const dir = spool('dead-pid-shared-daemon')
+    writeStatus(dir, { pid: exitedPid, ts: Date.now() - 226_256 })
+    assert.equal(liveDaemonSweepsProject(dir), true)
+    rmSync(path.join(agentplugHome, 'daemon-status.json'), { force: true })
 })
 
 test('a fresh heartbeat from a live daemon is a live sweeper', () => {

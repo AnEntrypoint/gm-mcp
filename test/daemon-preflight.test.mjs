@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync }
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 process.env.GM_MCP_DAEMON_START_GRACE_MS = '400'
+process.env.GM_MCP_DAEMON_COLD_START_GRACE_MS = '400'
 process.env.GM_MCP_RUNNER_WATCHDOG = '0'
 const agentplugHome = mkdtempSync(path.join(tmpdir(), 'gm-agentplug-home-'))
 process.env.AGENTPLUG_HOME = agentplugHome
@@ -211,6 +212,62 @@ await test('a live daemon block carries the counts it already published', async 
     assert.equal(liveness.claimed_step_count, 7)
     assert.equal(liveness.queued_step_count, 3)
     assert.equal(liveness.gm_processor_capacity, 8)
+})
+
+await test('a stale project heartbeat under a live shared daemon dispatches instead of refusing', async () => {
+    writeGlobalStatus({ pid: process.pid, ts: Date.now(), active_projects: 8 })
+    const dir = project('stale-under-shared-daemon')
+    writeStatus(dir, { pid: exitedPid, ts: Date.now() - 226_256, queue_depth: 5, claimed_step_count: 0 })
+    const liveness = readDaemonLiveness(dir)
+    assert.equal(liveness.alive, true)
+    assert.equal(liveness.pid_alive, false)
+    assert.equal(liveness.shared_daemon_fresh, true)
+    assert.equal(liveness.shared_daemon_pid, process.pid)
+    assert.equal(liveness.heartbeat_source, 'shared-daemon')
+    assert.ok(liveness.project_heartbeat_age_ms > 200_000, String(liveness.project_heartbeat_age_ms))
+    assert.ok(liveness.heartbeat_age_ms < 20_000, String(liveness.heartbeat_age_ms))
+    assert.equal(await daemonNotRunning(rootOf(dir), dir, undefined), undefined)
+    writeGlobalStatus({})
+})
+
+await test('a stale project heartbeat with no daemon anywhere still refuses', async () => {
+    await waitOutOfBootGrace()
+    const dir = project('stale-no-daemon')
+    writeStatus(dir, { pid: exitedPid, ts: Date.now() - 226_256 })
+    const result = await daemonNotRunning(rootOf(dir), dir, undefined)
+    assert.equal(result?.error, 'daemon-not-running')
+    assert.ok(result.heartbeat_age_ms > 200_000, String(result.heartbeat_age_ms))
+})
+
+await test('queue_depth with nothing claimed is reported as a stuck queue, not as silence', async () => {
+    const dir = queueProject('queue-stuck')
+    queueFile(dir, 'instruction', 'mine.txt', 45_000)
+    writeStatus(dir, { pid: process.pid, ts: Date.now(), queue_depth: 5, claimed_step_count: 0 })
+    const liveness = readDaemonLiveness(dir)
+    assert.equal(liveness.queue_stuck, true)
+    assert.equal(liveness.queue_stuck_past_bound, true)
+    assert.ok(liveness.queue_stuck_for_ms >= 45_000, String(liveness.queue_stuck_for_ms))
+    assert.ok(liveness.queue_stuck_note.includes('claimed_step_count 0'), liveness.queue_stuck_note)
+    const state = readSpoolDispatchState(dir, 'instruction', 'mine')
+    assert.equal(state.queue_stuck, true)
+    assert.equal(state.state, 'queued_not_yet_claimed')
+})
+
+await test('a queue that is being claimed is not called stuck', async () => {
+    const dir = queueProject('queue-not-stuck')
+    queueFile(dir, 'instruction', 'mine.txt', 45_000)
+    writeStatus(dir, { pid: process.pid, ts: Date.now(), queue_depth: 5, claimed_step_count: 1 })
+    assert.equal(readDaemonLiveness(dir).queue_stuck, undefined)
+    assert.equal(readSpoolDispatchState(dir, 'instruction', 'mine').queue_stuck, undefined)
+})
+
+await test('a stuck queue names a synchronous plugin compile when the daemon says it is compiling', async () => {
+    const dir = queueProject('queue-stuck-compiling')
+    queueFile(dir, 'instruction', 'mine.txt', 45_000)
+    writeStatus(dir, { pid: process.pid, ts: Date.now(), queue_depth: 5, claimed_step_count: 0, plugin_compiling: true })
+    const liveness = readDaemonLiveness(dir)
+    assert.equal(liveness.plugin_compiling, true)
+    assert.ok(liveness.queue_stuck_note.includes('compiling a plugin wasm'), liveness.queue_stuck_note)
 })
 
 async function removeScratchTree(dir) {
