@@ -14,7 +14,7 @@ export const RUNNER_REGISTRY_VERBS = [
     'discipline-note', 'discipline-check-removal', 'discipline-audit', 'capability-resolve',
     'memory-namespace-audit', 'codeinsight-namespace-audit', 'calculus-model-check', 'phase-status', 'wait', 'sleep',
     'residual-scan', 'claim-audit', 'comment-audit', 'submodule-check', 'component-loader-reconcile', 'component-loader-hmr',
-    'auto-recall', 'instruction', 'prd-add', 'prd-resolve', 'prd-list', 'prd-defer', 'task-spawn', 'task-list',
+    'auto-recall', 'instruction', 'prd-add', 'prd-resolve', 'prd-list', 'prd-defer', 'prd-repair', 'task-spawn', 'task-list',
     'task-stop', 'task-output', 'memorize-continue', 'fsm-vendor', 'fsm-validate', 'predicates-md',
     'fsm-propose-override',
     'health', 'config_resolve', 'dataflow_resolve', 'status', 'close', 'filter', 'cache_get', 'cache_put',
