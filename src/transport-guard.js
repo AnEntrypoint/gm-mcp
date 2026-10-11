@@ -62,21 +62,37 @@ export function logSignalExits() {
     }
 }
 
+let clientGoneCheckPending = false
+
+function exitWhenClientStaysGone(reason) {
+    if (clientGoneCheckPending) return
+    clientGoneCheckPending = true
+    const recheck = () => {
+        if (inflightDispatchCount() > 0) return setTimeout(recheck, CLIENT_GONE_EXIT_RECHECK_MS)
+        appendDiagnostic('exit', { reason, dispatches_inflight: 0 })
+        process.exit(0)
+    }
+    setTimeout(recheck, CLIENT_GONE_EXIT_RECHECK_MS)
+}
+
 function surviveClientGone() {
     const reported = new Set()
     process.stdout.on('error', (error) => {
         const code = error?.code || 'unknown'
-        if (reported.has(code)) return
-        reported.add(code)
-        appendDiagnostic('stdout-pipe-gone', {
-            code,
-            error: describeError(error),
-            note: 'client stopped reading -- server stays up so a reconnect finds it alive',
-            dispatches_inflight: inflightDispatchCount(),
-        })
+        if (!reported.has(code)) {
+            reported.add(code)
+            appendDiagnostic('stdout-pipe-gone', {
+                code,
+                error: describeError(error),
+                note: 'client stopped reading -- exits after a recheck unless dispatches are in flight',
+                dispatches_inflight: inflightDispatchCount(),
+            })
+        }
+        exitWhenClientStaysGone('client-gone')
     })
     process.stdin.on('end', () => {
-        appendDiagnostic('stdin-ended', { note: 'client disconnect or platform pipe quirk -- server stays up' })
+        appendDiagnostic('stdin-ended', { note: 'client disconnected -- exits after a recheck unless dispatches are in flight' })
+        exitWhenClientStaysGone('client-gone')
     })
 }
 
