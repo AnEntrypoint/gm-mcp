@@ -4,6 +4,7 @@ import { gmDispatch, gmResult } from './dispatch.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { RUNNER_REGISTRY_VERBS, verbToolName } from './verbs.js'
+import { registerCodeMode } from './codemode.js'
 
 const numberLike = z.union([z.number(), z.string()])
 const booleanLike = z.union([z.boolean(), z.string()])
@@ -121,8 +122,10 @@ export function verbToolInputSchema(verb) {
 export function createServer() {
     const server = new McpServer({ name: 'gm-mcp', version: BUNDLE_VERSION })
     const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`
+    const tools = new Map()
+    const define = (name, config, handler) => tools.set(name, { ...config, handler })
 
-    server.registerTool(
+    define(
         'gm_instruction',
         {
             description: 'Dispatch a gm instruction and return its reply. Omitting session_id uses a stable server-local session.',
@@ -163,7 +166,7 @@ export function createServer() {
         }
     )
 
-    server.registerTool(
+    define(
         'gm_result',
         {
             description: 'Read a bounded page from a GM spool result named by a truncation notice. result_file may be an absolute path to any project\'s .gm/exec-spool/out spill file -- the *.json result or the *.json.reply.txt reply envelope a truncation notice names -- not only the project this server was started in, or a path/name resolved against cwd. limit is an integer from 1 through 16000 (default 12000); page a longer field with offset and the returned next_offset.',
@@ -201,7 +204,7 @@ export function createServer() {
         }
     }
 
-    server.registerTool(
+    define(
         'gm',
         {
             description: 'Run one gm spool verb dispatch and return its result as flat YAML. Unknown verbs answer unknown_verb. Plain-text verbs (exec_js, bash, python, crawl) take raw_body instead of body. Parameter docs: grep with body {"help": true} lists every mode.',
@@ -214,7 +217,7 @@ export function createServer() {
     )
 
     for (const verb of RUNNER_REGISTRY_VERBS) {
-        server.registerTool(
+        define(
             verbToolName(verb),
             {
                 description: `gm spool verb \`${verb}\`, dispatched exactly as the generic gm tool dispatches it. Plain-text verbs take raw_body instead of body.${VERB_DESCRIPTION_EXTRA[verb] ?? ''}`,
@@ -224,5 +227,6 @@ export function createServer() {
         )
     }
 
+    registerCodeMode(server, tools)
     return server
 }
