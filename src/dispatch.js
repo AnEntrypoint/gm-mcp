@@ -890,10 +890,16 @@ export function liveDaemonSweepsProject(spoolDir) {
     const status = readJsonFile(path.join(spoolDir, '.status.json'))
     if (!status) return false
     if (status.pid === undefined) return isFreshDaemonTimestamp(status.ts)
-    if (pidAlive(status.pid) !== true) return false
+    if (pidAlive(status.pid) !== true) return sharedDaemonWillSweep()
     if (isFreshDaemonTimestamp(status.ts)) return true
     const globalStatus = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
     return Number(globalStatus?.pid) === Number(status.pid) || Number(status.pid) === globalDaemonPid()
+}
+
+function sharedDaemonWillSweep() {
+    const sharedPid = globalDaemonPid()
+    if (sharedPid === null) return false
+    return isFreshDaemonTimestamp(readJsonFile(GLOBAL_DAEMON_STATUS_PATH)?.ts)
 }
 
 const LEASES_DIR = path.join(AGENTPLUG_DIR, 'leases')
@@ -1378,10 +1384,13 @@ export function readDaemonLiveness(spoolDir) {
     const sameDaemon = Number(status.pid) === Number(globalStatus?.pid) || Number(pid) === globalDaemonPid()
     const sameLiveDaemon = globalFresh && sameDaemon
     const pidOwnsDaemon = pidAliveFlag === true && sameDaemon
-    const useGlobalHeartbeat = !projectFresh && (sameLiveDaemon || pidOwnsDaemon)
+    const sharedPid = globalDaemonPid()
+    const sharedFresh = sharedPid !== null && globalFresh
+    const servedBySharedDaemon = sharedFresh
+    const useGlobalHeartbeat = !projectFresh && (sameLiveDaemon || pidOwnsDaemon || servedBySharedDaemon)
     const heartbeatTs = useGlobalHeartbeat ? globalStatus.ts : status.ts
     const heartbeatAgeMs = timestampAgeMs(heartbeatTs, now)
-    const alive = pidAliveFlag === true && (projectFresh || sameLiveDaemon || pidOwnsDaemon)
+    const alive = (pidAliveFlag === true && (projectFresh || sameLiveDaemon || pidOwnsDaemon)) || servedBySharedDaemon
     const busyForMs = typeof status.busy_until === 'number' ? status.busy_until - now : null
     const busy = busyForMs !== null && busyForMs > 0
     const staleProjectHeartbeat = alive && !projectFresh
@@ -1393,12 +1402,19 @@ export function readDaemonLiveness(spoolDir) {
                 : `daemon heartbeat is ${heartbeatAgeMs} ms stale (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) -- it is down, hung, or has not registered this project; its own log is ${GLOBAL_DAEMON_LOG_PATH} (this project's spool log is ${path.join(spoolDir, '.watcher.log')}) and it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}; this is not necessarily this dispatch's fault`
         : busy
             ? 'daemon is alive and still actively working on this project'
-            : staleProjectHeartbeat
+            : staleProjectHeartbeat && pidAliveFlag !== true
+                ? `the daemon process that last swept this project (pid ${pid}) is gone, but this machine's shared daemon (pid ${sharedPid}) is alive with a fresh heartbeat and sweeps every leased project, so a stale heartbeat here is a heartbeat-write gap rather than a dead daemon -- the dispatch is queued normally`
+                : staleProjectHeartbeat
                 ? `daemon is alive: its own heartbeat for this project is ${timestampAgeMs(status.ts, now)} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms), which is expected for an idle project -- a project heartbeat only refreshes while the daemon is sweeping that project -- but pid ${pid} is alive and still owns this machine's daemon, so nothing is down`
                 : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that'
     const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note }
     if (pid !== null) liveness.pid = pid
     if (pidAliveFlag !== null) liveness.pid_alive = pidAliveFlag
+    liveness.heartbeat_source = useGlobalHeartbeat ? 'shared-daemon' : 'project'
+    liveness.project_heartbeat_age_ms = timestampAgeMs(status.ts, now)
+    if (sharedPid !== null) liveness.shared_daemon_pid = sharedPid
+    liveness.shared_daemon_fresh = sharedFresh
+    if (status.plugin_compiling) liveness.plugin_compiling = true
     if (status.runtime) liveness.runtime = status.runtime
     if (typeof status.shared_process === 'boolean') liveness.shared_process = status.shared_process
     if (typeof status.queue_wait_ms === 'number') liveness.queue_wait_ms = status.queue_wait_ms
@@ -1413,7 +1429,36 @@ export function readDaemonLiveness(spoolDir) {
         liveness.runner_update_in_progress = true
         liveness.runner_update_waiting_ms = status.runner_update_waiting_ms ?? null
     }
+    const stuck = stuckQueueReport(spoolDir)
+    if (stuck) Object.assign(liveness, stuck)
     return liveness
+}
+
+const STUCK_QUEUE_BOUND_MS = 30_000
+
+function stuckQueueReport(spoolDir, pressure) {
+    const status = readJsonFile(path.join(spoolDir, '.status.json'))
+    const queueDepth = typeof status?.queue_depth === 'number' ? status.queue_depth : null
+    const claimedSteps = typeof status?.claimed_step_count === 'number' ? status.claimed_step_count : null
+    if (queueDepth === null || claimedSteps === null) return null
+    if (!(queueDepth > 0 && claimedSteps === 0)) return null
+    const scan = pressure ?? scanSpoolQueue(spoolDir, null)
+    const forMs = scan?.oldest_unclaimed_age_ms ?? null
+    const cause = status?.plugin_compiling === true
+        ? 'the daemon is compiling a plugin wasm synchronously on its sweep thread right now, which stalls the pass for every project'
+        : 'a synchronous plugin compile or a saturated shared plugin pool stalls the whole pass, not just this dispatch'
+    const unclaimed = scan?.project_unclaimed_count ?? null
+    const queueing = unclaimed === null
+        ? 're-dispatching cannot be claimed any sooner'
+        : `re-dispatching only adds to the ${unclaimed} already queued`
+    return {
+        queue_stuck: true,
+        queue_stuck_for_ms: forMs,
+        queue_stuck_bound_ms: STUCK_QUEUE_BOUND_MS,
+        queue_stuck_past_bound: forMs !== null && forMs >= STUCK_QUEUE_BOUND_MS,
+        queue_stuck_unclaimed_files: unclaimed,
+        queue_stuck_note: `queue_depth ${queueDepth} with claimed_step_count 0: the daemon counts work here and is claiming none of it, so the pass that claims requests is not reaching this project (${cause}). Those steps stay pending until the pass resumes; ${queueing}. Keep waiting on the dispatch you have with resume_task instead.`,
+    }
 }
 
 function runnerUnavailable(root, spoolDir) {
@@ -1431,9 +1476,13 @@ const DAEMON_START_GRACE_MS = Number(process.env.GM_MCP_DAEMON_START_GRACE_MS) >
     ? Number(process.env.GM_MCP_DAEMON_START_GRACE_MS)
     : 15_000
 const DAEMON_START_POLL_MS = 250
+const DAEMON_COLD_START_GRACE_MS = Number(process.env.GM_MCP_DAEMON_COLD_START_GRACE_MS) > 0
+    ? Number(process.env.GM_MCP_DAEMON_COLD_START_GRACE_MS)
+    : 90_000
 
-export async function awaitDaemonHeartbeat(spoolDir, signal) {
-    const deadline = Date.now() + DAEMON_START_GRACE_MS
+export async function awaitDaemonHeartbeat(spoolDir, signal, waitMs) {
+    const budgetMs = Number.isFinite(waitMs) && waitMs > 0 ? waitMs : DAEMON_START_GRACE_MS
+    const deadline = Date.now() + budgetMs
     while (true) {
         if (liveDaemonSweepsProject(spoolDir)) return 'recovered'
         if (Date.now() >= deadline) return 'still_dead'
@@ -1447,7 +1496,8 @@ export async function awaitDaemonHeartbeat(spoolDir, signal) {
 
 export async function daemonNotRunning(root, spoolDir, signal) {
     if (process.env.GM_MCP_DAEMON_PREFLIGHT === '0') return undefined
-    if (readDaemonLiveness(spoolDir).alive) return undefined
+    const liveness = readDaemonLiveness(spoolDir)
+    if (liveness.alive) return undefined
     const statusPath = path.join(spoolDir, '.status.json')
     const age = heartbeatAgeMs(spoolDir)
     if (age === null && !fs.existsSync(statusPath)) return undefined
@@ -1455,18 +1505,25 @@ export async function daemonNotRunning(root, spoolDir, signal) {
     if (readJsonFile(statusPath)?.runner_update_in_progress) return undefined
     ensureSpoolRunnerRunning(root)
     startRunnerWatchdog(root)
-    if (await awaitDaemonHeartbeat(spoolDir, signal) !== 'still_dead') return undefined
+    const coldStart = globalDaemonPid() === null
+    const graceMs = coldStart ? DAEMON_COLD_START_GRACE_MS : DAEMON_START_GRACE_MS
+    if (await awaitDaemonHeartbeat(spoolDir, signal, graceMs) !== 'still_dead') return undefined
+    if (globalDaemonPid() !== null) {
+        return undefined
+    }
     const staleFor = heartbeatAgeMs(spoolDir)
+    const stuck = stuckQueueReport(spoolDir)
     return {
         error: 'daemon-not-running',
         daemon_not_running: true,
         heartbeat_age_ms: staleFor,
         stale_after_ms: DAEMON_HEARTBEAT_STALE_MS,
-        waited_for_start_ms: DAEMON_START_GRACE_MS,
-        note: `this project's daemon heartbeat is ${staleFor} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) and did not come back within ${DAEMON_START_GRACE_MS} ms of asking for a runner, so no dispatch was written -- it would sit queued_not_yet_claimed and only fail at the poll timeout. Restart it and dispatch again: ${daemonRestartCommand(root)}`,
+        waited_for_start_ms: graceMs,
         checked_status_file: path.join(spoolDir, '.status.json'),
         daemon_log: GLOBAL_DAEMON_LOG_PATH,
         spool_log: path.join(spoolDir, '.watcher.log'),
+        ...(stuck ?? {}),
+        note: `no daemon process exists on this machine: it did not come back within ${graceMs} ms of asking for a runner (a cold start compiles the plugin wasm, so it is given ${DAEMON_COLD_START_GRACE_MS} ms), so no dispatch was written -- it would sit queued_not_yet_claimed and only fail at the poll timeout. Restart it and dispatch again: ${daemonRestartCommand(root)}`,
     }
 }
 
@@ -1485,7 +1542,7 @@ export function readSpoolDispatchState(spoolDir, verb, task) {
             : queued
                 ? `this request is still sitting UNCLAIMED in the spool queue (${queuedPath} exists) -- the daemon has not picked it up yet; it claims every settled ticket on each tick, so do NOT re-dispatch: call again with the same verb and cwd, resume_task set to this response's task and no body; writing a second dispatch only deepens the queue`
                 : 'neither an input file nor an out-file exists for this task id, so the spool holds no evidence either way: either the id was never written (a resume_task typo), or it was claimed and then lost to a daemon exit / self-update handoff. A lost claim normally leaves a dispatch_orphaned out-file behind; since none appeared, re-dispatch fresh rather than resuming this id'
-    return { state, claimed, queued, ...(stall ?? {}), ...(pressure ?? {}), note }
+    return { state, claimed, queued, ...(stall ?? {}), ...(pressure ?? {}), ...(stuckQueueReport(spoolDir, pressure) ?? {}), note }
 }
 
 const DISPATCH_WAIT_LEDGER_FILE = '.dispatch-wait.json'
