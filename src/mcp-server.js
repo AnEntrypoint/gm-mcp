@@ -37,6 +37,12 @@ const GIT_PUSH_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(GIT_PUSH_TOP_LEVEL_FIEL
 VERB_EXTRA_FIELDS['git_push'] = GIT_PUSH_TOP_LEVEL_FIELDS_ZOD
 const VERB_DESCRIPTION_EXTRA = { fs_read: ` Line ranges are 1-based and inclusive on both ends: ${FS_READ_RANGE_ALIASES.join(', ')} are accepted at the top level and folded into body, and the same keys inside body work identically. ${FS_READ_RANGE_PAIR_HELP} A range-looking key that is not one of them is an error naming the accepted keys rather than a silent whole file. Without any of them the whole file is returned, unchanged.` }
 const VERB_TOP_LEVEL_ALIASES = { fs_read: FS_READ_RANGE_ALIASES, git_finalize: GIT_COMMIT_TOP_LEVEL_FIELDS, git_commit: GIT_COMMIT_TOP_LEVEL_FIELDS, git_push: GIT_PUSH_TOP_LEVEL_FIELDS }
+// The verb refuses an absolute path even when it sits inside the project: containment is checked
+// on the relative form. That is intentional, and the refusal already names the relative form to
+// send, but the caller only learns it after a failed call -- so the tool description carries it.
+const FS_READ_PATH_RULE = ` "path" is resolved against the cwd you pass (the project root), never absolutely: an absolute path is refused even when it is inside that root, and so is any path carrying ".."; the refusal names the project-relative form to send instead. allowOutsideRoot:true widens a read verb to another root, never permission to climb out of one, and never applies to fs_write.`
+VERB_DESCRIPTION_EXTRA['fs_read'] += FS_READ_PATH_RULE
+VERB_DESCRIPTION_EXTRA['fs_readdir'] = FS_READ_PATH_RULE
 for (const verb of ['git_finalize', 'git_commit']) {
     VERB_DESCRIPTION_EXTRA[verb] = ` ${GIT_COMMIT_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body.`
 }

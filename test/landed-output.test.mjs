@@ -3,6 +3,11 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import * as yaml from 'js-yaml'
+// These roots are throwaway temp dirs, so nothing may be spawned inside them: a detached spool
+// runner holds its cwd, which on Windows makes the fixture directory undeletable and leaves a live
+// daemon behind after the run. The verbs under test read a landed result, never a runner.
+process.env.GM_MCP_DAEMON_RESPAWN = '0'
+process.env.GM_MCP_RUNNER_WATCHDOG = '0'
 import { gmDispatch } from '../src/dispatch.js'
 
 let passed = 0
