@@ -1326,7 +1326,9 @@ export function withTimeoutMsPrefix(verb, raw_body) {
     return `timeoutMs=${EXEC_DEFAULT_LIMIT_SECONDS * 1000}\n${raw_body}`
 }
 
-const DAEMON_HEARTBEAT_STALE_MS = 20000
+const DAEMON_HEARTBEAT_STALE_MS = Number(process.env.GM_MCP_DAEMON_HEARTBEAT_STALE_MS) > 0
+    ? Number(process.env.GM_MCP_DAEMON_HEARTBEAT_STALE_MS)
+    : 20_000
 
 const DAEMON_TIMESTAMP_FUTURE_SKEW_MS = 60000
 
