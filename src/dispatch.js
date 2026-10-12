@@ -637,8 +637,13 @@ function openedDescriptorPath(fd) {
         : process.platform === 'darwin' ? '/dev/fd'
             : undefined
     if (!descriptorRoot) return undefined
+    const descriptor = path.join(descriptorRoot, String(fd))
     try {
-        return fs.realpathSync(path.join(descriptorRoot, String(fd)))
+        const resolved = fs.realpathSync(descriptor)
+        // On darwin /dev/fd/<fd> is a devfs node that realpath hands back unchanged, so it names
+        // the descriptor and never the file: reporting it would fail every landed read on macOS.
+        // The dev/ino match the caller does against the lstat it took still catches a swap.
+        return resolved === descriptor || resolved.startsWith(descriptorRoot + path.sep) ? undefined : resolved
     } catch {
         return undefined
     }
