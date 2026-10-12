@@ -6,6 +6,8 @@
 
 The fold also never reached `git-push`, `git-commit` or `git-finalize` from `src/`: their aliases were keyed `git_push`/`git_commit`/`git_finalize` while `RUNNER_REGISTRY_VERBS` registers the hyphenated `git-push`/`git-commit`/`git-finalize`, and `VERB_EXTRA_FIELDS`, `VERB_TOP_LEVEL_ALIASES` and `VERB_DESCRIPTION_EXTRA` were read with the registry name. All three lookups now go through `verbToolName`, so a verb and its tool name resolve the same extras and the git verbs fold the keys their descriptions already advertise. `test/prd-list-mcp-tool.test.mjs` covers the schema, the fold, body precedence and the two spellings, and is in `npm test`. `BUNDLE_VERSION` moves to 0.2.30.
 
+A selector `prd-list` does not read is still dropped by the verb rather than refused: `body: {"filter": "NOPE-n-r1"}` answers the whole store (`count: 1002`), so the tool description claims no refusal it cannot honour.
+
 ## Unreleased - a verb's body is discoverable, max_chars binds, refusals name the valid set, and every callable name is enumerable
 
 Four frictions hit in one live session, all on the verb surface.
