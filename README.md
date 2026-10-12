@@ -118,10 +118,11 @@ while the pid stayed put, the dispatch came back complete at 42.3s carrying the
 notice, and the server moved to the new bundle only afterwards.
 
 Refusals report staleness and stay on the old bundle: `no-downgrade`,
-`installed-version-unknown`, `running-not-a-bundle` (a dev checkout would
-otherwise restart on every edit) and `transport-stdio` -- a stdio server cannot
-replace itself without detaching its client, so it names the mismatch and asks
-for a reconnect. Env: `GM_MCP_BUNDLE_DRIFT_INTERVAL_SECONDS` overrides the
+`installed-version-unknown` and `running-not-a-bundle` (a dev checkout would
+otherwise restart on every edit). A stdio server is not exempt -- it stays the
+client's process and relays the client's frames to a child running the installed
+bundle (`gm-mcp: stdio handed to pid <n>` on stderr), so the session is never
+detached and no reconnect is needed; see AGENTS.md. Env: `GM_MCP_BUNDLE_DRIFT_INTERVAL_SECONDS` overrides the
 30s watch, `GM_MCP_BUNDLE_DRIFT_RELOAD=0` turns every reload off and keeps the
 reporting.
 

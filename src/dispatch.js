@@ -6,7 +6,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
-import { bundleStalenessLine } from './bundle-drift.js'
+import { bundleStalenessNotice } from './bundle-drift.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
@@ -1623,6 +1623,11 @@ export function readSpoolDispatchState(spoolDir, verb, task) {
 
 const DISPATCH_WAIT_LEDGER_FILE = '.dispatch-wait.json'
 
+// The daemon rewrites that ledger when a dispatch changes stage and on a few answer paths, never on
+// a timer, so a row can outlive the stage it names by as long as the dispatch it describes. Past
+// this age the row is quoted as a snapshot rather than as a reading of what is happening now.
+const DISPATCH_WAIT_LEDGER_STALE_MS = 5000
+
 const DISPATCH_WAIT_STATE_NOTES = {
     never_claimed: 'the request file is in the spool but the daemon has not claimed it yet',
     claimed_not_yet_tracked: 'the daemon claimed the request but has not started tracking it yet',
@@ -1630,6 +1635,20 @@ const DISPATCH_WAIT_STATE_NOTES = {
     claimed_waiting_for_serial_lane: 'the daemon holds the request and is waiting for this project serial lane (git, store or state)',
     claimed_waiting_for_tool_queue: 'the daemon holds the request and is waiting in the FIFO queue for this plugin and verb',
     claimed_running: 'the daemon is executing the request',
+}
+
+// A lane wait with no lane named is not a lane wait: the daemon records a null lane for a verb that
+// has no project serial lane, and such a verb is admitted without ever queueing on one. What the row
+// then carries is the stage recorded at the moment of the claim, so the state text alone would have
+// the caller hunting for a lane that nothing holds.
+function dispatchWaitStateNote(state, lane) {
+    const note = DISPATCH_WAIT_STATE_NOTES[state] ?? 'unrecognized state'
+    if (state !== 'claimed_waiting_for_serial_lane' || lane !== null) return note
+    return `${note}, and this row names no lane: the daemon writes a null lane for a verb that has no project serial lane, and a verb with no lane is admitted without waiting for one, so this is the stage recorded at the moment of the claim rather than a lane this dispatch is queued on`
+}
+
+function dispatchWaitStaleNote(ledgerAgeMs) {
+    return `${DISPATCH_WAIT_LEDGER_FILE} was last rewritten ${ledgerAgeMs} ms ago, so this row is a snapshot taken then and not a reading of what the dispatch is doing now: the daemon rewrites the ledger when a dispatch changes stage and on a few answer paths, never on a timer, so a dispatch that has already moved past this stage keeps the older row until something else in this project triggers the next rewrite. row.stage_age_ms was measured at that same moment, not now, so neither number says how long the dispatch has been doing what it is doing at this instant`
 }
 
 export function readDispatchWaitRow(spoolDir, verb, task, outPath) {
@@ -1657,12 +1676,13 @@ export function readDispatchWaitRow(spoolDir, verb, task, outPath) {
             note: `${DISPATCH_WAIT_LEDGER_FILE} holds no row for this task, so the request was already answered or removed. Looked at out_path ${outPath}`,
         }
     }
-    const stateNote = DISPATCH_WAIT_STATE_NOTES[found.state] ?? 'unrecognized state'
+    const stale = header.ledger_age_ms !== null && header.ledger_age_ms >= DISPATCH_WAIT_LEDGER_STALE_MS
     return {
         ...header,
         row: {
             state: found.state,
-            state_meaning: stateNote,
+            state_meaning: dispatchWaitStateNote(found.state, found.lane ?? null),
+            snapshot_stale: stale,
             lane: found.lane ?? null,
             admission_kind: found.admission_kind ?? null,
             file_age_ms: found.file_age_ms ?? null,
@@ -1671,6 +1691,7 @@ export function readDispatchWaitRow(spoolDir, verb, task, outPath) {
             claim_path: found.claim_path || null,
             out_path: found.out_path,
         },
+        ...(stale ? { note: dispatchWaitStaleNote(header.ledger_age_ms) } : {}),
     }
 }
 
@@ -1882,7 +1903,7 @@ const VERBATIM_REPLY_VERBS = new Set(['fs_read', 'result', 'gm_result'])
 function withStaleBundleNotice(verb, text) {
     if (VERBATIM_REPLY_VERBS.has(verb)) return text
     if (typeof text !== 'string' || text === '') return text
-    const line = bundleStalenessLine()
+    const line = bundleStalenessNotice()
     if (!line) return text
     return `${text.endsWith('\n') ? text : `${text}\n`}\n${line}\n`
 }
