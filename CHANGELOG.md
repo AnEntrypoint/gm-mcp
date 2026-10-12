@@ -10,6 +10,73 @@ An HTTP server then replaces itself instead of waiting for a reconnect: `handOve
 
 Nothing reloads mid-dispatch. The handover defers while `inflightDispatchCount() > 0` (`bundle-handover-deferred`, retried on the next tick) and the outgoing process drains before `process.exit(0)`, so a reply already being written is finished, not truncated. Measured with a 40s dispatch: a newer bundle installed 4s in, `/health` `stale: true` with the pid unchanged, the dispatch complete at 42.3s carrying the notice, the server on the new bundle only afterwards. `no-downgrade`, `installed-version-unknown`, `running-not-a-bundle` and `transport-stdio` report and refuse rather than reload; a stdio server names the mismatch and asks for a reconnect.
 
+## Unreleased - a verb body field named `body` no longer collides with the dispatch envelope
+
+`foldVerbArgs` sorts a `gm.<verb>({...})` call into the dispatch envelope and the verb body by key: a key the tool schema declares stays at the top level, anything else moves into `body`. `body` is declared by every verb tool, because it is the dispatch envelope's body -- and `prd-add` also names its row prose `body`. So `gm.prd_add({id, subject, body, session_id})` put the prose in the envelope's `body`, and when that string did not decode as JSON the fold gave up and returned the envelope alone: `id` and `subject` were dropped, and the prose itself became the request body. `normalizedObjectBody` writes a string body that does not open with `{` out as literal raw text, so the spool file held `Grass near LOD is picked per 32 m chunk by an 8 m stride.` at byte 0 and the runner refused it before `prd-add` ever ran.
+
+The fold now asks the same question `normalizedObjectBody` asks -- does this string open with `{` -- and treats anything that does not as the verb's own field, so it lands as `body:{id, subject, body}` exactly as `gm.gm({verb:'prd-add', body:{id, subject, body}})` sends it. A string that does open with `{` keeps the dispatch-body path, including the repair hint a malformed JSON body gets.
+
+Measured by driving the real tool over a real MCP session -- a server started from the built bundle, `initialize`, `notifications/initialized`, then `tools/call` on `gm_codemode` -- against `C:/dev/spoint`, before and after:
+
+| call inside `gm_codemode` | before | after |
+| --- | --- | --- |
+| `gm.prd_add({id, subject, body, session_id})` | `error_code: failed`, `body_parse_error: true`, `body_parse_error_offset: 0`, `executed: false` | `ok:true, verb: prd-add, added: GM-VERB-BODY-SHAPE-TEST-7391` |
+| `gm['prd-add']({id, subject, body, session_id})` | same refusal | `ok:true, verb: prd-add, added: GM-VERB-BODY-SHAPE-TEST-7391-H` |
+| `gm.gm({verb:'prd-add', body:{id, subject, body, session_id}})` | `ok:true` (the workaround) | `ok:true, verb: prd-add, added: GM-VERB-BODY-SHAPE-TEST-7391-ENV` |
+
+The row is the non-vacuity proof: `prd_list {id:'GM-VERB-BODY-SHAPE-TEST-7391'}` answers `body: Grass near LOD is picked per 32 m chunk by an 8 m stride.`, so the prose reached the row and not only the request.
+
+
+## Unreleased - a search reply that lists no hits now says whether that zero is a finding
+
+`codesearch` returning nothing and `codesearch` proving the needle is absent were the same bytes on the
+wire: `{ok: true, matches: []}`. An agent searching for a symbol, getting that back, concludes the code
+does not exist and writes a fix against a phantom. The scan already reported the difference --
+`budget_exhausted`, `files_truncated`, `listing_incomplete`, `matches_truncated`, `partial`,
+`exhaustive: false` -- but those sat beside `matches: []` at the same depth as it, so nothing
+distinguished "I looked everywhere" from "I looked at some of it" or from "I looked at nothing".
+
+`withSearchIncompleteness` now runs on every search reply (`codesearch`, `grep`, `codeinsight`,
+`code_index`, `callers`, `callees`, `impact`) before it is cleaned, and annotates exactly the ambiguous
+shape:
+
+| reply | before | after |
+| --- | --- | --- |
+| `files_scanned: 0`, no matches | `ok:true, matches: []` | `searched_zero_files: true` plus `zero_hits_is_not_a_finding: "the scan searched 0 files, so this empty result is a scanner failure and NOT a finding..." |
+| no matches, `exhaustive: false` | `ok:true, matches: []` | `zero_hits_is_not_a_finding: "0 hits shown, but the scan was INCOMPLETE (exhaustive:false), so this zero is UNPROVEN and NOT a finding..." |
+| no matches, `budget_exhausted: true` | `ok:true, matches: []` | same banner, naming `budget_exhausted` |
+| no matches, `exhaustive: true` | `ok:true, matches: []` | untouched -- that zero is a finding |
+| matches found, `exhaustive: false` | unchanged | untouched -- a non-empty result is not ambiguous |
+
+Both keys are placed first in the reply so they are the first line read, and both are in
+`NEVER_TRUNCATE_KEYS` so a reply cut at a small `max_chars` keeps the sentence instead of an ellipsis.
+The annotation is deliberately silent whenever the scan was complete or the result is non-empty: an
+unscoped scan over a large tree is `exhaustive: false` by exclusion rule alone, so flagging every such
+call would bury the one that matters. `test/response-compact.test.mjs` pins all five rows, including
+that the banner survives `cleanResponse` at `inlineMax` 40 and survives `compactWireResponse`.
+## Unreleased - a landed spool file is refused as a link before its target is resolved
+
+Two defects in the landed-result read, both found by `verify` running on linux and macos for the first time (run 38224832255, head 4081582c; windows-latest passed because it skips both of them):
+
+- `validateSpoolFile` resolved the spool path before it looked at what the path names, so a link was refused by the containment check as `spool file resolves outside the .gm/exec-spool/out directory that names it: <...>/out/instruction-escape.json` rather than as a non-regular file. That containment message is not the message `test/landed-output.test.mjs` pinned, so the assertion held only on the platform that skipped the test: on linux and macos -- where the test ran -- it failed, even though both refusals refuse and neither reads the target. A link is now refused by `lstat` before `realpath` touches it, so the answer is `spool file must be an unlinked regular spool file` whether the link escapes the spool or not, and the target is never resolved at all.
+
+- `openSpoolRegularFile` asked `/dev/fd/<fd>` (darwin) or `/proc/self/fd/<fd>` (linux) for the open file's path and compared it with the realpath of the spool out directory. On darwin that entry does not resolve to the open file, so `path.relative` walked up out of the out directory and every landed result in the project was refused as `spool file is outside the GM output spool`, which is the `reply.ok === undefined` at `test/landed-output.test.mjs:42` on macos-latest; windows has no descriptor root and skipped the check entirely, and linux escaped it only because `/tmp` is not a symlink. The descriptor root is gone: the question is now asked of the path the descriptor was opened from, by device and inode, after the open -- which is the window a descriptor path could only guess at -- and it is the same code on every platform, so the platform that runs it is not the platform that decides it.
+
+Measured on a Windows box with `node test/landed-output.test.mjs`, before and after. The link fixtures are junctions on win32 and symlinks elsewhere -- a junction needs no privilege, so the link class is witnessed on every platform instead of only on the three that skipped it -- and each link target carries a secret that must not appear in the refusal:
+
+| landed file | before | after |
+| --- | --- | --- |
+| regular file | read | read (unchanged) |
+| hardlink to a file outside the spool | `spool file must be an unlinked regular spool file` | unchanged |
+| link inside the spool | `spool file must be an unlinked regular spool file` | unchanged |
+| link escaping the spool | `spool file resolves outside the .gm/exec-spool/out directory that names it: <...>/out/instruction-escape.json` | `spool file must be an unlinked regular spool file` |
+| out directory that is a link elsewhere | `spool file resolves outside the .gm/exec-spool/out directory that names it` | unchanged |
+| darwin, regular file (CI macos-latest) | `reply.ok` undefined, every landed result refused | the windows path, which reads it |
+
+The escaping-link row is the non-vacuity proof: that case fails on this box before the change and passes after, so the fix is witnessed here and not only on a darwin runner. The darwin row is the one row this box cannot measure, which is why the descriptor check had to stop being darwin-shaped: with the check gone from `/dev/fd`, darwin runs exactly the code windows runs. `landed-output.test.mjs` goes from 2 passed on windows to 5, and the whole `npm test` set passes.
+
+`bin/gm-mcp-server.js` was stale at 2928aaa -- committed 936154 bytes against a fresh build of 937062 -- which is why `verify` failed at its first step on all four platforms and never reached the contracts; it is rebuilt in this commit, as `check-bin-drift` requires.
+
 ## Unreleased - the ten git verbs that fold a revision now fold every other body field they read
 
 The revision lane closed with `limit`, `stat`, `path`, `mode`, `paths` and `files` still stripped at the top level: `GIT_TOP_LEVEL_FIELDS` named only `range|ref|rev`, so a client sending `{"limit": 2}` to `git_log` had the key removed by zod before `mergeVerbRangeFields` ran and the verb read its own default. `codemode` hides this -- `foldVerbArgs` moves an undeclared key into `body` before validation -- so it bites only a raw MCP caller of the verb tool.

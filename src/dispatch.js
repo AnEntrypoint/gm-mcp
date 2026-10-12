@@ -9,7 +9,7 @@ import { appendDiagnostic } from './server-log.js'
 import { bundleStalenessLine } from './bundle-drift.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
-import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 
 let inflightDispatches = 0
 
@@ -610,12 +610,17 @@ function validateSpoolFile(candidate) {
     const dir = path.dirname(candidate)
     if (!isSpoolOutDirectory(dir)) throw new Error(`spool file must name a file inside a .gm/exec-spool/out directory: ${candidate}`)
     if (!fs.existsSync(candidate)) throw new Error(`spool file does not exist: ${candidate}`)
+    // Refused before the path is resolved: a link is not a regular spool file whatever it names,
+    // and resolving it first made the refusal report the target instead of the link -- which is
+    // also why the refusal is the same message whether the link escapes the spool or not.
+    const before = fs.lstatSync(candidate)
+    if (!before.isFile() || before.nlink !== 1) throw new Error('spool file must be an unlinked regular spool file')
     const resolvedOutDir = fs.realpathSync(dir)
     const resolvedFile = fs.realpathSync(candidate)
     if (!isSpoolOutDirectory(resolvedOutDir) || path.dirname(resolvedFile) !== resolvedOutDir) {
         throw new Error(`spool file resolves outside the .gm/exec-spool/out directory that names it: ${candidate}`)
     }
-    return { candidate, resolvedOutDir }
+    return { candidate, before }
 }
 
 function spoolFilePath(root, file) {
@@ -633,38 +638,34 @@ function spoolFilePath(root, file) {
     throw failure
 }
 
-function openedDescriptorPath(fd) {
-    const descriptorRoot = process.platform === 'linux' ? '/proc/self/fd'
-        : process.platform === 'darwin' ? '/dev/fd'
-            : undefined
-    if (!descriptorRoot) return undefined
+// Follows a link rather than refusing it, so a path swapped for one after the open is seen as
+// what it now names; it reads no content.
+function statOrUndefined(candidate) {
     try {
-        return fs.realpathSync(path.join(descriptorRoot, String(fd)))
+        return fs.statSync(candidate)
     } catch {
         return undefined
     }
 }
 
 function openSpoolRegularFile(root, file) {
-    const { candidate, resolvedOutDir } = spoolFilePath(root, file)
-    const before = fs.lstatSync(candidate)
-    if (!before.isFile() || before.nlink !== 1) throw new Error('spool file must be an unlinked regular spool file')
+    const { candidate, before } = spoolFilePath(root, file)
     const fd = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
     try {
         const opened = fs.fstatSync(fd)
         if (!opened.isFile() || opened.nlink !== 1) throw new Error('spool file must be an unlinked regular spool file')
         if (opened.dev !== before.dev || opened.ino !== before.ino) throw new Error('spool file changed while opening')
         if (opened.size > RESULT_FILE_MAX_BYTES) throw new Error(`spool file exceeds ${RESULT_FILE_MAX_BYTES} byte limit`)
-        const descriptorPath = openedDescriptorPath(fd)
-        if (descriptorPath) {
-            // Resolved the same way the out directory was: a project reached through a symlink
-            // makes /dev/fd/<fd> report the path as opened, so an unresolved comparison against
-            // the realpath of the out directory refuses every landed result in such a project.
-            const resolvedDescriptor = fs.realpathSync(descriptorPath)
-            const relative = path.relative(resolvedOutDir, resolvedDescriptor)
-            if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-                throw new Error(`spool file is outside the GM output spool: ${resolvedDescriptor} is not under ${resolvedOutDir}`)
-            }
+        // Re-asked of the path the descriptor was opened from, after the open, on every platform.
+        // A descriptor root is not portable: /proc/self/fd exists on linux only and /dev/fd on
+        // darwin does not resolve to the open file at all, so containment read from such a path
+        // refused every landed result in a project reached through a symlink, while windows has
+        // no descriptor root to read and skipped the check entirely. The path answers it by
+        // identity instead -- the file it names now must be the file the descriptor holds -- and
+        // answers it after the open, which is the window a descriptor path could only guess at.
+        const stillNamed = statOrUndefined(candidate)
+        if (!stillNamed || stillNamed.dev !== opened.dev || stillNamed.ino !== opened.ino) {
+            throw new Error(`spool file is outside the GM output spool: ${candidate} no longer names the file that was opened`)
         }
         return { fd, file: candidate, size: opened.size, mtimeMs: opened.mtimeMs }
     } catch (error) {
@@ -2000,7 +2001,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
             const ranged = full_response ? parsed : applyFsReadRangeFallback(verb, normalizedBody, parsed)
-            const cleaned = full_response ? parsed : cleanResponse(ranged, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
+            const named = withSearchIncompleteness(ranged)
+            const cleaned = full_response ? named : cleanResponse(named, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
             let out = cleaned
             if (!full_response && cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
                 const { data, ...rest } = cleaned
