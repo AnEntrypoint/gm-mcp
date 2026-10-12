@@ -62,7 +62,9 @@ VERB_EXTRA_FIELDS['prd_list'] = PRD_LIST_TOP_LEVEL_FIELDS_ZOD
 // git_reset has a hard mode at all. git_revert reads ref alone, so a rev alias would fold a key the
 // verb ignores and look like a working call that silently reverted something else. git_branch is
 // absent for the opposite reason: it accepts only remote|all and refuses an unknown body field, so
-// a top-level ref would turn a working listing into a refusal.
+// a top-level ref would turn a working listing into a refusal. git_worktree_add reads ref as the
+// branch name and rev|commit|start_point as the commit to land on, so all three aliases are named
+// here: without them a caller asking for a worktree at a sha has no field this schema carries.
 // A pathspec field is read by body_pathspecs as one string or a list of them; git_revert, git_reset
 // and git_worktree_add read theirs with as_array/as_str instead, so those are typed to match or the
 // handler silently sees nothing. Every other type is the one the handler reads: as_bool and as_u64
@@ -86,7 +88,7 @@ const GIT_TOP_LEVEL_FIELDS = {
     git_merge: { ref: z.string(), ff_only: z.boolean(), message: z.string() },
     git_stash_pop: { ref: z.string() },
     git_stash_drop: { ref: z.string() },
-    git_worktree_add: { ref: z.string(), path: z.string(), create: z.boolean(), allowOutsideRoot: z.boolean() },
+    git_worktree_add: { ref: z.string(), rev: z.string(), commit: z.string(), start_point: z.string(), path: z.string(), create: z.boolean(), allowOutsideRoot: z.boolean() },
     git_status: { path: GIT_PATHSPEC_TOP_LEVEL_TYPE, paths: GIT_PATHSPEC_TOP_LEVEL_TYPE, files: GIT_PATHSPEC_TOP_LEVEL_TYPE, summary: z.boolean(), limit: z.number(), eol: z.boolean() },
 }
 for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) {
