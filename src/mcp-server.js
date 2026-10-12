@@ -58,7 +58,7 @@ for (const verb of ['git_finalize', 'git_commit']) {
     VERB_DESCRIPTION_EXTRA[verb] = ` ${GIT_COMMIT_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body.`
 }
 VERB_DESCRIPTION_EXTRA['git_push'] = ` ${GIT_PUSH_TOP_LEVEL_FIELDS.join(', ')} is accepted at the top level and folded into body, so {"rev":"<sha>"} and body:{"rev":"<sha>"} are the same call; a key named in both takes its value from body.`
-VERB_DESCRIPTION_EXTRA['prd_list'] = ` ${PRD_LIST_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"id":"<row id>"} and body:{"id":"<row id>"} are the same call; a key named in both takes its value from body. Without one of them the whole PRD is listed, and a selector prd-list does not read is refused by the verb rather than dropped.`
+VERB_DESCRIPTION_EXTRA['prd_list'] = ` ${PRD_LIST_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"id":"<row id>"} and body:{"id":"<row id>"} are the same call; a key named in both takes its value from body. Without one of them the whole PRD is listed, which is what a dropped selector used to look like.`
 
 export function mergeVerbRangeFields(verb, args = {}) {
     const verbKey = verbToolName(verb)
