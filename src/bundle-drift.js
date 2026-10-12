@@ -151,7 +151,7 @@ export function bundleStalenessLine(state = bundleDrift()) {
     const running = `${state.running_version} (sha ${shortHash(state.running_sha256)})`
     const action = state.reloadable
         ? 'reloading between dispatches now'
-        : `not reloading -- ${state.refusal_reason}`
+        : `not reloading -- ${state.refusal_reason} -- to serve it, restart this server process: a running gm-mcp cannot replace itself, so only a fresh start picks up new code`
     return `gm-mcp: this server is serving bundle ${running} but ${installed} is installed at ${state.path} -- ${action}`
 }
 

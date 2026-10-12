@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased - one notice per stale bundle, and a refusal that names what replaces it
+
+A drift the watch could reload printed its staleness line twice: once by the watch, then again by
+the handover that watch started. `handOverStdioToRefreshedBundle` and `handOverToRefreshedBundle`
+now print through `bundleStalenessNotice`, the same one-per-installed-bundle dedupe the watch uses,
+so a session is told once instead of on every handover. A refusal ended at its own reason --
+`a stdio server cannot replace itself without detaching its client` -- which says why nothing will
+happen and not what would: the line now ends with `-- to serve it, restart this server process:
+a running gm-mcp cannot replace itself, so only a fresh start picks up new code`. Measured on the
+rebuilt bundle with `GM_MCP_BUNDLE_DRIFT_INTERVAL_SECONDS=2`: two notices before this change, one
+after, handover still completing (`stdio handed to pid`, the relayed `tools/list` answered).
+
 ## Unreleased - a dispatch-wait row is quoted as the snapshot it is, and a lane wait naming no lane says so
 
 `dispatch_wait` was presented as a reading of what the daemon is doing with a dispatch at that
