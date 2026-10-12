@@ -5,7 +5,7 @@ import { verbBodySchema } from './verb-bodies.js'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
-const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns every callable name as {name, verb, description}; `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
+const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A verb that names a field `body` of its own (the row prose of prd-add) follows the same rule: a top-level `body` is the dispatch body only when it is an object or JSON object text, so gm.prd_add({id, subject, body}) reaches the verb as body:{id, subject, body}. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns every callable name as {name, verb, description}; `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
 
 function replyText(result) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
@@ -25,6 +25,11 @@ function unknownNameError(name, names) {
     return new Error(`no gm tool named ${name} -- nearest callable names: ${nearest.join(', ')}. Call gm.list() for every callable name.`)
 }
 
+// A dispatch body is an object or JSON object text. normalizedObjectBody in dispatch.js asks the
+// same question of a string body before it decides what to write: a string that does not open with
+// `{` is not JSON to it, and it writes the string out as literal raw text.
+const JSON_OBJECT_TEXT = /^\s*\{/
+
 // A verb tool's top-level schema is the dispatch envelope (body, raw_body, session_id, cwd, ...)
 // plus that verb's own top-level aliases. Anything else the caller names is a verb body field, and
 // zod strips unknown keys, so it has to move into `body` before validation or it never reaches the
@@ -43,9 +48,19 @@ export function foldVerbArgs(tool, args) {
         if (extra === null) extra = {}
         extra[key] = value
     }
-    if (extra === null) return args
     if (typeof envelope.raw_body === 'string') return envelope
     const named = envelope.body
+    // `body` names two different things: the dispatch envelope's body, and a body field of the verb
+    // itself -- prd-add calls its row prose `body`, so gm.prd_add({id, subject, body}) has to reach
+    // the verb as body:{id, subject, body}, exactly as gm.gm({verb:'prd-add', body:{...}}) does. A
+    // top-level `body` that does not open with `{` cannot be dispatch body text: normalizedObjectBody
+    // in dispatch.js applies the same test before it writes a string body out as literal raw text,
+    // which is what put the row prose at byte 0 of the spool file and made the request unparseable.
+    // A string that does open with `{` keeps the dispatch-body path, errors and all.
+    if (typeof named === 'string' && !JSON_OBJECT_TEXT.test(named)) {
+        return { ...envelope, body: { ...extra, body: named } }
+    }
+    if (extra === null) return args
     if (named === undefined) return { ...envelope, body: extra }
     let body = named
     if (typeof body === 'string') {
