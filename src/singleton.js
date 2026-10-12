@@ -1,6 +1,6 @@
 import { agentplugDir } from './paths.js'
-import { spawn } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -8,11 +8,18 @@ import { pidAlive } from './dispatch.js'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { keepServingOnAsyncFailure, logSignalExits } from './transport-guard.js'
 import { DEFAULT_HOST, DEFAULT_PORT, HEALTH_PATH, MCP_PATH } from './http-transport.js'
+import { BUNDLE_VERSION } from './bundle-version.js'
+import { compareVersions } from './self-update.js'
 
 const STATE_FILE_NAME = 'gm-mcp-http.json'
+const INSTANCE_FILE_PREFIX = 'gm-mcp-http-instance-'
+const SUPERVISOR_FILE_PATTERN = /^gm-mcp-http-supervisor-(\d+)\.json$/
 const PROBE_TIMEOUT_MS = 1_500
+const SWEEP_PROBE_TIMEOUT_MS = 400
 const STARTUP_WAIT_MS = 20_000
 const STARTUP_POLL_MS = 250
+const RETIRE_WAIT_MS = 5_000
+const RETIRE_POLL_MS = 200
 const SUPERVISOR_INTERVAL_MS = 15_000
 const SUPERVISOR_STATE_STALE_MS = 60_000
 const OFF_VALUES = new Set(['0', 'false', 'no', 'off'])
@@ -54,22 +61,40 @@ export function launchedEntryPath() {
     return fileURLToPath(import.meta.url)
 }
 
-function readSingletonState(port = defaultHttpPort()) {
+function readStateFile(filePath, port = null) {
     try {
-        const state = JSON.parse(readFileSync(stateFilePath(), 'utf8'))
-        if (state?.port !== port) return null
+        const state = JSON.parse(readFileSync(filePath, 'utf8'))
+        if (!state || typeof state !== 'object') return null
+        if (port !== null && Number(state.port) !== Number(port)) return null
         return state
     } catch {
         return null
     }
 }
 
-function writeSingletonState(state) {
+function writeStateFile(filePath, state) {
     try {
-        mkdirSync(path.dirname(stateFilePath()), { recursive: true })
-        writeFileSync(stateFilePath(), `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+        mkdirSync(path.dirname(filePath), { recursive: true })
+        const temporary = `${filePath}.${process.pid}.tmp`
+        writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+        renameSync(temporary, filePath)
+        return true
     } catch {
+        return false
     }
+}
+
+function dropFile(filePath) {
+    try {
+        rmSync(filePath, { force: true })
+        return true
+    } catch {
+        return false
+    }
+}
+
+function writeSingletonState(state) {
+    writeStateFile(stateFilePath(), state)
 }
 
 export function recordSingletonState({ port = defaultHttpPort(), pid = null } = {}) {
@@ -77,10 +102,12 @@ export function recordSingletonState({ port = defaultHttpPort(), pid = null } = 
 }
 
 function dropSingletonState() {
-    try {
-        rmSync(stateFilePath(), { force: true })
-    } catch {
-    }
+    dropFile(stateFilePath())
+}
+
+function dropSingletonStateForPort(port) {
+    const recorded = readStateFile(stateFilePath(), null)
+    if (Number(recorded?.port) === Number(port)) dropSingletonState()
 }
 
 export async function probeHealth(port, timeoutMs = PROBE_TIMEOUT_MS) {
@@ -133,20 +160,287 @@ export function spawnServerProcess({ port = defaultHttpPort(), host = DEFAULT_HO
     return child.pid ?? null
 }
 
-export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs = STARTUP_WAIT_MS, wait = true } = {}) {
+export function instanceFilePath(port = defaultHttpPort()) {
+    return path.join(agentplugDir(), `${INSTANCE_FILE_PREFIX}${port}.json`)
+}
+
+export function supervisorStateFilePath(port = defaultHttpPort()) {
+    return path.join(agentplugDir(), `gm-mcp-http-supervisor-${port}.json`)
+}
+
+export function versionBehind(candidate) {
+    if (typeof candidate !== 'string' || candidate === '') return false
+    return compareVersions(candidate, BUNDLE_VERSION) < 0
+}
+
+export function registeredHttpPorts() {
+    const ports = new Set()
+    let names = []
+    try {
+        names = readdirSync(agentplugDir())
+    } catch {
+        names = []
+    }
+    for (const name of names) {
+        if (name.startsWith(INSTANCE_FILE_PREFIX) && name.endsWith('.json')) {
+            const port = Number(name.slice(INSTANCE_FILE_PREFIX.length, -'.json'.length))
+            if (Number.isInteger(port) && port > 0) ports.add(port)
+            continue
+        }
+        const supervisorName = SUPERVISOR_FILE_PATTERN.exec(name)
+        if (supervisorName) {
+            const port = Number(supervisorName[1])
+            if (Number.isInteger(port) && port > 0) ports.add(port)
+        }
+    }
+    const recorded = readStateFile(stateFilePath(), null)
+    const recordedPort = Number(recorded?.port)
+    if (Number.isInteger(recordedPort) && recordedPort > 0) ports.add(recordedPort)
+    return [...ports].sort((left, right) => left - right)
+}
+
+export function recordHttpInstance({ port = defaultHttpPort(), host = DEFAULT_HOST, version = BUNDLE_VERSION, supervisorPid = null } = {}) {
+    const file = instanceFilePath(port)
+    const state = {
+        port,
+        host,
+        pid: process.pid,
+        version,
+        entry: launchedEntryPath(),
+        supervisor_pid: supervisorPid ?? null,
+        ts: Date.now(),
+    }
+    writeStateFile(file, state)
+    process.once('exit', () => {
+        const current = readStateFile(file, port)
+        if (Number(current?.pid) === process.pid) dropFile(file)
+    })
+    appendDiagnostic('http-instance-registered', { port, pid: process.pid, version, supervisor_pid: state.supervisor_pid })
+    return state
+}
+
+function liveSupervisorPid(port, instance = null, now = Date.now()) {
+    const state = readStateFile(supervisorStateFilePath(port), port)
+    if (state && Number.isInteger(Number(state.pid)) && pidAlive(state.pid) === true) {
+        const interval = Number.isFinite(state.interval_ms) ? state.interval_ms : SUPERVISOR_INTERVAL_MS
+        const staleAfter = Math.max(SUPERVISOR_STATE_STALE_MS, interval * 4)
+        if (typeof state.ts === 'number' && now - state.ts < staleAfter) return Number(state.pid)
+    }
+    const recorded = Number(instance?.supervisor_pid)
+    if (Number.isInteger(recorded) && recorded > 0 && pidAlive(recorded) === true) return recorded
+    return null
+}
+
+function recordedServerPid(instance, supervisor) {
+    for (const candidate of [Number(instance?.pid), Number(supervisor?.server_pid)]) {
+        if (Number.isInteger(candidate) && candidate > 0 && pidAlive(candidate) === true) return candidate
+    }
+    return null
+}
+
+export function establishedConnectionCount(port) {
+    const wanted = Number(port)
+    if (!Number.isInteger(wanted) || wanted <= 0) return null
+    let text = ''
+    try {
+        text = execFileSync('netstat', ['-an'], {
+            encoding: 'utf8',
+            windowsHide: true,
+            timeout: 10_000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        })
+    } catch {
+        return null
+    }
+    if (!text.includes('ESTABLISHED')) return 0
+    const localFieldIndex = process.platform === 'win32' ? 1 : 3
+    let parsed = 0
+    let attached = 0
+    for (const line of text.split('\n')) {
+        const fields = line.trim().split(/\s+/)
+        if (fields.length < 4 || !/^tcp/i.test(fields[0])) continue
+        if (!fields.includes('ESTABLISHED')) continue
+        const localPort = /[:.](\d+)$/.exec(fields[localFieldIndex] ?? '')
+        if (localPort === null) return null
+        parsed += 1
+        if (Number(localPort[1]) === wanted) attached += 1
+    }
+    return parsed === 0 ? null : attached
+}
+
+export function parentPidOf(pid) {
+    const wanted = Number(pid)
+    if (!Number.isInteger(wanted) || wanted <= 0) return null
+    try {
+        if (process.platform === 'win32') {
+            const text = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${wanted}'; if ($p) { $p.ParentProcessId }`], {
+                encoding: 'utf8',
+                windowsHide: true,
+                timeout: 15_000,
+                stdio: ['ignore', 'pipe', 'pipe'],
+            })
+            const fields = text.trim().split(/\s+/).filter(Boolean)
+            const parsed = Number.parseInt(fields[fields.length - 1] ?? '', 10)
+            return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+        }
+        const text = execFileSync('ps', ['-o', 'ppid=', '-p', String(wanted)], {
+            encoding: 'utf8',
+            windowsHide: true,
+            timeout: 10_000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        const parsed = Number.parseInt(text.trim(), 10)
+        return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+    } catch {
+        return null
+    }
+}
+
+async function retireHttpInstance({ port, pid, reason, version = null }) {
+    const target = Number(pid)
+    if (!Number.isInteger(target) || target <= 0 || target === process.pid) return false
+    appendDiagnostic('http-instance-retire', { port, pid: target, reason, running_version: version, installed_version: BUNDLE_VERSION })
+    try {
+        process.kill(target)
+    } catch (error) {
+        appendDiagnostic('http-instance-retire-signal-failed', { port, pid: target, reason, error: describeError(error) })
+        return false
+    }
+    const deadline = Date.now() + RETIRE_WAIT_MS
+    while (Date.now() < deadline) {
+        if (!(await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS))) break
+        await new Promise((resolve) => setTimeout(resolve, RETIRE_POLL_MS))
+    }
+    if (await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS)) {
+        appendDiagnostic('http-instance-retire-refused', { port, pid: target, reason, waited_ms: RETIRE_WAIT_MS })
+        return false
+    }
+    dropInstanceFiles(port)
+    appendDiagnostic('http-instance-retired', { port, pid: target, reason })
+    return true
+}
+
+function dropInstanceFiles(port) {
+    dropFile(instanceFilePath(port))
+    dropFile(supervisorStateFilePath(port))
+    dropSingletonStateForPort(port)
+}
+
+export async function reapDeadHttpInstances() {
+    const reaped = []
+    for (const port of registeredHttpPorts()) {
+        const instance = readStateFile(instanceFilePath(port), port)
+        const supervisor = readStateFile(supervisorStateFilePath(port), port)
+        if (recordedServerPid(instance, supervisor) !== null) continue
+        if (await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS)) continue
+        dropInstanceFiles(port)
+        appendDiagnostic('http-instance-reaped-dead', {
+            port,
+            instance_pid: instance?.pid ?? null,
+            supervisor_pid: supervisor?.pid ?? null,
+            recorded_server_pid: supervisor?.server_pid ?? null,
+        })
+        reaped.push({ port, reason: 'server-dead' })
+    }
+    return reaped
+}
+
+export async function replaceBehindHttpInstances({ now = Date.now() } = {}) {
+    const replaced = []
+    for (const port of registeredHttpPorts()) {
+        const instance = readStateFile(instanceFilePath(port), port)
+        const supervisor = readStateFile(supervisorStateFilePath(port), port)
+        if (recordedServerPid(instance, supervisor) === null) continue
+        if (instance === null && supervisor === null) continue
+        const health = await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS)
+        if (!health) continue
+        const pid = Number(health.pid ?? instance?.pid)
+        const version = health.version ?? instance?.version ?? null
+        if (!versionBehind(version)) continue
+        if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue
+        const supervisorPid = liveSupervisorPid(port, instance, now)
+        const supervisionArmed = supervisorPid !== null || Number(instance?.supervisor_pid ?? 0) > 0
+        if (supervisorPid !== null && supervisorPid !== process.pid) {
+            try {
+                process.kill(supervisorPid)
+            } catch {
+            }
+        }
+        const retired = await retireHttpInstance({ port, pid, reason: 'version-behind', version })
+        if (!retired) continue
+        const started = await ensureHttpSingleton({ port, wait: false, sweep: false })
+        if (supervisionArmed) ensureHttpSupervisor({ port, force: true })
+        appendDiagnostic('http-instance-replaced', { port, from_version: version, to_version: BUNDLE_VERSION, replaced_pid: pid, started_pid: started?.pid ?? null })
+        replaced.push({ port, pid, from_version: version, to_version: BUNDLE_VERSION, started_pid: started?.pid ?? null, reason: 'version-behind' })
+    }
+    return replaced
+}
+
+export async function reapOrphanedHttpInstances({ now = Date.now() } = {}) {
+    const reaped = []
+    for (const port of registeredHttpPorts()) {
+        const instance = readStateFile(instanceFilePath(port), port)
+        const pid = Number(instance?.pid)
+        if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue
+        if (Number(instance.supervisor_pid ?? 0) <= 0) continue
+        if (pidAlive(pid) !== true) continue
+        if (liveSupervisorPid(port, instance, now) !== null) continue
+        const parentPid = parentPidOf(pid)
+        if (parentPid === null || pidAlive(parentPid) !== false) continue
+        const attached = establishedConnectionCount(port)
+        if (attached !== 0) {
+            appendDiagnostic('http-instance-orphan-attached', { port, pid, connections: attached, parent_pid: parentPid })
+            continue
+        }
+        const retired = await retireHttpInstance({ port, pid, reason: 'orphaned-no-supervisor-dead-parent' })
+        if (retired) reaped.push({ port, pid, reason: 'orphaned' })
+    }
+    return reaped
+}
+
+export async function sweepHttpInstances(options = {}) {
+    const orphaned = await reapOrphanedHttpInstances(options)
+    const dead = await reapDeadHttpInstances()
+    const replaced = await replaceBehindHttpInstances(options)
+    return { dead, replaced, orphaned }
+}
+
+export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs = STARTUP_WAIT_MS, wait = true, sweep = true } = {}) {
+    if (sweep) await reapDeadHttpInstances()
+
     const live = await probeHealth(port)
-    if (live) {
+    if (live && !versionBehind(live.version)) {
         writeSingletonState({ port, pid: live.pid ?? null, url: httpMcpUrl(port), ts: Date.now(), reused: true })
         return { url: httpMcpUrl(port), port, pid: live.pid ?? null, reused: true, version: live.version ?? null }
     }
 
-    const recorded = readSingletonState(port)
+    if (live) {
+        const retired = await retireHttpInstance({ port, pid: live.pid ?? null, reason: 'version-behind', version: live.version ?? null })
+        if (!retired) {
+            appendDiagnostic('http-singleton-behind-kept', {
+                port,
+                pid: live.pid ?? null,
+                running_version: live.version ?? null,
+                installed_version: BUNDLE_VERSION,
+            })
+            writeSingletonState({ port, pid: live.pid ?? null, url: httpMcpUrl(port), ts: Date.now(), reused: true })
+            return { url: httpMcpUrl(port), port, pid: live.pid ?? null, reused: true, version: live.version ?? null }
+        }
+    }
+
+    const recorded = readStateFile(stateFilePath(), port)
     if (recorded?.pid && pidAlive(recorded.pid) === true) {
         const late = await waitForHealth(port, 5_000)
         if (late) {
             return { url: httpMcpUrl(port), port, pid: late.pid ?? recorded.pid, reused: true, version: late.version ?? null }
         }
-        appendDiagnostic('http-singleton-unresponsive', { port, recorded_pid: recorded.pid, note: 'a live pid holds the port but answers no health check' })
+        const retired = await retireHttpInstance({ port, pid: recorded.pid, reason: 'unresponsive-recorded-pid' })
+        appendDiagnostic('http-singleton-unresponsive', {
+            port,
+            recorded_pid: recorded.pid,
+            retired,
+            note: 'a live pid holds the port but answers no health check',
+        })
     }
     dropSingletonState()
 
@@ -166,10 +460,6 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
     return { url: httpMcpUrl(port), port, pid: health.pid ?? pid, reused: false, version: health.version ?? null }
 }
 
-export function supervisorStateFilePath(port = defaultHttpPort()) {
-    return path.join(agentplugDir(), `gm-mcp-http-supervisor-${port}.json`)
-}
-
 export function supervisorIntervalMs() {
     const seconds = Number((process.env.GM_MCP_HTTP_SUPERVISOR_INTERVAL_SECONDS || '').trim())
     return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : SUPERVISOR_INTERVAL_MS
@@ -181,23 +471,11 @@ export function supervisorEnabled() {
 }
 
 function readSupervisorState(port) {
-    try {
-        const state = JSON.parse(readFileSync(supervisorStateFilePath(port), 'utf8'))
-        return state?.port === port ? state : null
-    } catch {
-        return null
-    }
+    return readStateFile(supervisorStateFilePath(port), port)
 }
 
 function writeSupervisorState(state) {
-    const file = supervisorStateFilePath(state?.port)
-    try {
-        mkdirSync(path.dirname(file), { recursive: true })
-        const temporary = `${file}.${process.pid}.tmp`
-        writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
-        renameSync(temporary, file)
-    } catch {
-    }
+    writeStateFile(supervisorStateFilePath(state?.port), state)
 }
 
 function supervisorRunning(state, now = Date.now()) {
@@ -207,8 +485,8 @@ function supervisorRunning(state, now = Date.now()) {
     return typeof state.ts === 'number' && now - state.ts < staleAfter
 }
 
-export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs() } = {}) {
-    if (!supervisorEnabled()) return { port, pid: null, started: false, reason: 'disabled' }
+export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs(), force = false } = {}) {
+    if (!force && !supervisorEnabled()) return { port, pid: null, started: false, reason: 'disabled' }
     const recorded = readSupervisorState(port)
     if (supervisorRunning(recorded)) return { port, pid: recorded.pid, started: false, reason: 'already-running' }
 
@@ -260,6 +538,7 @@ export async function runHttpSupervisor({ port = defaultHttpPort(), intervalMs =
                 error: started.error ?? null,
             })
         }
+        await sweepHttpInstances()
         await new Promise((resolve) => setTimeout(resolve, intervalMs))
     }
 }

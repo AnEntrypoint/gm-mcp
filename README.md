@@ -248,6 +248,27 @@ It is the same loop in the foreground, so it is also what a service manager want
 
 State, both under `~/.agentplug` (`$AGENTPLUG_HOME` moves it): `gm-mcp-http.json` holds the server's pid and url, `gm-mcp-http-supervisor-<port>.json` the supervisor's. The health probe is the authority, so a stale file naming a dead pid never blocks a fresh start.
 
+### Instances are registered, and the registry is swept
+
+A `--http` server also registers itself as `gm-mcp-http-instance-<port>.json`
+(pid, bundle version, entry path, supervisor pid). The port is the instance
+identity, so a second `GM_MCP_HTTP_PORT`/`--port` is a legitimate second
+instance and keeps its own supervisor; the registry is what stops instances from
+piling up. `ensure-http` and every supervisor pass sweep it, and:
+
+- a port whose server no longer answers loses all three of its files, so that
+  number is reusable instead of the next launch walking to a new one;
+- an instance serving a bundle older than the installed one is **replaced in
+  place** -- the old server and its supervisor are stopped and a fresh server is
+  started on the *same* port, so an attached session reconnects to current code
+  instead of losing the port;
+- an instance with no live supervisor, a provably dead parent and zero
+  established connections is stopped outright. A client still attached is never
+  killed, and a parent that cannot be determined is left alone.
+
+`GM_MCP_HTTP_SUPERVISOR=0` still opts an instance out of supervision, and an
+instance registered that way is never swept as an orphan.
+
 ### Installing that boot hook from the repo
 
 `scripts/install-autostart.mjs` writes the `ensure-http` call into the places this

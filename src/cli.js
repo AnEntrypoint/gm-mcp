@@ -4,7 +4,7 @@ import { gmDispatch } from './dispatch.js'
 import { runDevSync } from './dev-sync.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
-import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs } from './singleton.js'
+import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances } from './singleton.js'
 
 const DISPATCH_USAGE = `gm-mcp ${BUNDLE_VERSION} dispatch <verb> [--body <json|@file|->] [--raw <text|@file|->] [payload]
 
@@ -184,6 +184,7 @@ const COMMANDS = {
     },
     'ensure-http': async () => {
         const port = defaultHttpPort()
+        await sweepHttpInstances()
         const result = await ensureHttpSingleton({ port })
         if (!result.url) {
             console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.error}`)
