@@ -56,9 +56,11 @@ const PRD_LIST_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(PRD_LIST_TOP_LEVEL_FIEL
     .describe(`Top-level alias of body.${key} for prd_list: folded into body when body does not already name it.`)]))
 VERB_EXTRA_FIELDS['prd_list'] = PRD_LIST_TOP_LEVEL_FIELDS_ZOD
 // The git verbs below resolve a revision from body fields the MCP layer has to let through:
-// git_log and git_diff read range|ref|rev through body_revision, in that order, and the rest read
-// ref alone. git_revert and git_reset read ref only -- neither reads rev, so a rev alias would fold
-// a key the verb ignores and look like a working call that silently reset to HEAD. git_branch is
+// git_log and git_diff read range|ref|rev through body_revision, in that order. git_reset reads
+// ref|rev and then mode|hard, so a rev alias folds into the revision it resolves and a hard alias
+// into the mode it selects -- both are named here, or a caller reading this schema cannot see that
+// git_reset has a hard mode at all. git_revert reads ref alone, so a rev alias would fold a key the
+// verb ignores and look like a working call that silently reverted something else. git_branch is
 // absent for the opposite reason: it accepts only remote|all and refuses an unknown body field, so
 // a top-level ref would turn a working listing into a refusal.
 // A pathspec field is read by body_pathspecs as one string or a list of them; git_revert, git_reset
@@ -79,7 +81,7 @@ const GIT_TOP_LEVEL_FIELDS = {
         path: GIT_PATHSPEC_TOP_LEVEL_TYPE, paths: GIT_PATHSPEC_TOP_LEVEL_TYPE, files: GIT_PATHSPEC_TOP_LEVEL_TYPE,
     },
     git_revert: { ref: z.string(), paths: z.array(z.string()) },
-    git_reset: { ref: z.string(), mode: z.string(), paths: z.array(z.string()), files: z.array(z.string()) },
+    git_reset: { ref: z.string(), rev: z.string(), mode: z.string(), hard: z.boolean(), paths: z.array(z.string()), files: z.array(z.string()) },
     git_checkout: { ref: z.string(), create: z.boolean(), path: GIT_PATHSPEC_TOP_LEVEL_TYPE, paths: GIT_PATHSPEC_TOP_LEVEL_TYPE, files: GIT_PATHSPEC_TOP_LEVEL_TYPE },
     git_merge: { ref: z.string(), ff_only: z.boolean(), message: z.string() },
     git_stash_pop: { ref: z.string() },
@@ -118,6 +120,11 @@ for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) {
     const sample = revisions.includes(first) ? 'rev' : 'value'
     VERB_DESCRIPTION_EXTRA[verb] = ` ${keys.join(', ')} ${keys.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${first}":"<${sample}>"} and body:{"${first}":"<${sample}>"} are the same call; a key named in both takes its value from body. Without one of them ${verb} takes its own default: ${defaults}.`
 }
+// The generated line above cannot say this for git_reset: its old handler read neither rev nor
+// hard, so a caller sending them got a mixed reset to HEAD that answered ok. Both are read now,
+// and the reply names the mode and scope it applied -- but a mode it cannot apply is refused
+// rather than substituted, so a dropped field is no longer silent either way.
+VERB_DESCRIPTION_EXTRA['git_reset'] += ` hard:true is the boolean form of mode:"hard" and rev is an alias of ref; paths scope the index only, so hard:true together with paths is refused. mode accepts soft|mixed|hard and hard must be a boolean -- anything else is refused with error_code invalid_args, never coerced to a default. Every ok reply carries mode, hard, reset_to and scope, so the operation that ran is readable without re-reading the repo.`
 
 export function mergeVerbRangeFields(verb, args = {}) {
     const verbKey = verbToolName(verb)
