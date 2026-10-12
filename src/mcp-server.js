@@ -36,8 +36,18 @@ const GIT_PUSH_TOP_LEVEL_FIELDS = ['rev']
 const GIT_PUSH_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(GIT_PUSH_TOP_LEVEL_FIELDS.map((key) => [key, GIT_COMMIT_TOP_LEVEL_FIELD_TYPES[key].optional()
     .describe(`Top-level alias of body.${key} for git_push: folded into body when body does not already name it.`)]))
 VERB_EXTRA_FIELDS['git_push'] = GIT_PUSH_TOP_LEVEL_FIELDS_ZOD
+const PRD_LIST_TOP_LEVEL_FIELDS = ['id', 'status', 'limit', 'full']
+const PRD_LIST_TOP_LEVEL_FIELD_TYPES = {
+    id: z.string(),
+    status: z.enum(['pending', 'ready', 'completed', 'blocked']),
+    limit: numberLike,
+    full: booleanLike,
+}
+const PRD_LIST_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(PRD_LIST_TOP_LEVEL_FIELDS.map((key) => [key, PRD_LIST_TOP_LEVEL_FIELD_TYPES[key].optional()
+    .describe(`Top-level alias of body.${key} for prd_list: folded into body when body does not already name it.`)]))
+VERB_EXTRA_FIELDS['prd_list'] = PRD_LIST_TOP_LEVEL_FIELDS_ZOD
 const VERB_DESCRIPTION_EXTRA = { fs_read: ` Line ranges are 1-based and inclusive on both ends: ${FS_READ_RANGE_ALIASES.join(', ')} are accepted at the top level and folded into body, and the same keys inside body work identically. ${FS_READ_RANGE_PAIR_HELP} A range-looking key that is not one of them is an error naming the accepted keys rather than a silent whole file. Without any of them the whole file is returned, unchanged.` }
-const VERB_TOP_LEVEL_ALIASES = { fs_read: FS_READ_RANGE_ALIASES, git_finalize: GIT_COMMIT_TOP_LEVEL_FIELDS, git_commit: GIT_COMMIT_TOP_LEVEL_FIELDS, git_push: GIT_PUSH_TOP_LEVEL_FIELDS }
+const VERB_TOP_LEVEL_ALIASES = { fs_read: FS_READ_RANGE_ALIASES, git_finalize: GIT_COMMIT_TOP_LEVEL_FIELDS, git_commit: GIT_COMMIT_TOP_LEVEL_FIELDS, git_push: GIT_PUSH_TOP_LEVEL_FIELDS, prd_list: PRD_LIST_TOP_LEVEL_FIELDS }
 // The verb refuses an absolute path even when it sits inside the project: containment is checked
 // on the relative form. That is intentional, and the refusal already names the relative form to
 // send, but the caller only learns it after a failed call -- so the tool description carries it.
@@ -48,9 +58,11 @@ for (const verb of ['git_finalize', 'git_commit']) {
     VERB_DESCRIPTION_EXTRA[verb] = ` ${GIT_COMMIT_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body.`
 }
 VERB_DESCRIPTION_EXTRA['git_push'] = ` ${GIT_PUSH_TOP_LEVEL_FIELDS.join(', ')} is accepted at the top level and folded into body, so {"rev":"<sha>"} and body:{"rev":"<sha>"} are the same call; a key named in both takes its value from body.`
+VERB_DESCRIPTION_EXTRA['prd_list'] = ` ${PRD_LIST_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"id":"<row id>"} and body:{"id":"<row id>"} are the same call; a key named in both takes its value from body. Without one of them the whole PRD is listed, and a selector prd-list does not read is refused by the verb rather than dropped.`
 
 export function mergeVerbRangeFields(verb, args = {}) {
-    const present = (VERB_TOP_LEVEL_ALIASES[verb] ?? []).filter((key) => args[key] !== undefined)
+    const verbKey = verbToolName(verb)
+    const present = (VERB_TOP_LEVEL_ALIASES[verbKey] ?? []).filter((key) => args[key] !== undefined)
     if (present.length === 0) return args
     const rest = { ...args }
     for (const key of present) delete rest[key]
@@ -68,7 +80,7 @@ export function mergeVerbRangeFields(verb, args = {}) {
     for (const key of present) {
         if (key in merged) continue
         const value = args[key]
-        const numericRange = verb === 'fs_read' && typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))
+        const numericRange = verbKey === 'fs_read' && typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))
         merged[key] = numericRange ? Number(value) : value
     }
     return { ...rest, body: merged }
@@ -144,7 +156,7 @@ const DISPATCH_FIELDS = {
 }
 
 export function verbToolInputSchema(verb) {
-    return { ...DISPATCH_FIELDS, ...(VERB_EXTRA_FIELDS[verb] ?? {}) }
+    return { ...DISPATCH_FIELDS, ...(VERB_EXTRA_FIELDS[verbToolName(verb)] ?? {}) }
 }
 
 export function createServer() {
@@ -251,7 +263,7 @@ export function createServer() {
         define(
             verbToolName(verb),
             {
-                description: `gm spool verb \`${verb}\`, dispatched exactly as the generic gm tool dispatches it. Plain-text verbs take raw_body instead of body.${VERB_DESCRIPTION_EXTRA[verb] ?? ''}${bodyShapeLine(verb)}`,
+                description: `gm spool verb \`${verb}\`, dispatched exactly as the generic gm tool dispatches it. Plain-text verbs take raw_body instead of body.${VERB_DESCRIPTION_EXTRA[verbToolName(verb)] ?? ''}${bodyShapeLine(verb)}`,
                 inputSchema: verbToolInputSchema(verb),
             },
             async (args = {}, extra) => verbDispatch(verb, args, extra),
