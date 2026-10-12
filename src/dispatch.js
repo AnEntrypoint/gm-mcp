@@ -295,6 +295,12 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
         notice += `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n`
         notice += `matches_note: the matches list above is NOT complete -- it holds ${matchesReturned} of ${matchesTotal}, because this reply was cut at max_chars=${maxChars}; the full list is in result_artifact.path when one was reported and in spill_file for the entries cut here, or raise max_chars, or scope with "path"/"glob" and union the per-subtree results.\n`
     }
+    const room = Math.max(0, maxChars - notice.length)
+    if (head.length > room) {
+        const cut = head.slice(0, room)
+        const lastBreak = cut.lastIndexOf('\n')
+        head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
+    }
     return `${head}${notice}`
 }
 

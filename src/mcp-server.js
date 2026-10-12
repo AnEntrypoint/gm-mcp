@@ -3,8 +3,9 @@ import { z } from 'zod'
 import { gmDispatch, gmResult } from './dispatch.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
-import { RUNNER_REGISTRY_VERBS, verbToolName } from './verbs.js'
+import { RUNNER_REGISTRY_VERBS, verbToolName, editDistance } from './verbs.js'
 import { registerCodeMode } from './codemode.js'
+import { renderBodyHint, bodyShapeLine } from './verb-bodies.js'
 
 const numberLike = z.union([z.number(), z.string()])
 const booleanLike = z.union([z.boolean(), z.string()])
@@ -81,20 +82,6 @@ function failedDispatchResult(verb, error) {
 
 const EDIT_VERB_PATTERN = /edit|patch|replace|modify/i
 
-function editDistance(left, right) {
-    const row = Array.from({ length: right.length + 1 }, (_, index) => index)
-    for (let i = 1; i <= left.length; i++) {
-        let diagonal = row[0]
-        row[0] = i
-        for (let j = 1; j <= right.length; j++) {
-            const above = row[j]
-            row[j] = Math.min(row[j] + 1, row[j - 1] + 1, diagonal + (left[i - 1] === right[j - 1] ? 0 : 1))
-            diagonal = above
-        }
-    }
-    return row[right.length]
-}
-
 export function nearestGmVerb(verb) {
     if (EDIT_VERB_PATTERN.test(verb)) return 'fs_write'
     return RUNNER_REGISTRY_VERBS.reduce((best, candidate) => editDistance(verb, candidate) < editDistance(verb, best) ? candidate : best)
@@ -106,6 +93,41 @@ function unknownVerbHint(verb, text) {
     const nearest = nearestGmVerb(verb)
     const edit = nearest === 'fs_write' ? ' gm has no edit verb: a whole-file write is the supported edit, so send the complete file with fs_write.' : ''
     return reply + 'verb_hint: "' + verb + '" is not a gm verb; the nearest existing verb is ' + nearest + '.' + edit + '\n'
+}
+
+const ERROR_LINE = /^error:\s*(.+?)\s*$/m
+const REQUIRED_FIELD_ERROR = /^([A-Za-z_][A-Za-z0-9_]*)\s+required$/
+const UNSUPPORTED_VALUE_ERROR = /^unsupported\s+([A-Za-z_][A-Za-z0-9_]*):\s*(\S+)$/
+
+function errorMessageOf(reply) {
+    const found = ERROR_LINE.exec(reply)
+    if (!found) return null
+    const raw = found[1].trim()
+    const first = raw[0]
+    if (raw.length >= 2 && (first === '"' || first === "'") && raw.endsWith(first)) return raw.slice(1, -1)
+    return raw
+}
+
+function verbRejectionHint(verb, text) {
+    const reply = String(text)
+    const message = errorMessageOf(reply)
+    if (!message) return ''
+    const unsupported = UNSUPPORTED_VALUE_ERROR.exec(message)
+    if (unsupported) {
+        const [, field] = unsupported
+        return `verb_body_hint: ${renderBodyHint(verb, field)}\nnext_dispatch_hint: ${verbToolName(verb)}\n`
+    }
+    const required = REQUIRED_FIELD_ERROR.exec(message)
+    if (!required) return ''
+    const [, field] = required
+    const named = renderBodyHint(verb, field)
+    const next = reply.includes('next_dispatch_hint') ? '' : `next_dispatch_hint: ${verbToolName(verb)}\n`
+    return `verb_body_hint: ${named}\n${next}`
+}
+
+function withVerbRejectionHint(verb, text) {
+    const hint = verbRejectionHint(verb, text)
+    return hint ? String(text) + hint : String(text)
 }
 
 const DISPATCH_FIELDS = {
@@ -129,7 +151,7 @@ export function createServer() {
     const server = new McpServer({ name: 'gm-mcp', version: BUNDLE_VERSION })
     const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`
     const tools = new Map()
-    const define = (name, config, handler) => tools.set(name, { ...config, handler })
+    const define = (name, config, handler, verb = null) => tools.set(name, { ...config, verb, handler })
 
     define(
         'gm_instruction',
@@ -145,6 +167,7 @@ export function createServer() {
                 resume_task: z.string().optional().describe('The task from a timed_out reply. Keeps polling that dispatch and sends no new body.'),
                 mode: z.string().optional().describe('investigate_readonly for read-only scan or report asks. It skips phase orchestration and touches no PRD or mutable state.'),
                 git_root_override: z.string().optional().describe('Pin the project root when cwd is not inside a git repository.'),
+                max_chars: z.number().optional().describe('Whole-reply cap in characters (default 24000). Past it the reply is cut, the full text is written to spill_file, and reply_truncated is true.'),
                 full_response: z.boolean().optional().describe('Return every guest field uncompacted.'),
             },
         },
@@ -163,13 +186,15 @@ export function createServer() {
                     poll_interval_seconds: args.poll_interval_seconds,
                     include_timing: args.include_timing,
                     resume_task: args.resume_task,
+                    max_chars: args.max_chars,
                     full_response: args.full_response,
                 }, extra?.signal)
-                return { content: [{ type: 'text', text }] }
+                return { content: [{ type: 'text', text: withVerbRejectionHint('instruction', text) }] }
             } catch (error) {
                 return failedDispatchResult('instruction', error)
             }
-        }
+        },
+        'instruction'
     )
 
     define(
@@ -204,7 +229,7 @@ export function createServer() {
     const verbDispatch = async (verb, args = {}, extra) => {
         try {
             const text = unknownVerbHint(verb, await gmDispatch({ verb, ...mergeVerbRangeFields(verb, args) }, extra?.signal))
-            return { content: [{ type: 'text', text }] }
+            return { content: [{ type: 'text', text: withVerbRejectionHint(verb, text) }] }
         } catch (error) {
             return failedDispatchResult(verb, error)
         }
@@ -226,10 +251,11 @@ export function createServer() {
         define(
             verbToolName(verb),
             {
-                description: `gm spool verb \`${verb}\`, dispatched exactly as the generic gm tool dispatches it. Plain-text verbs take raw_body instead of body.${VERB_DESCRIPTION_EXTRA[verb] ?? ''}`,
+                description: `gm spool verb \`${verb}\`, dispatched exactly as the generic gm tool dispatches it. Plain-text verbs take raw_body instead of body.${VERB_DESCRIPTION_EXTRA[verb] ?? ''}${bodyShapeLine(verb)}`,
                 inputSchema: verbToolInputSchema(verb),
             },
-            async (args = {}, extra) => verbDispatch(verb, args, extra)
+            async (args = {}, extra) => verbDispatch(verb, args, extra),
+            verb
         )
     }
 

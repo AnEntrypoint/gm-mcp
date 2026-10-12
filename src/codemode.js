@@ -1,9 +1,11 @@
 import { z } from 'zod'
 import { appendDiagnostic, describeError } from './server-log.js'
+import { canonicalToolName, nearestNames } from './verbs.js'
+import { verbBodySchema } from './verb-bodies.js'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
-const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({session_id, body: {...}})`. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` lists every tool with its description; `return gm.describe(name)` returns a tool\'s JSON input schema. Values returned by the body and console.log output are returned as text. Code runs in the gm-mcp server process with the same authority as exec_js.'
+const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({session_id, body: {...}})`. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns every callable name as {name, verb, description}; `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). Values returned by the body and console.log output are returned as text. Code runs in the gm-mcp server process with the same authority as exec_js.'
 
 function replyText(result) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
@@ -18,7 +20,21 @@ function validatedArgs(name, tool, args) {
     throw new Error(`${name} arguments invalid -- ${problems}`)
 }
 
+function unknownNameError(name, names) {
+    const nearest = nearestNames(name, names)
+    return new Error(`no gm tool named ${name} -- nearest callable names: ${nearest.join(', ')}. Call gm.list() for every callable name.`)
+}
+
 function bindings(tools, { session_id, cwd }, extra) {
+    const names = [...tools.keys()]
+    const resolve = (name) => {
+        const key = String(name)
+        if (tools.has(key)) return key
+        const canonical = canonicalToolName(key)
+        if (tools.has(canonical)) return canonical
+        const hyphenated = key.replace(/_/g, '-')
+        return tools.has(hyphenated) ? hyphenated : null
+    }
     const call = (name, args = {}) => {
         const tool = tools.get(name)
         const defaults = {}
@@ -26,16 +42,35 @@ function bindings(tools, { session_id, cwd }, extra) {
         if ('cwd' in tool.inputSchema && args.cwd === undefined && cwd !== undefined) defaults.cwd = cwd
         return tool.handler(validatedArgs(name, tool, { ...defaults, ...args }), extra).then(replyText)
     }
-    const gm = {
-        list: () => [...tools].map(([name, tool]) => ({ name, description: tool.description })),
+    const api = {
+        list: () => [...tools].map(([name, tool]) => ({ name, verb: tool.verb ?? null, description: tool.description })),
         describe: (name) => {
-            const tool = tools.get(name)
-            if (!tool) throw new Error(`no gm tool named ${name}`)
-            return z.toJSONSchema(z.object(tool.inputSchema))
+            const resolved = resolve(name)
+            if (!resolved) throw unknownNameError(name, names)
+            const tool = tools.get(resolved)
+            const schema = verbBodySchema(tool.verb)
+            return {
+                name: resolved,
+                verb: tool.verb ?? null,
+                input_schema: z.toJSONSchema(z.object(tool.inputSchema)),
+                body_schema: schema.declared
+                    ? { declared: true, required: schema.required, fields: schema.fields }
+                    : { declared: false, note: schema.note },
+            }
         },
     }
-    for (const name of tools.keys()) gm[name] = (args) => call(name, args)
-    return gm
+    return new Proxy(api, {
+        get(target, property) {
+            if (typeof property !== 'string') return target[property]
+            if (property in target) return target[property]
+            const resolved = resolve(property)
+            if (resolved) return (args) => call(resolved, args)
+            throw unknownNameError(property, names)
+        },
+        has(target, property) {
+            return typeof property === 'string' && (property in target || resolve(property) !== null)
+        },
+    })
 }
 
 function formatValue(value) {
