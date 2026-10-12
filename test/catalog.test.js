@@ -4,26 +4,63 @@ import process from 'node:process'
 import test from 'node:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { RUNNER_REGISTRY_VERBS, verbToolName } from '../src/verbs.js'
+import { RUNNER_REGISTRY_VERBS } from '../src/verbs.js'
 
-const EXPECTED_TOOLS = ['gm', 'gm_instruction', 'gm_result', ...RUNNER_REGISTRY_VERBS.map(verbToolName)].sort()
+// The served surface is the one codemode tool: every gm verb is reached through it, so the
+// bundle's own tool list no longer names each verb. What has to hold is that the tool is
+// served at all, that every registry verb is still reachable by name through it, and that a
+// verb reached that way still carries the body fields its spool schema declares -- a schema
+// that silently drops a field is the defect this file exists to catch.
+const BUNDLE = path.resolve('bin/gm-mcp-server.js')
 
-test('the bundled server advertises every public MCP tool', { timeout: 10_000 }, async () => {
+async function withBundle(fn) {
     const transport = new StdioClientTransport({
         command: process.execPath,
-        args: [path.resolve('bin/gm-mcp-server.js')],
+        args: [BUNDLE],
         stderr: 'pipe',
     })
     const client = new Client({ name: 'gm-mcp-catalog-test', version: '0.0.0' })
-
     try {
         await client.connect(transport)
-        const { tools } = await client.listTools()
-        assert.deepEqual(
-            tools.map(({ name }) => name).sort(),
-            EXPECTED_TOOLS,
-        )
+        return await fn(client)
     } finally {
         await client.close()
     }
+}
+
+const codemodeReply = async (client, code) => {
+    const result = await client.callTool({ name: 'gm_codemode', arguments: { code, cwd: process.cwd() } })
+    const text = (result.content ?? []).map((part) => part.text ?? '').join('\n')
+    return { text, parsed: JSON.parse(text) }
+}
+
+test('the bundled server serves the codemode tool', { timeout: 30_000 }, async () => {
+    await withBundle(async (client) => {
+        const { tools } = await client.listTools()
+        assert.deepEqual(tools.map(({ name }) => name).sort(), ['gm_codemode'])
+        const [codemode] = tools
+        assert.equal(codemode.inputSchema.properties.code.type, 'string')
+        assert.ok(codemode.inputSchema.required.includes('code'))
+    })
+})
+
+test('every registry verb is reachable through the served tool', { timeout: 30_000 }, async () => {
+    await withBundle(async (client) => {
+        const { parsed } = await codemodeReply(client, 'return gm.list().map((entry) => entry.verb ?? entry.name)')
+        assert.ok(parsed.length > 0, 'gm.list() named no callable verb')
+        const missing = RUNNER_REGISTRY_VERBS.filter((verb) => !parsed.includes(verb))
+        assert.deepEqual(missing, [], `registry verbs not callable through gm_codemode: ${missing.join(', ')}`)
+    })
+})
+
+test('a verb reached through the served tool keeps its body fields', { timeout: 30_000 }, async () => {
+    await withBundle(async (client) => {
+        const prdList = (await codemodeReply(client, 'return gm.describe("prd-list")')).parsed
+        for (const field of ['id', 'status', 'limit', 'full']) {
+            assert.ok(prdList.body_schema.fields[field], `prd-list lost the ${field} body field`)
+        }
+        const codesearch = (await codemodeReply(client, 'return gm.describe("codesearch")')).parsed
+        assert.ok(codesearch.body_schema.fields.query, 'codesearch lost the query body field')
+        assert.ok(codesearch.body_schema.fields.query.aliases.includes('pattern'), 'codesearch lost the pattern alias')
+    })
 })

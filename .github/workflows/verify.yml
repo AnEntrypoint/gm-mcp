@@ -1,0 +1,61 @@
+name: build-verify
+
+# The name carries "build" on purpose: AnEntrypoint/gm pins gm-mcp as a submodule and its
+# bump-pins workflow holds the pin while any run whose *name* matches
+# release|publish|build|wasm is non-green, so a red run here holds that bump.
+# Renaming this workflow past that silently releases the hold.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest # linux x64
+          - ubuntu-24.04-arm # linux arm64
+          - macos-latest # macos arm64
+          - windows-latest # windows x64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: install
+        run: npm ci
+
+      - name: bin/gm-mcp-server.js is a fresh build of src/
+        run: npm run verify-build
+
+      - name: verb dispatch contracts
+        run: |
+          npm test 2>&1 | tee npm-test.log
+          node -e '
+            const text = require("fs").readFileSync(process.argv[1], "utf8")
+            const passed = [...text.matchAll(/(\d+) passed/g)].reduce((sum, m) => sum + Number(m[1]), 0)
+            if (passed === 0) {
+              console.error("verb dispatch contracts ran zero assertions -- a green run that checked nothing is a failure")
+              process.exit(1)
+            }
+            console.log("verb dispatch contracts: " + passed + " assertions passed")
+          ' npm-test.log
+
+      - name: the shipped bundle answers a real MCP session
+        run: node --test test/catalog.test.js test/gm-result.test.js
+
+      - name: verb registry contract
+        run: node scripts/verbs-witness.mjs
