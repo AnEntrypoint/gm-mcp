@@ -84,8 +84,10 @@ await test('the watch interval and the reload switch read their env as numbers a
         delete process.env.GM_MCP_BUNDLE_DRIFT_RELOAD
         assert.equal(reloadDisabled(), false)
         process.env.GM_MCP_BUNDLE_DRIFT_RELOAD = '0'
-        assert.equal(reloadDisabled(), false)
+        assert.equal(reloadDisabled(), true)
         process.env.GM_MCP_BUNDLE_DRIFT_RELOAD = '1'
+        assert.equal(reloadDisabled(), false)
+        process.env.GM_MCP_BUNDLE_DRIFT_RELOAD = 'off'
         assert.equal(reloadDisabled(), true)
     } finally {
         if (savedInterval === undefined) delete process.env.GM_MCP_BUNDLE_DRIFT_INTERVAL_SECONDS
