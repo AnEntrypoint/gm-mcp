@@ -22,7 +22,7 @@ export const RUNNER_REGISTRY_VERBS = [
     'scan_deps', 'code_index', 'callers', 'callees', 'impact', 'grep', 'ci-status', 'prd-status', 'prd-block',
     'pool-brief', 'pool-observe', 'subagent-start', 'subagent-end',
     'memorize-vacuum', 'memorize-retention', 'tencentdb-compat-probe', 'tencentdb-memory-import',
-    'git_reset_head', 'browser_lease_acquire', 'browser_lease_release', 'browser_lease_status',
+    'browser_lease_acquire', 'browser_lease_release', 'browser_lease_status',
     'nodejs', 'javascript', 'node', 'js', 'typescript', 'py', 'sh', 'shell', 'zsh', 'ps1',
 ]
 
