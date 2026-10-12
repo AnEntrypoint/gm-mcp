@@ -61,34 +61,61 @@ await test('a landed hardlink is rejected without reading its target', async () 
     }
 })
 
-if (process.platform !== 'win32') {
-    await test('a landed symlink is rejected as a non-regular file, without reading its target', async () => {
-        const { root, out } = fixture()
-        try {
-            const target = path.join(out, 'target.json')
-            fs.writeFileSync(target, JSON.stringify({ secret: 'target' }))
-            fs.symlinkSync(target, path.join(out, 'instruction-symlink.json'))
-            const reply = await readLanded(root, 'symlink')
-            assert.match(reply.error, /unlinked regular spool file/, JSON.stringify(reply))
-            assert.doesNotMatch(reply.error, /secret|target.json/)
-        } finally {
-            fs.rmSync(root, { recursive: true, force: true })
-        }
-    })
-
-    await test('a landed symlink that escapes the spool is refused without reading its target', async () => {
-        const { root, out } = fixture()
-        try {
-            const outside = path.join(root, 'secret.json')
-            fs.writeFileSync(outside, JSON.stringify({ secret: 'escaped' }))
-            fs.symlinkSync(outside, path.join(out, 'instruction-escape.json'))
-            const reply = await readLanded(root, 'escape')
-            assert.match(reply.error, /spool file/, JSON.stringify(reply))
-            assert.doesNotMatch(reply.error, /secret/)
-        } finally {
-            fs.rmSync(root, { recursive: true, force: true })
-        }
-    })
+// Windows makes a link without the privilege a symlink needs by making a junction instead, so the
+// link class is witnessed on every platform and not only on the ones that skipped it.
+function linkAt(target, linkPath) {
+    if (process.platform === 'win32') fs.symlinkSync(target, linkPath, 'junction')
+    else fs.symlinkSync(target, linkPath)
 }
+
+// A junction names a directory, a symlink names a file, and what is linked is never read, so the
+// target carries a secret that must not appear in the refusal either way.
+function makeTarget(dir, name) {
+    const target = path.join(dir, name)
+    if (process.platform === 'win32') fs.mkdirSync(target)
+    else fs.writeFileSync(target, JSON.stringify({ secret: `${name}-secret` }))
+    return target
+}
+
+await test('a landed link is refused as a non-regular file, without reading its target', async () => {
+    const { root, out } = fixture()
+    try {
+        linkAt(makeTarget(out, 'target'), path.join(out, 'instruction-link.json'))
+        const reply = await readLanded(root, 'link')
+        assert.match(reply.error, /unlinked regular spool file/, JSON.stringify(reply))
+        assert.doesNotMatch(reply.error, /secret|target/)
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true })
+    }
+})
+
+await test('a landed link that escapes the spool is refused before its target is resolved', async () => {
+    const { root, out } = fixture()
+    try {
+        linkAt(makeTarget(root, 'outside'), path.join(out, 'instruction-escape.json'))
+        const reply = await readLanded(root, 'escape')
+        assert.match(reply.error, /unlinked regular spool file/, JSON.stringify(reply))
+        assert.doesNotMatch(reply.error, /secret|outside/)
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true })
+    }
+})
+
+await test('a spool out directory that is a link elsewhere is refused', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-landed-output-'))
+    try {
+        const realOut = path.join(root, 'realout')
+        fs.mkdirSync(realOut, { recursive: true })
+        fs.writeFileSync(path.join(realOut, 'instruction-linked.json'), JSON.stringify({ ok: true, value: 'linked-out-secret' }))
+        const out = path.join(root, '.gm', 'exec-spool', 'out')
+        fs.mkdirSync(path.dirname(out), { recursive: true })
+        linkAt(realOut, out)
+        const reply = await readLanded(root, 'linked')
+        assert.match(reply.error, /resolves outside the .gm\/exec-spool\/out directory/, JSON.stringify(reply))
+        assert.doesNotMatch(reply.error, /out-secret/)
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true })
+    }
+})
 
 console.log(`\n${passed} passed, ${process.exitCode ? 'FAILED' : '0 failed'}`)
