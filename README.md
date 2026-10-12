@@ -81,6 +81,50 @@ self-update (<code>) -- <reason>`), so it lands in the daemon log instead of
 being swallowed by the background check. The `.prev` backup and the `node
 --check` validation of a candidate are unchanged.
 
+### Picking up a newer bundle without a reconnect
+
+The self-update above compares the deployed file against a URL, so it answers
+`current` whenever those two agree -- whatever bytes the running process
+actually started from. A bundle installed over `~/.gm-tools/gm-mcp-server.mjs`
+by any other route (a lane build, `dev-sync`, a manual copy) therefore never
+reaches a long-lived server through it, and a process runs the bytes it was
+started from. Every 30 seconds the server instead compares the deployed file
+against the file it launched from (`launchedEntryPath()`), size+mtime first and
+sha256 only when that moved:
+
+- `/health` answers a `bundle` block (`running_version`, `running_sha256`,
+  `installed_version`, `installed_sha256`, `stale`, `reloadable`, `refusal`),
+  and `gm-mcp http-status` prints it.
+- Every dispatch reply carries one line naming both versions, so the mismatch
+  is visible without asking. `fs_read`, `result` and `gm_result` are the
+  exception: their replies are file content handed back byte for byte, and a
+  line appended there is not a note, it is a different file.
+
+An HTTP server then replaces itself: it spawns the new bundle with an IPC
+channel, sends it the listening socket, and stops accepting only once the
+child answers `gm-mcp-handover-ready`. Both processes hold the socket through
+the handover, so nothing is refused -- measured over 50s of continuous probing
+across one handover: 42056 requests, 0 refused, one transition
+`0.2.34/36660 -> 0.2.35/32508`. If the child never answers, the old
+close-then-bind shape runs instead, and if the replacement never answers
+`/health` the old process takes the port back.
+
+A reload never cuts work. It does not start while any dispatch is in flight
+(`bundle-handover-deferred`, retried on the next tick), and the outgoing
+process waits for the in-flight count to reach 0 before exiting, so a reply
+already being written is finished rather than truncated. Measured with a 40s
+dispatch: the newer bundle was installed 4s in, `/health` went `stale: true`
+while the pid stayed put, the dispatch came back complete at 42.3s carrying the
+notice, and the server moved to the new bundle only afterwards.
+
+Refusals report staleness and stay on the old bundle: `no-downgrade`,
+`installed-version-unknown`, `running-not-a-bundle` (a dev checkout would
+otherwise restart on every edit) and `transport-stdio` -- a stdio server cannot
+replace itself without detaching its client, so it names the mismatch and asks
+for a reconnect. Env: `GM_MCP_BUNDLE_DRIFT_INTERVAL_SECONDS` overrides the
+30s watch, `GM_MCP_BUNDLE_DRIFT_RELOAD=0` turns every reload off and keeps the
+reporting.
+
 Run bare in a terminal with no MCP client attached the server stays running
 until stdin closes or the process is killed; a stdin close alone does not exit
 the process (`gm-mcp: stdin ended (client disconnected or platform pipe quirk)

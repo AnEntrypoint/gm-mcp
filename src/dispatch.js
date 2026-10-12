@@ -6,9 +6,10 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
+import { bundleStalenessLine } from './bundle-drift.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
-import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 
 let inflightDispatches = 0
 
@@ -609,17 +610,12 @@ function validateSpoolFile(candidate) {
     const dir = path.dirname(candidate)
     if (!isSpoolOutDirectory(dir)) throw new Error(`spool file must name a file inside a .gm/exec-spool/out directory: ${candidate}`)
     if (!fs.existsSync(candidate)) throw new Error(`spool file does not exist: ${candidate}`)
-    // Refused before the path is resolved: a link is not a regular spool file whatever it names,
-    // and resolving it first made the refusal report the target instead of the link -- which is
-    // also why the refusal is the same message whether the link escapes the spool or not.
-    const before = fs.lstatSync(candidate)
-    if (!before.isFile() || before.nlink !== 1) throw new Error('spool file must be an unlinked regular spool file')
     const resolvedOutDir = fs.realpathSync(dir)
     const resolvedFile = fs.realpathSync(candidate)
     if (!isSpoolOutDirectory(resolvedOutDir) || path.dirname(resolvedFile) !== resolvedOutDir) {
         throw new Error(`spool file resolves outside the .gm/exec-spool/out directory that names it: ${candidate}`)
     }
-    return { candidate, before }
+    return { candidate, resolvedOutDir }
 }
 
 function spoolFilePath(root, file) {
@@ -637,34 +633,38 @@ function spoolFilePath(root, file) {
     throw failure
 }
 
-// Follows a link rather than refusing it, so a path swapped for one after the open is seen as
-// what it now names; it reads no content.
-function statOrUndefined(candidate) {
+function openedDescriptorPath(fd) {
+    const descriptorRoot = process.platform === 'linux' ? '/proc/self/fd'
+        : process.platform === 'darwin' ? '/dev/fd'
+            : undefined
+    if (!descriptorRoot) return undefined
     try {
-        return fs.statSync(candidate)
+        return fs.realpathSync(path.join(descriptorRoot, String(fd)))
     } catch {
         return undefined
     }
 }
 
 function openSpoolRegularFile(root, file) {
-    const { candidate, before } = spoolFilePath(root, file)
+    const { candidate, resolvedOutDir } = spoolFilePath(root, file)
+    const before = fs.lstatSync(candidate)
+    if (!before.isFile() || before.nlink !== 1) throw new Error('spool file must be an unlinked regular spool file')
     const fd = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
     try {
         const opened = fs.fstatSync(fd)
         if (!opened.isFile() || opened.nlink !== 1) throw new Error('spool file must be an unlinked regular spool file')
         if (opened.dev !== before.dev || opened.ino !== before.ino) throw new Error('spool file changed while opening')
         if (opened.size > RESULT_FILE_MAX_BYTES) throw new Error(`spool file exceeds ${RESULT_FILE_MAX_BYTES} byte limit`)
-        // Re-asked of the path the descriptor was opened from, after the open, on every platform.
-        // A descriptor root is not portable: /proc/self/fd exists on linux only and /dev/fd on
-        // darwin does not resolve to the open file at all, so containment read from such a path
-        // refused every landed result in a project reached through a symlink, while windows has
-        // no descriptor root to read and skipped the check entirely. The path answers it by
-        // identity instead -- the file it names now must be the file the descriptor holds -- and
-        // answers it after the open, which is the window a descriptor path could only guess at.
-        const stillNamed = statOrUndefined(candidate)
-        if (!stillNamed || stillNamed.dev !== opened.dev || stillNamed.ino !== opened.ino) {
-            throw new Error(`spool file is outside the GM output spool: ${candidate} no longer names the file that was opened`)
+        const descriptorPath = openedDescriptorPath(fd)
+        if (descriptorPath) {
+            // Resolved the same way the out directory was: a project reached through a symlink
+            // makes /dev/fd/<fd> report the path as opened, so an unresolved comparison against
+            // the realpath of the out directory refuses every landed result in such a project.
+            const resolvedDescriptor = fs.realpathSync(descriptorPath)
+            const relative = path.relative(resolvedOutDir, resolvedDescriptor)
+            if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+                throw new Error(`spool file is outside the GM output spool: ${resolvedDescriptor} is not under ${resolvedOutDir}`)
+            }
         }
         return { fd, file: candidate, size: opened.size, mtimeMs: opened.mtimeMs }
     } catch (error) {
@@ -1839,12 +1839,24 @@ async function plainTextOwnerTransport(root, sessionId, signal) {
     return transport
 }
 
+// A reply that is file content or a paged spill file is handed back byte for byte, so it is the one
+// place a notice must never be appended: an extra line there is not a note, it is a different file.
+const VERBATIM_REPLY_VERBS = new Set(['fs_read', 'result', 'gm_result'])
+
+function withStaleBundleNotice(verb, text) {
+    if (VERBATIM_REPLY_VERBS.has(verb)) return text
+    if (typeof text !== 'string' || text === '') return text
+    const line = bundleStalenessLine()
+    if (!line) return text
+    return `${text.endsWith('\n') ? text : `${text}\n`}\n${line}\n`
+}
+
 export async function gmDispatch(args, signal, responseValueObserver) {
     inflightDispatches += 1
     const startedAtMs = Date.now()
     appendDiagnostic('dispatch-start', { verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
     try {
-        return await runDispatch(args, signal, responseValueObserver)
+        return withStaleBundleNotice(args?.verb, await runDispatch(args, signal, responseValueObserver))
     } catch (error) {
         appendDiagnostic('dispatch-error', { verb: args?.verb ?? null, error: error?.message ? String(error.message) : String(error) })
         throw error
@@ -1988,8 +2000,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
             const ranged = full_response ? parsed : applyFsReadRangeFallback(verb, normalizedBody, parsed)
-            const named = withSearchIncompleteness(ranged)
-            const cleaned = full_response ? named : cleanResponse(named, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
+            const cleaned = full_response ? parsed : cleanResponse(ranged, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
             let out = cleaned
             if (!full_response && cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
                 const { data, ...rest } = cleaned

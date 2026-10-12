@@ -72,6 +72,10 @@ function writeSingletonState(state) {
     }
 }
 
+export function recordSingletonState({ port = defaultHttpPort(), pid = null } = {}) {
+    writeSingletonState({ port, pid, url: httpMcpUrl(port), ts: Date.now(), reused: true })
+}
+
 function dropSingletonState() {
     try {
         rmSync(stateFilePath(), { force: true })

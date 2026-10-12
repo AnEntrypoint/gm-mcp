@@ -1,9 +1,10 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createServer } from './mcp-server.js'
 import { installStdioGuards } from './transport-guard.js'
-import { startHttpServer, httpListenOptions } from './http-transport.js'
+import { startHttpServer, httpListenOptions, setHealthExtras } from './http-transport.js'
 import { defaultHttpPort, ensureHttpSingletonInBackground, ensureHttpSupervisor, httpSingletonEnabled } from './singleton.js'
-import { handOverToRefreshedBundle } from './bundle-refresh.js'
+import { adoptHandedOverHandle, handOverToRefreshedBundle, handoverRequested, HANDOVER_LISTEN_RETRY_MS } from './bundle-refresh.js'
+import { bundleHealthBlock, bundleStalenessLine, startBundleDriftWatch } from './bundle-drift.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runReleaseBridgeInBackground } from './release-bridge.js'
 import { appendDiagnostic, describeError } from './server-log.js'
@@ -38,12 +39,31 @@ function seedHttpSingletonInBackground({ skipPort = null } = {}) {
     }
 }
 
+// A stdio server is owned by its client: exiting detaches it, and nothing on this side can put a
+// replacement on the same stdio pair. So stdio reports the staleness and leaves the reload to the
+// reconnect; only the shared HTTP server, whose clients are per-request, can replace itself.
+function watchForStaleBundle({ handOver = null } = {}) {
+    return startBundleDriftWatch((state) => {
+        const line = bundleStalenessLine(state)
+        if (line) console.error(line)
+        // A stale bundle the watch cannot reload (older, unreadable, no version, reload switched off)
+        // is reported and left alone: the refusal is the whole point of the check, so handing over
+        // anyway would move this process onto worse code under a message saying it would not.
+        if (handOver && state?.reloadable === true) return handOver(state)
+        appendDiagnostic('bundle-stale-no-handover', { ...state, transport: handOver ? 'http' : 'stdio' })
+        return null
+    }, { transport: handOver ? 'http' : 'stdio' })
+}
+
 export async function main() {
     if (wantsHttpTransport()) {
         const { host, port } = httpListenOptions()
-        const { server } = await startHttpServer({ host, port })
+        setHealthExtras(() => bundleHealthBlock())
+        const listenHandle = await adoptHandedOverHandle()
+        const { server } = await startHttpServer({ host, port, listenHandle, listenRetryMs: handoverRequested() ? HANDOVER_LISTEN_RETRY_MS : 0 })
         seedHttpSingletonInBackground({ skipPort: port })
         ensureHttpSupervisor({ port })
+        watchForStaleBundle({ handOver: (state) => handOverToRefreshedBundle({ host, port, server, state }) })
         scheduleStaleDeployedBundleChecks((result) => handOverToRefreshedBundle({ host, port, server, result }))
         runReleaseBridgeInBackground()
         return
@@ -58,6 +78,7 @@ export async function main() {
     await server.connect(transport)
     console.error('gm-mcp: connected, serving on stdio')
     seedHttpSingletonInBackground()
+    watchForStaleBundle()
     scheduleStaleDeployedBundleChecks()
     runReleaseBridgeInBackground()
 }
