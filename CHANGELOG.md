@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased - `timeout_seconds` above 240 s is honoured, and a timeout no longer implies the child survives
+
+Two things were true of a long `bash`/`python`/`exec_js` dispatch and neither was visible to the caller. The poll was capped at `MCP_POLL_TIMEOUT_CEILING_MS = 240000`, so `timeout_seconds: 1500` was answered at 240 s with `requested_poll_timeout_ms: 1500000, poll_timeout_capped: true`. And the exec child's own budget was pinned at `EXEC_DEFAULT_LIMIT_SECONDS * 1000 = 300000` no matter what the caller asked for, so the reply could say `claimed_still_in_flight` for work the daemon had already killed at 300 s -- measured on a 300 s python writer: the out-file landed with `{"elapsed_ms":300402,"error_code":"exec_timeout","killed":true,"limit_ms":300000}` while the 240 s reply was still saying "it is still running, not lost". A caller that asked for 400 s got neither the wait nor the work.
+
+The ceiling is now 600000 -- the harness tool-call maximum -- and is read from `GM_MCP_POLL_TIMEOUT_CEILING_MS` per call, so a host with a shorter transport deadline sets it down rather than having 240 s imposed. The cap is no longer a bare boolean: `poll_timeout_capped` is joined by `poll_timeout_ceiling_ms` and `poll_timeout_cap_reason`, a sentence that distinguishes "gm stopped waiting at its ceiling" from "the caller's own budget ran out".
+
+`withTimeoutMsPrefix` now takes `timeout_seconds` and writes the caller's poll budget minus `POLL_MARGIN_PAST_EXEC_TIMEOUT_MS`, floored at `EXEC_DEFAULT_LIMIT_MS` and capped at `EXEC_HARD_CEILING_MS` (900000, agentplug-host's `HARD_CEILING_MS`, above which a `timeoutMs` is clamped in silence). So a 400 s poll buys a 395000 ms child instead of 300000 ms, a short poll still never shortens a child's life, and a body carrying its own `timeoutMs=<ms>` line is still sent unchanged. For exec verbs a pending reply now carries `exec_limit_ms`, `child_reaped_at_exec_limit: true` and an `exec_child` sentence: that gm did not kill the child, that the daemon reaps it at that budget, roughly how long is left, and to resume with a `timeout_seconds` that outlasts it.
+
 ## Unreleased - a running server now picks up a newer installed bundle between dispatches
 
 A bundle installed over `~/.gm-tools/gm-mcp-server.mjs` by a lane build, by `dev-sync` or by hand never reached a long-lived server: the only refresh path, `refreshStaleDeployedBundle`, compares the deployed file against a URL, so it answers `current` whenever those two agree, whatever bytes the running process started from. A process runs the bytes it was started from and nothing re-reads them, so the singleton stayed on 0.2.31 while 0.2.32 sat on disk, and no verb said so.
