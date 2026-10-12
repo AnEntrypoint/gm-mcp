@@ -1,6 +1,6 @@
 {
   "name": "gm-mcp",
-  "version": "0.2.36",
+  "version": "0.2.37",
   "description": "MCP server exposing gm's spool dispatch cycle (write, poll, cleaned response) to any MCP client",
   "type": "module",
   "main": "src/index.js",
@@ -15,7 +15,7 @@
     "build": "node scripts/build.mjs",
     "verify-build": "node scripts/check-bin-drift.mjs",
     "install-autostart": "node scripts/install-autostart.mjs",
-    "test": "node test/response-compact.test.mjs && node test/runner-recovery.test.mjs && node test/daemon-preflight.test.mjs && node test/timeout-validation.test.mjs && node test/body-input.test.mjs && node test/landed-output.test.mjs && node test/spool-name.test.mjs && node test/transport.test.mjs && node test/bundle-drift.test.mjs && node test/fs-read-range.test.mjs && node test/fs-read-mcp-tool.test.mjs && node test/prd-list-mcp-tool.test.mjs && node test/codemode-args.test.mjs",
+    "test": "node test/response-compact.test.mjs && node test/runner-recovery.test.mjs && node test/daemon-preflight.test.mjs && node test/timeout-validation.test.mjs && node test/body-input.test.mjs && node test/landed-output.test.mjs && node test/spool-name.test.mjs && node test/transport.test.mjs && node test/bundle-drift.test.mjs && node test/fs-read-range.test.mjs && node test/fs-read-mcp-tool.test.mjs && node test/prd-list-mcp-tool.test.mjs && node test/codemode-args.test.mjs && node test/dispatch-wait-row.test.mjs",
     "postinstall": "node scripts/install-hooks.mjs"
   },
   "dependencies": {},

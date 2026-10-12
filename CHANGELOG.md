@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased - a dispatch-wait row is quoted as the snapshot it is, and a lane wait naming no lane says so
+
+`dispatch_wait` was presented as a reading of what the daemon is doing with a dispatch at that
+instant. It is a row from `.dispatch-wait.json`, and the daemon rewrites that ledger only when a
+dispatch changes stage and on a few answer paths, never on a timer -- so a row can outlive the stage
+it names by as long as the dispatch it describes. The row was then read as live truth, which sent a
+`C:/dev/needle` caller hunting for a serial lane:
+
+    dispatch_wait.row.state: claimed_waiting_for_serial_lane
+    dispatch_wait.row.lane: null
+
+Those two cannot describe one live moment. `dispatch_serial_lane` answers a lane for every verb
+except the unserialized set (`bash`, `sh`, `fs_read`, `phase-status`, ...), and
+`GmFairnessGuard::acquire_within` returns immediately when the lane is `None`, so a verb with no lane
+never queues on one: the row is the stage recorded at the instant of the claim, published because
+`note_dispatch_stage` ran, after which the stage advanced to `WaitingForToolQueue` inside the
+ledger's 250 ms republish window and that rewrite was dropped. A bare `date` therefore reported
+"waiting for this project serial lane" for the whole of a 40-130 s wait it spent somewhere else
+entirely.
+
+Two disclosures replace the bare row. `row.snapshot_stale` and a `note` appear once the ledger is
+older than 5000 ms, saying the row is a snapshot from then and that `row.stage_age_ms` was measured
+at that same moment, so neither number says how long the dispatch has been doing what it is doing
+now. And `claimed_waiting_for_serial_lane` with `lane: null` now carries the reason: the daemon
+writes a null lane for a verb with no project serial lane, and such a verb is admitted without
+waiting for one. Neither changes what is dispatched -- both change what a timed-out reply claims.
+
+Six cases in `test/dispatch-wait-row.test.mjs`: the null-lane caveat, a named lane keeping the plain
+state meaning, the caveat not attaching to a stage that is not a lane wait, a fresh ledger reported
+as current, a stale one reported as a snapshot, and a ledger with no `ts` not being claimed as one.
+
 ## Unreleased - a `timeoutMs` above 900000 is refused with the reason it cannot be bought
 
 `agentplug-host` clamps an exec `timeoutMs` to `HARD_CEILING_MS = 900000` and says nothing. gm-mcp made that silence unrecoverable in two places, and the second one is the same class as the poll-ceiling bug fixed in `c9af05e`: a hard limit that quietly does the wrong thing instead of reporting it.
