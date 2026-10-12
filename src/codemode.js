@@ -5,7 +5,7 @@ import { verbBodySchema } from './verb-bodies.js'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
-const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns every callable name as {name, verb, description}; `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). Values returned by the body and console.log output are returned as text. Code runs in the gm-mcp server process with the same authority as exec_js.'
+const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns every callable name as {name, verb, description}; `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
 
 function replyText(result) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
@@ -108,9 +108,45 @@ function bindings(tools, { session_id, cwd }, extra) {
     })
 }
 
+// The body returns whatever it likes: a plain object built out of verb replies, a bare number, a
+// function, a BigInt, a structure that reaches itself. JSON.stringify alone answers two of those
+// wrong. It drops what it cannot render, so a function-valued or undefined field vanishes -- {r:
+// undefined} prints as {}, which reads the same as a payload that never arrived -- and it throws
+// on a BigInt and on a cycle, which surfaced as "gm_codemode code threw" and lost the reply and
+// every console.log line above it. Render the un-renderable as text instead, so the shape of the
+// value survives; fall back to String(value) only when there is nothing left to render.
+function jsonText(value) {
+    const parents = new WeakMap()
+    const replacer = function (key, v) {
+        if (typeof v === 'function') return `[Function ${v.name || 'anonymous'}]`
+        if (typeof v === 'symbol') return String(v)
+        if (typeof v === 'bigint') return `${v}n`
+        if (v !== null && typeof v === 'object') {
+            for (let up = this; up; up = parents.get(up)) if (up === v) return '[Circular]'
+            parents.set(v, this)
+        }
+        return v
+    }
+    let text
+    try {
+        text = JSON.stringify(value, replacer, 2)
+    } catch {
+        return textOf(value)
+    }
+    return text === undefined ? textOf(value) : text
+}
+
+function textOf(value) {
+    try {
+        return String(value)
+    } catch {
+        return Object.prototype.toString.call(value)
+    }
+}
+
 function formatValue(value) {
     if (value === undefined) return ''
-    return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+    return typeof value === 'string' ? value : jsonText(value)
 }
 
 export function registerCodeMode(server, tools) {

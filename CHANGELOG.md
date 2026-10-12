@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased - a codemode return value renders what JSON cannot instead of dropping it or throwing
+
+`gm_codemode` rendered the body's return value with a bare `JSON.stringify(value, null, 2)`, which answers two classes of value wrong. It drops what it cannot render, so a function-valued or undefined field disappears: measured on the deployed 0.2.31 bundle, `return {f: () => 1, nested: {deep: [1, 2]}}` answered `{"nested":{"deep":[1,2]}}`, and `return {r: r.data && r.data.matches, s: s.data && s.data.matches}` with both replies undefined answered `{}` -- identical to a payload that never arrived, so an agent re-dispatches a codesearch whose result was already in hand. It also throws on a BigInt and on a cycle, and the throw happened inside the reply path, so the whole tool result became `gm-mcp: gm_codemode code threw -- TypeError: Do not know how to serialize a BigInt` (and `Converting circular structure to JSON`) with the value and every `console.log` line above it lost.
+
+Rendering of the return value is now the only thing that changed: a string is returned as-is, anything structured goes through `JSON.stringify` with a replacer that turns what JSON cannot render into text -- a function into `[Function f]`, a symbol into `Symbol(x)`, a BigInt into `42n`, an object reachable from itself into `[Circular]` -- and `String(value)` is the fallback only when there is nothing left to render. Verb dispatch, what `gm.<verb>(...)` returns inside the body, and the spool protocol are untouched.
+
+Measured before and after on `C:/dev/gm` by driving the real tool over a real stdio MCP session (spawn the bundle, `initialize`, `notifications/initialized`, `tools/call` `gm_codemode`), cwd `C:/dev/gm`:
+
+| return value | 0.2.31 | 0.2.32 |
+| --- | --- | --- |
+| `{r:{count:2,matches:[{p,l},{p,l}]}, s:"ok"}` | whole nested JSON | whole nested JSON (unchanged) |
+| `{f: () => 1, nested: {deep:[1,2]}}` | `{"nested":{"deep":[1,2]}}` | `{"f":"[Function f]","nested":{"deep":[1,2]}}` |
+| `42n` | `code threw -- Do not know how to serialize a BigInt` | `"42n"` |
+| `{n: 42n, keep: "me"}` | `code threw` (same) | `{"n":"42n","keep":"me"}` |
+| `c = {}; c.self = c` | `code threw -- Converting circular structure to JSON` | `{"name":"root","self":"[Circular]"}` |
+| `(function namedProof(){})` | `(empty string)` | `"[Function namedProof]"` |
+| `{s: Symbol("x"), keep: "me"}` | `{"keep":"me"}` | `{"s":"Symbol(x)","keep":"me"}` |
+| `"plain text"` / `42` / `true` / `null` / `undefined` | `plain text` / `42` / `true` / `null` / empty | unchanged |
+| `console.log("logged-line"); return {ok:true}` | `logged-line` + `{"ok":true}` | unchanged |
+
+A shared reference that is not a cycle is deliberately not marked: `{a: shared, b: shared}` still prints both objects whole, because the cycle test walks the ancestor chain recorded as the replacer descends rather than a set of everything already seen. The `{}` an agent reported is therefore a serialization miss only for values JSON renders as absent -- a returned object whose every field is `undefined` still prints `{}`, and that is now the only way to get it. `BUNDLE_VERSION` moves to 0.2.32.
+
 ## Unreleased - nine git verbs fold their revision from the top level, and two siblings deliberately get none
 
 `git_show` declared a top-level `rev`/`ref`/`sha`/`commit` and `git_push` a top-level `rev`, but the git verbs that read a revision the same way declared none: their zod schema was the dispatch envelope alone, so a client sending `{"rev": "<sha>"}` to `git_log` had the key stripped before `mergeVerbRangeFields` ran and the verb read HEAD instead. Measured on `C:/dev/gm` by driving the real handler -- `verbToolInputSchema(verb)` wrapped in `z.object`, `.parse`, then `mergeVerbRangeFields` -- `rev`, `ref` and `range` answered `DROPPED` for `git_log` and `git_diff`, and `ref` answered `DROPPED` for `git_revert`, `git_reset`, `git_checkout`, `git_merge`, `git_stash_pop`, `git_stash_drop` and `git_worktree_add`, while `git_show` and `git_push` answered `FOLDED`. `GIT_TOP_LEVEL_FIELDS` now declares `range|ref|rev` for `git_log` and `git_diff` and `ref` for the other seven, each an `optional()` `z.string()` folded into `body` only when `body` does not already name it, so a key named in both still takes its value from `body`: measured, `{"rev":"1111111111111111111111111111111111111111", body:{"rev":"b4b1815"}}` produces `body.rev = "b4b1815"` for every one of them. Dispatched through the real verbs afterwards, `git_log {rev:"b4b1815"}` answers that commit, `{ref:"7a2a9f2"}` answers that one, `{range:"00d6c76..b4b1815"}` answers a single commit, `git_diff {rev:"076396e", stat:true}` and `{range:"076396e..a7e40db", stat:true}` answer the stat of that range, and each of the seven ref-taking verbs answers a loud failure naming the ref it was handed instead of falling back to HEAD: `git_revert` `fatal: bad object deadbeef...`, `git_reset` `fatal: Could not parse object 'deadbeef...'`, `git_checkout` `fatal: unable to read tree (deadbeef...)`, `git_merge` `merge: deadbeef... - not something we can merge`, `git_stash_pop` and `git_stash_drop` `error: refs/heads/no-such-ref-r270-54 is not a valid reference`, `git_worktree_add` `fatal: invalid reference: deadbeef...`.
