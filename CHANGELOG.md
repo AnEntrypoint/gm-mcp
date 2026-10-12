@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased - the initialize reply names the served surface
+
+A session that connected before the single `gm_codemode` surface kept its cached per-verb tool
+list, and after a reconnect saw one tool with nothing saying why. `createServer` now passes
+`instructions` to `McpServer`, so every `initialize` reply states that only `gm_codemode` is
+registered, that verbs are reached as `gm.<verb>(args)`, and that a client holding a cached list
+must re-fetch `tools/list`. Measured on the rebuilt bundle: a fresh `--http --port 8799` instance
+answers `initialize` with an `instructions` field and `tools/list` with `gm_codemode` only, while
+the shared server on 8787 (the build before this change) answers without `instructions`.
+
 ## Unreleased - one notice per stale bundle, and a refusal that names what replaces it
 
 A drift the watch could reload printed its staleness line twice: once by the watch, then again by
