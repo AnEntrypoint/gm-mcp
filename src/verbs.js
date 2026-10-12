@@ -17,10 +17,41 @@ export const RUNNER_REGISTRY_VERBS = [
     'auto-recall', 'instruction', 'prd-add', 'prd-resolve', 'prd-list', 'prd-defer', 'prd-repair', 'task-spawn', 'task-list',
     'task-stop', 'task-output', 'memorize-continue', 'fsm-vendor', 'fsm-validate', 'predicates-md',
     'fsm-propose-override',
-    'health', 'config_resolve', 'dataflow_resolve', 'status', 'close', 'filter', 'cache_get', 'cache_put',
+    'health', 'config_resolve', 'config-sync-now', 'dataflow_resolve', 'status', 'close', 'filter', 'cache_get', 'cache_put',
     'cache_invalidate', 'cache_stats', 'learn', 'chrome',
+    'scan_deps', 'code_index', 'callers', 'callees', 'impact', 'grep', 'ci-status', 'prd-status', 'prd-block',
+    'pool-brief', 'pool-observe', 'subagent-start', 'subagent-end',
+    'memorize-vacuum', 'memorize-retention', 'tencentdb-compat-probe', 'tencentdb-memory-import',
+    'git_reset_head', 'browser_lease_acquire', 'browser_lease_release', 'browser_lease_status',
+    'nodejs', 'javascript', 'node', 'js', 'typescript', 'py', 'sh', 'shell', 'zsh', 'ps1',
 ]
 
 export function verbToolName(verb) {
     return verb.replace(/-/g, '_')
+}
+
+export function canonicalToolName(name) {
+    return String(name).replace(/-/g, '_')
+}
+
+export function editDistance(left, right) {
+    const row = Array.from({ length: right.length + 1 }, (_, index) => index)
+    for (let i = 1; i <= left.length; i++) {
+        let diagonal = row[0]
+        row[0] = i
+        for (let j = 1; j <= right.length; j++) {
+            const above = row[j]
+            row[j] = Math.min(row[j] + 1, row[j - 1] + 1, diagonal + (left[i - 1] === right[j - 1] ? 0 : 1))
+            diagonal = above
+        }
+    }
+    return row[right.length]
+}
+
+export function nearestNames(name, candidates, count = 5) {
+    return [...candidates]
+        .map((candidate) => ({ candidate, distance: editDistance(String(name), candidate) }))
+        .sort((a, b) => a.distance - b.distance || a.candidate.localeCompare(b.candidate))
+        .slice(0, count)
+        .map((entry) => entry.candidate)
 }
