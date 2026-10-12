@@ -2,7 +2,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createServer } from './mcp-server.js'
 import { installStdioGuards } from './transport-guard.js'
 import { startHttpServer, httpListenOptions, setHealthExtras } from './http-transport.js'
-import { defaultHttpPort, ensureHttpSingletonInBackground, ensureHttpSupervisor, httpSingletonEnabled } from './singleton.js'
+import { defaultHttpPort, ensureHttpSingletonInBackground, ensureHttpSupervisor, httpSingletonEnabled, recordHttpInstance } from './singleton.js'
 import { adoptHandedOverHandle, handOverStdioToRefreshedBundle, handOverToRefreshedBundle, handoverRequested, HANDOVER_LISTEN_RETRY_MS } from './bundle-refresh.js'
 import { bundleHealthBlock, bundleStalenessNotice, startBundleDriftWatch } from './bundle-drift.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
@@ -61,7 +61,8 @@ export async function main() {
         const listenHandle = await adoptHandedOverHandle()
         const { server } = await startHttpServer({ host, port, listenHandle, listenRetryMs: handoverRequested() ? HANDOVER_LISTEN_RETRY_MS : 0 })
         seedHttpSingletonInBackground({ skipPort: port })
-        ensureHttpSupervisor({ port })
+        const supervision = ensureHttpSupervisor({ port })
+        recordHttpInstance({ port, host, supervisorPid: supervision?.pid ?? null })
         watchForStaleBundle({ transportKind: 'http', handOver: (state) => handOverToRefreshedBundle({ host, port, server, state }) })
         scheduleStaleDeployedBundleChecks((result) => handOverToRefreshedBundle({ host, port, server, result }))
         runReleaseBridgeInBackground()
