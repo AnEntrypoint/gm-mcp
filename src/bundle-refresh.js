@@ -22,7 +22,7 @@ import { inflightDispatchCount } from './dispatch.js'
 import { DEFAULT_HOST, DEFAULT_PORT } from './http-transport.js'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { launchedEntryPath, recordSingletonState, waitForHealth } from './singleton.js'
-import { bundleDrift, bundleStalenessLine } from './bundle-drift.js'
+import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
 
 const HANDOVER_READY_TIMEOUT_MS = 30_000
 export const HANDOVER_LISTEN_RETRY_MS = 60_000
@@ -141,7 +141,7 @@ export async function handOverStdioToRefreshedBundle({ transport = null, state =
         return { outcome: 'refused', reason: drift.refusal_code ?? 'not-reloadable' }
     }
 
-    console.error(bundleStalenessLine(drift) ?? 'gm-mcp: handing stdio to the installed bundle')
+    console.error(bundleStalenessNotice(drift) ?? 'gm-mcp: handing stdio to the installed bundle')
     appendDiagnostic('bundle-stdio-handover-start', detail)
 
     const entry = launchedEntryPath()
@@ -348,7 +348,7 @@ export async function handOverToRefreshedBundle({ host = DEFAULT_HOST, port = DE
         return { outcome: 'refused', reason: drift.refusal_code ?? 'not-reloadable' }
     }
 
-    console.error(bundleStalenessLine(drift) ?? `gm-mcp: handing port ${port} to the installed bundle`)
+    console.error(bundleStalenessNotice(drift) ?? `gm-mcp: handing port ${port} to the installed bundle`)
     appendDiagnostic('bundle-handover-start', detail)
 
     const entry = launchedEntryPath()
