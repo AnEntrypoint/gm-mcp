@@ -31,6 +31,8 @@ const GIT_COMMIT_TOP_LEVEL_FIELD_TYPES = {
     ref: z.string(),
     sha: z.string(),
     commit: z.string(),
+    stat: booleanLike,
+    path: z.string(),
 }
 const GIT_COMMIT_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(GIT_COMMIT_TOP_LEVEL_FIELDS.map((key) => [key, GIT_COMMIT_TOP_LEVEL_FIELD_TYPES[key].optional()
     .describe(`Top-level alias of body.${key} for git_finalize/git_commit: folded into body when body does not already name it.`)]))
@@ -39,7 +41,7 @@ const GIT_PUSH_TOP_LEVEL_FIELDS = ['rev']
 const GIT_PUSH_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(GIT_PUSH_TOP_LEVEL_FIELDS.map((key) => [key, GIT_COMMIT_TOP_LEVEL_FIELD_TYPES[key].optional()
     .describe(`Top-level alias of body.${key} for git_push: folded into body when body does not already name it.`)]))
 VERB_EXTRA_FIELDS['git_push'] = GIT_PUSH_TOP_LEVEL_FIELDS_ZOD
-const GIT_SHOW_TOP_LEVEL_FIELDS = ['rev', 'ref', 'sha', 'commit']
+const GIT_SHOW_TOP_LEVEL_FIELDS = ['rev', 'ref', 'sha', 'commit', 'stat', 'path', 'paths', 'files']
 const GIT_SHOW_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(GIT_SHOW_TOP_LEVEL_FIELDS.map((key) => [key, GIT_COMMIT_TOP_LEVEL_FIELD_TYPES[key].optional()
     .describe(`Top-level alias of body.${key} for git_show: folded into body when body does not already name it.`)]))
 VERB_EXTRA_FIELDS['git_show'] = GIT_SHOW_TOP_LEVEL_FIELDS_ZOD
@@ -53,8 +55,35 @@ const PRD_LIST_TOP_LEVEL_FIELD_TYPES = {
 const PRD_LIST_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(PRD_LIST_TOP_LEVEL_FIELDS.map((key) => [key, PRD_LIST_TOP_LEVEL_FIELD_TYPES[key].optional()
     .describe(`Top-level alias of body.${key} for prd_list: folded into body when body does not already name it.`)]))
 VERB_EXTRA_FIELDS['prd_list'] = PRD_LIST_TOP_LEVEL_FIELDS_ZOD
+// The git verbs below resolve a revision from body fields the MCP layer has to let through:
+// git_log and git_diff read range|ref|rev through body_revision, in that order, and the rest read
+// ref alone. git_revert and git_reset read ref only -- neither reads rev, so a rev alias would fold
+// a key the verb ignores and look like a working call that silently reset to HEAD. git_branch is
+// absent for the opposite reason: it accepts only remote|all and refuses an unknown body field, so
+// a top-level ref would turn a working listing into a refusal.
+const GIT_REVISION_TOP_LEVEL_FIELD_TYPES = {
+    range: z.string(),
+    ref: z.string(),
+    rev: z.string(),
+}
+const GIT_TOP_LEVEL_FIELDS = {
+    git_log: ['range', 'ref', 'rev'],
+    git_diff: ['range', 'ref', 'rev'],
+    git_revert: ['ref'],
+    git_reset: ['ref'],
+    git_checkout: ['ref'],
+    git_merge: ['ref'],
+    git_stash_pop: ['ref'],
+    git_stash_drop: ['ref'],
+    git_worktree_add: ['ref'],
+}
+for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) {
+    VERB_EXTRA_FIELDS[verb] = Object.fromEntries(fields.map((key) => [key, GIT_REVISION_TOP_LEVEL_FIELD_TYPES[key].optional()
+        .describe(`Top-level alias of body.${key} for ${verb}: folded into body when body does not already name it.`)]))
+}
 const VERB_DESCRIPTION_EXTRA = { fs_read: ` Line ranges are 1-based and inclusive on both ends: ${FS_READ_RANGE_ALIASES.join(', ')} are accepted at the top level and folded into body, and the same keys inside body work identically. ${FS_READ_RANGE_PAIR_HELP} A range-looking key that is not one of them is an error naming the accepted keys rather than a silent whole file. Without any of them the whole file is returned, unchanged.` }
 const VERB_TOP_LEVEL_ALIASES = { fs_read: FS_READ_RANGE_ALIASES, git_finalize: GIT_COMMIT_TOP_LEVEL_FIELDS, git_commit: GIT_COMMIT_TOP_LEVEL_FIELDS, git_push: GIT_PUSH_TOP_LEVEL_FIELDS, git_show: GIT_SHOW_TOP_LEVEL_FIELDS, prd_list: PRD_LIST_TOP_LEVEL_FIELDS }
+for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) VERB_TOP_LEVEL_ALIASES[verb] = fields
 // The verb refuses an absolute path even when it sits inside the project: containment is checked
 // on the relative form. That is intentional, and the refusal already names the relative form to
 // send, but the caller only learns it after a failed call -- so the tool description carries it.
@@ -65,8 +94,11 @@ for (const verb of ['git_finalize', 'git_commit']) {
     VERB_DESCRIPTION_EXTRA[verb] = ` ${GIT_COMMIT_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body.`
 }
 VERB_DESCRIPTION_EXTRA['git_push'] = ` ${GIT_PUSH_TOP_LEVEL_FIELDS.join(', ')} is accepted at the top level and folded into body, so {"rev":"<sha>"} and body:{"rev":"<sha>"} are the same call; a key named in both takes its value from body.`
-VERB_DESCRIPTION_EXTRA['git_show'] = ` ${GIT_SHOW_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"rev":"<sha>"} and body:{"rev":"<sha>"} are the same call; a key named in both takes its value from body. Without one of them git_show reads HEAD, which is what a dropped rev used to look like.`
+VERB_DESCRIPTION_EXTRA['git_show'] = ` ${GIT_SHOW_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"rev":"<sha>", "stat": true} and body:{"rev":"<sha>", "stat": true} are the same call; a key named in both takes its value from body. Without a rev git_show reads HEAD, and without stat, path, paths or files it prints the whole commit, which is what a dropped field used to look like.`
 VERB_DESCRIPTION_EXTRA['prd_list'] = ` ${PRD_LIST_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"id":"<row id>"} and body:{"id":"<row id>"} are the same call; a key named in both takes its value from body. Without one of them the whole PRD is listed, which is what a dropped selector used to look like.`
+for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) {
+    VERB_DESCRIPTION_EXTRA[verb] = ` ${fields.join(', ')} ${fields.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${fields[0]}":"<rev>"} and body:{"${fields[0]}":"<rev>"} are the same call; a key named in both takes its value from body. Without one of them ${verb} reads its own default revision or refuses, which is what a dropped ${fields[0]} used to look like.`
+}
 
 export function mergeVerbRangeFields(verb, args = {}) {
     const verbKey = verbToolName(verb)
