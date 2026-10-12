@@ -2,19 +2,53 @@
 
 ## Unreleased - a search reply that lists no hits now says whether that zero is a finding
 
-`codesearch` returning nothing and `codesearch` proving the needle is absent were the same bytes on the wire: `{ok: true, matches: []}`. An agent searching for a symbol, getting that back, concludes the code does not exist and writes a fix against a phantom. The scan already reported the difference -- `budget_exhausted`, `files_truncated`, `listing_incomplete`, `matches_truncated`, `partial`, `exhaustive: false` -- but those sat beside `matches: []` at the same depth as it, so nothing distinguished "I looked everywhere" from "I looked at some of it" or from "I looked at nothing".
+`codesearch` returning nothing and `codesearch` proving the needle is absent were the same bytes on the
+wire: `{ok: true, matches: []}`. An agent searching for a symbol, getting that back, concludes the code
+does not exist and writes a fix against a phantom. The scan already reported the difference --
+`budget_exhausted`, `files_truncated`, `listing_incomplete`, `matches_truncated`, `partial`,
+`exhaustive: false` -- but those sat beside `matches: []` at the same depth as it, so nothing
+distinguished "I looked everywhere" from "I looked at some of it" or from "I looked at nothing".
 
-`withSearchIncompleteness` now runs on every search reply (`codesearch`, `grep`, `codeinsight`, `code_index`, `callers`, `callees`, `impact`) before it is cleaned, and annotates exactly the ambiguous shape:
+`withSearchIncompleteness` now runs on every search reply (`codesearch`, `grep`, `codeinsight`,
+`code_index`, `callers`, `callees`, `impact`) before it is cleaned, and annotates exactly the ambiguous
+shape:
 
 | reply | before | after |
 | --- | --- | --- |
-| `files_scanned: 0`, no matches | `ok:true, matches: []` | `searched_zero_files: true` + `zero_hits_is_not_a_finding: "the scan searched 0 files, so this empty result is a scanner failure and NOT a finding..."` |
-| no matches, `exhaustive: false` | `ok:true, matches: []` | `zero_hits_is_not_a_finding: "0 hits shown, but the scan was INCOMPLETE (exhaustive:false), so this zero is UNPROVEN and NOT a finding..."` |
+| `files_scanned: 0`, no matches | `ok:true, matches: []` | `searched_zero_files: true` plus `zero_hits_is_not_a_finding: "the scan searched 0 files, so this empty result is a scanner failure and NOT a finding..." |
+| no matches, `exhaustive: false` | `ok:true, matches: []` | `zero_hits_is_not_a_finding: "0 hits shown, but the scan was INCOMPLETE (exhaustive:false), so this zero is UNPROVEN and NOT a finding..." |
 | no matches, `budget_exhausted: true` | `ok:true, matches: []` | same banner, naming `budget_exhausted` |
 | no matches, `exhaustive: true` | `ok:true, matches: []` | untouched -- that zero is a finding |
 | matches found, `exhaustive: false` | unchanged | untouched -- a non-empty result is not ambiguous |
 
-Both keys are placed first in the reply so they are the first line read, and both are in `NEVER_TRUNCATE_KEYS` so a reply cut at a small `max_chars` keeps the sentence instead of the ellipsis. The annotation is deliberately silent whenever the scan was complete or the result is non-empty: an unscoped scan over a large tree is `exhaustive: false` by exclusion rule alone, so flagging every such call would bury the one that matters. `test/response-compact.test.mjs` pins all five rows, including that the banner survives `cleanResponse` at `inlineMax` 40 and survives `compactWireResponse`.
+Both keys are placed first in the reply so they are the first line read, and both are in
+`NEVER_TRUNCATE_KEYS` so a reply cut at a small `max_chars` keeps the sentence instead of an ellipsis.
+The annotation is deliberately silent whenever the scan was complete or the result is non-empty: an
+unscoped scan over a large tree is `exhaustive: false` by exclusion rule alone, so flagging every such
+call would bury the one that matters. `test/response-compact.test.mjs` pins all five rows, including
+that the banner survives `cleanResponse` at `inlineMax` 40 and survives `compactWireResponse`.
+## Unreleased - a landed spool file is refused as a link before its target is resolved
+
+Two defects in the landed-result read, both found by `verify` running on linux and macos for the first time (run 38224832255, head 4081582c; windows-latest passed because it skips both of them):
+
+- `validateSpoolFile` resolved the spool path before it looked at what the path names, so a link was refused by the containment check as `spool file resolves outside the .gm/exec-spool/out directory that names it: <...>/out/instruction-escape.json` rather than as a non-regular file. That containment message is not the message `test/landed-output.test.mjs` pinned, so the assertion held only on the platform that skipped the test: on linux and macos -- where the test ran -- it failed, even though both refusals refuse and neither reads the target. A link is now refused by `lstat` before `realpath` touches it, so the answer is `spool file must be an unlinked regular spool file` whether the link escapes the spool or not, and the target is never resolved at all.
+
+- `openSpoolRegularFile` asked `/dev/fd/<fd>` (darwin) or `/proc/self/fd/<fd>` (linux) for the open file's path and compared it with the realpath of the spool out directory. On darwin that entry does not resolve to the open file, so `path.relative` walked up out of the out directory and every landed result in the project was refused as `spool file is outside the GM output spool`, which is the `reply.ok === undefined` at `test/landed-output.test.mjs:42` on macos-latest; windows has no descriptor root and skipped the check entirely, and linux escaped it only because `/tmp` is not a symlink. The descriptor root is gone: the question is now asked of the path the descriptor was opened from, by device and inode, after the open -- which is the window a descriptor path could only guess at -- and it is the same code on every platform, so the platform that runs it is not the platform that decides it.
+
+Measured on a Windows box with `node test/landed-output.test.mjs`, before and after. The link fixtures are junctions on win32 and symlinks elsewhere -- a junction needs no privilege, so the link class is witnessed on every platform instead of only on the three that skipped it -- and each link target carries a secret that must not appear in the refusal:
+
+| landed file | before | after |
+| --- | --- | --- |
+| regular file | read | read (unchanged) |
+| hardlink to a file outside the spool | `spool file must be an unlinked regular spool file` | unchanged |
+| link inside the spool | `spool file must be an unlinked regular spool file` | unchanged |
+| link escaping the spool | `spool file resolves outside the .gm/exec-spool/out directory that names it: <...>/out/instruction-escape.json` | `spool file must be an unlinked regular spool file` |
+| out directory that is a link elsewhere | `spool file resolves outside the .gm/exec-spool/out directory that names it` | unchanged |
+| darwin, regular file (CI macos-latest) | `reply.ok` undefined, every landed result refused | the windows path, which reads it |
+
+The escaping-link row is the non-vacuity proof: that case fails on this box before the change and passes after, so the fix is witnessed here and not only on a darwin runner. The darwin row is the one row this box cannot measure, which is why the descriptor check had to stop being darwin-shaped: with the check gone from `/dev/fd`, darwin runs exactly the code windows runs. `landed-output.test.mjs` goes from 2 passed on windows to 5, and the whole `npm test` set passes.
+
+`bin/gm-mcp-server.js` was stale at 2928aaa -- committed 936154 bytes against a fresh build of 937062 -- which is why `verify` failed at its first step on all four platforms and never reached the contracts; it is rebuilt in this commit, as `check-bin-drift` requires.
 
 ## Unreleased - the ten git verbs that fold a revision now fold every other body field they read
 
