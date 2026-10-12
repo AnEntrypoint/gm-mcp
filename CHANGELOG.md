@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased - the ten git verbs that fold a revision now fold every other body field they read
+
+The revision lane closed with `limit`, `stat`, `path`, `mode`, `paths` and `files` still stripped at the top level: `GIT_TOP_LEVEL_FIELDS` named only `range|ref|rev`, so a client sending `{"limit": 2}` to `git_log` had the key removed by zod before `mergeVerbRangeFields` ran and the verb read its own default. `codemode` hides this -- `foldVerbArgs` moves an undeclared key into `body` before validation -- so it bites only a raw MCP caller of the verb tool.
+
+The table is now verb -> field -> the zod type the Rust handler reads, not a shared field-type map, because the handler does not read them all the same way: `body_pathspecs` takes `path|paths|files` as one string or a list of them, while `git_revert` and `git_reset` read `paths` with `as_array` and `git_worktree_add` reads `path` with `as_str`, so those three are typed to match instead of accepting a shape the handler turns into nothing. `limit`/`count` are `z.number()` and `stat`/`staged`/`create`/`ff_only`/`summary`/`eol`/`allowOutsideRoot` are `z.boolean()` for the same reason: `as_u64` and `as_bool` are `None` on a string, so the alias refuses the call rather than letting `"2"` arrive as a silent 10 and `"true"` as a silent `false`. Added: `git_log` `limit`, `count`, `path`, `paths`, `files`; `git_diff` `staged`, `stat`, `path`, `paths`, `files`; `git_revert` `paths`; `git_reset` `mode`, `paths`, `files`; `git_checkout` `create`, `path`, `paths`, `files`; `git_merge` `ff_only`, `message`; `git_worktree_add` `path`, `create`, `allowOutsideRoot`; and `git_status`, which folds no revision and had no alias at all, `path`, `paths`, `files`, `summary`, `limit`, `eol`. `git_stash_pop` and `git_stash_drop` gain nothing: both accept `ref` and nothing else.
+
+Measured by driving the real tool over a real stdio MCP session -- `initialize`, `notifications/initialized`, then `tools/call` with the tool registered from `verbToolInputSchema(verb)` and dispatched through `mergeVerbRangeFields` and `gmDispatch`, so the arguments really are validated by the MCP SDK against the real input schema -- against `C:/dev/gm` and a scratch repo, before and after:
+
+| call (top level) | before | after |
+| --- | --- | --- |
+| `git_log {limit: 2}` | 10 commits (default) | 2 commits |
+| `git_log {path: "f1.txt"}` | 8 commits | 1 commit |
+| `git_diff {stat: true}` | whole diff | ` f1.txt \| 2 ++` |
+| `git_diff {staged: true}` | `f1.txt` (unstaged) | `f2.txt` (staged) |
+| `git_status {limit: 1}` (15 untracked) | 13 listed entries | 3 listed entries |
+| `git_checkout {ref:"master", create:true}` | `ok:true, checked_out: master` | `BRANCH_CREATE_REFUSED` |
+| `git_reset {paths:["f1.txt"], mode:"hard"}` | `ok:true, mode: mixed, reset_to: HEAD` | `paths scope the index only: mode must be mixed or omitted` |
+| `git_reset {mode: 5}` | `ok:true` (5 -> `--mixed`) | `-32602 expected string, received number at mode` |
+| `git_revert {paths:["f1.txt"]}` | `pass {paths:[...]} to discard working changes or {ref} to revert a commit` | `discarded: [f1.txt]` |
+| `git_worktree_add {path:"../outside-wt"}` | `git_worktree_add requires a path` | `git_worktree_add path must not contain '..'` |
+| `git_merge {ref:"feature", ff_only:true}` | merge commit `9529832` (2 parents) | `fatal: Not possible to fast-forward, aborting.` |
+| `git_merge {ref:"feature", message:"lanemerge"}` | `Merge branch 'feature'` | `lanemerge` |
+| `git_log {limit:"2"}` | 10 commits, `isError=false` | `-32602 expected number, received string at limit` |
+| `git_diff {stat:"yes"}` | whole diff, `isError=false` | `-32602 expected boolean, received string at stat` |
+
+The last four rows are the non-vacuity proof: a dropped field is silent, so the only way to tell folding from dropping is a value the verb refuses, and every row above is the verb's own refusal or the verb's own narrower answer rather than a default. `test/codemode-args.test.mjs` pinned `foldVerbArgs(git_status, {limit: 5})` to `{body:{limit:5}}`; `limit` is now declared, so it stays at the top level for `mergeVerbRangeFields` and the assertion moved to a verb with no alias for the key, with the three new cases asserted next to the other verb aliases.
+
 ## Unreleased - a codemode return value renders what JSON cannot instead of dropping it or throwing
 
 `gm_codemode` rendered the body's return value with a bare `JSON.stringify(value, null, 2)`, which answers two classes of value wrong. It drops what it cannot render, so a function-valued or undefined field disappears: measured on the deployed 0.2.31 bundle, `return {f: () => 1, nested: {deep: [1, 2]}}` answered `{"nested":{"deep":[1,2]}}`, and `return {r: r.data && r.data.matches, s: s.data && s.data.matches}` with both replies undefined answered `{}` -- identical to a payload that never arrived, so an agent re-dispatches a codesearch whose result was already in hand. It also throws on a BigInt and on a cycle, and the throw happened inside the reply path, so the whole tool result became `gm-mcp: gm_codemode code threw -- TypeError: Do not know how to serialize a BigInt` (and `Converting circular structure to JSON`) with the value and every `console.log` line above it lost.

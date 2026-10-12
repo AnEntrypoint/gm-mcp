@@ -61,29 +61,39 @@ VERB_EXTRA_FIELDS['prd_list'] = PRD_LIST_TOP_LEVEL_FIELDS_ZOD
 // a key the verb ignores and look like a working call that silently reset to HEAD. git_branch is
 // absent for the opposite reason: it accepts only remote|all and refuses an unknown body field, so
 // a top-level ref would turn a working listing into a refusal.
-const GIT_REVISION_TOP_LEVEL_FIELD_TYPES = {
-    range: z.string(),
-    ref: z.string(),
-    rev: z.string(),
-}
+// A pathspec field is read by body_pathspecs as one string or a list of them; git_revert, git_reset
+// and git_worktree_add read theirs with as_array/as_str instead, so those are typed to match or the
+// handler silently sees nothing. Every other type is the one the handler reads: as_bool and as_u64
+// are None on a string, so a boolean alias is z.boolean() and a numeric one is z.number() -- a call
+// sending "true" is refused here rather than arriving as false.
+const GIT_PATHSPEC_TOP_LEVEL_TYPE = z.union([z.string(), z.array(z.string())])
 const GIT_TOP_LEVEL_FIELDS = {
-    git_log: ['range', 'ref', 'rev'],
-    git_diff: ['range', 'ref', 'rev'],
-    git_revert: ['ref'],
-    git_reset: ['ref'],
-    git_checkout: ['ref'],
-    git_merge: ['ref'],
-    git_stash_pop: ['ref'],
-    git_stash_drop: ['ref'],
-    git_worktree_add: ['ref'],
+    git_log: {
+        range: z.string(), ref: z.string(), rev: z.string(),
+        limit: z.number(), count: z.number(),
+        path: GIT_PATHSPEC_TOP_LEVEL_TYPE, paths: GIT_PATHSPEC_TOP_LEVEL_TYPE, files: GIT_PATHSPEC_TOP_LEVEL_TYPE,
+    },
+    git_diff: {
+        range: z.string(), ref: z.string(), rev: z.string(),
+        staged: z.boolean(), stat: z.boolean(),
+        path: GIT_PATHSPEC_TOP_LEVEL_TYPE, paths: GIT_PATHSPEC_TOP_LEVEL_TYPE, files: GIT_PATHSPEC_TOP_LEVEL_TYPE,
+    },
+    git_revert: { ref: z.string(), paths: z.array(z.string()) },
+    git_reset: { ref: z.string(), mode: z.string(), paths: z.array(z.string()), files: z.array(z.string()) },
+    git_checkout: { ref: z.string(), create: z.boolean(), path: GIT_PATHSPEC_TOP_LEVEL_TYPE, paths: GIT_PATHSPEC_TOP_LEVEL_TYPE, files: GIT_PATHSPEC_TOP_LEVEL_TYPE },
+    git_merge: { ref: z.string(), ff_only: z.boolean(), message: z.string() },
+    git_stash_pop: { ref: z.string() },
+    git_stash_drop: { ref: z.string() },
+    git_worktree_add: { ref: z.string(), path: z.string(), create: z.boolean(), allowOutsideRoot: z.boolean() },
+    git_status: { path: GIT_PATHSPEC_TOP_LEVEL_TYPE, paths: GIT_PATHSPEC_TOP_LEVEL_TYPE, files: GIT_PATHSPEC_TOP_LEVEL_TYPE, summary: z.boolean(), limit: z.number(), eol: z.boolean() },
 }
 for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) {
-    VERB_EXTRA_FIELDS[verb] = Object.fromEntries(fields.map((key) => [key, GIT_REVISION_TOP_LEVEL_FIELD_TYPES[key].optional()
+    VERB_EXTRA_FIELDS[verb] = Object.fromEntries(Object.entries(fields).map(([key, type]) => [key, type.optional()
         .describe(`Top-level alias of body.${key} for ${verb}: folded into body when body does not already name it.`)]))
 }
 const VERB_DESCRIPTION_EXTRA = { fs_read: ` Line ranges are 1-based and inclusive on both ends: ${FS_READ_RANGE_ALIASES.join(', ')} are accepted at the top level and folded into body, and the same keys inside body work identically. ${FS_READ_RANGE_PAIR_HELP} A range-looking key that is not one of them is an error naming the accepted keys rather than a silent whole file. Without any of them the whole file is returned, unchanged.` }
 const VERB_TOP_LEVEL_ALIASES = { fs_read: FS_READ_RANGE_ALIASES, git_finalize: GIT_COMMIT_TOP_LEVEL_FIELDS, git_commit: GIT_COMMIT_TOP_LEVEL_FIELDS, git_push: GIT_PUSH_TOP_LEVEL_FIELDS, git_show: GIT_SHOW_TOP_LEVEL_FIELDS, prd_list: PRD_LIST_TOP_LEVEL_FIELDS }
-for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) VERB_TOP_LEVEL_ALIASES[verb] = fields
+for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) VERB_TOP_LEVEL_ALIASES[verb] = Object.keys(fields)
 // The verb refuses an absolute path even when it sits inside the project: containment is checked
 // on the relative form. That is intentional, and the refusal already names the relative form to
 // send, but the caller only learns it after a failed call -- so the tool description carries it.
@@ -97,7 +107,16 @@ VERB_DESCRIPTION_EXTRA['git_push'] = ` ${GIT_PUSH_TOP_LEVEL_FIELDS.join(', ')} i
 VERB_DESCRIPTION_EXTRA['git_show'] = ` ${GIT_SHOW_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"rev":"<sha>", "stat": true} and body:{"rev":"<sha>", "stat": true} are the same call; a key named in both takes its value from body. Without a rev git_show reads HEAD, and without stat, path, paths or files it prints the whole commit, which is what a dropped field used to look like.`
 VERB_DESCRIPTION_EXTRA['prd_list'] = ` ${PRD_LIST_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"id":"<row id>"} and body:{"id":"<row id>"} are the same call; a key named in both takes its value from body. Without one of them the whole PRD is listed, which is what a dropped selector used to look like.`
 for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) {
-    VERB_DESCRIPTION_EXTRA[verb] = ` ${fields.join(', ')} ${fields.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${fields[0]}":"<rev>"} and body:{"${fields[0]}":"<rev>"} are the same call; a key named in both takes its value from body. Without one of them ${verb} reads its own default revision or refuses, which is what a dropped ${fields[0]} used to look like.`
+    const keys = Object.keys(fields)
+    const revisions = keys.filter((key) => key === 'range' || key === 'ref' || key === 'rev')
+    const scoped = keys.filter((key) => !revisions.includes(key))
+    const defaults = [
+        revisions.length > 0 ? `without a revision it falls back to its own default or refuses` : '',
+        scoped.length > 0 ? `without ${scoped.join(', ')} it falls back to its own default too, and a dropped one looks exactly like one never sent` : '',
+    ].filter((part) => part !== '').join('; ')
+    const first = keys[0]
+    const sample = revisions.includes(first) ? 'rev' : 'value'
+    VERB_DESCRIPTION_EXTRA[verb] = ` ${keys.join(', ')} ${keys.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${first}":"<${sample}>"} and body:{"${first}":"<${sample}>"} are the same call; a key named in both takes its value from body. Without one of them ${verb} takes its own default: ${defaults}.`
 }
 
 export function mergeVerbRangeFields(verb, args = {}) {

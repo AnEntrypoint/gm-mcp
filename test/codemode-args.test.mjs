@@ -26,7 +26,7 @@ test('a verb argument folds into the body', () => {
     assert.deepEqual(foldVerbArgs(toolFor('codesearch'), { pattern: 'createWorkerRenderer' }), { body: { pattern: 'createWorkerRenderer' } })
     assert.deepEqual(foldVerbArgs(toolFor('fs_read'), { path: 'src/cli.js' }), { body: { path: 'src/cli.js' } })
     assert.deepEqual(foldVerbArgs(toolFor('exec_js'), { code: '1 + 1' }), { body: { code: '1 + 1' } })
-    assert.deepEqual(foldVerbArgs(toolFor('git_status'), { limit: 5 }), { body: { limit: 5 } })
+    assert.deepEqual(foldVerbArgs(toolFor('git_rm'), { paths: ['a'] }), { body: { paths: ['a'] } })
 })
 
 test('the dispatch envelope stays at the top level', () => {
@@ -50,6 +50,11 @@ test('a verb top-level alias is left for the dispatcher to fold', () => {
     assert.deepEqual(foldVerbArgs(toolFor('prd-list'), { id: 'ROW-1' }), { id: 'ROW-1' })
     assert.deepEqual(foldVerbArgs(toolFor('git_commit'), { message: 'm', paths: ['a'] }), { message: 'm', paths: ['a'] })
     assert.deepEqual(foldVerbArgs(toolFor('git_push'), { rev: 'abc123' }), { rev: 'abc123' })
+    // git_status declares limit, path, paths, files, summary and eol as top-level aliases, so they
+    // stay out of the body here and mergeVerbRangeFields folds them on the way to the verb.
+    assert.deepEqual(foldVerbArgs(toolFor('git_status'), { limit: 5, path: 'a' }), { limit: 5, path: 'a' })
+    assert.deepEqual(foldVerbArgs(toolFor('git_log'), { limit: 5 }), { limit: 5 })
+    assert.deepEqual(foldVerbArgs(toolFor('git_reset'), { mode: 'hard' }), { mode: 'hard' })
 })
 
 test('a tool that is not a verb dispatch is untouched', () => {
