@@ -1359,6 +1359,9 @@ function timeoutInputDiagnostic(verb, raw_body, timeout_seconds) {
     if (!Number.isSafeInteger(milliseconds) || milliseconds > MAX_EXEC_TIMEOUT_MS) {
         return `timeoutMs must not exceed ${MAX_EXEC_TIMEOUT_MS} milliseconds`
     }
+    if (milliseconds > EXEC_HARD_CEILING_MS) {
+        return `timeoutMs must not exceed ${EXEC_HARD_CEILING_MS} milliseconds: agentplug-host clamps a larger value to that ceiling in silence, so a longer child budget cannot be bought; split the work or resume with resume_task`
+    }
     return undefined
 }
 
@@ -1385,7 +1388,7 @@ export function execLimitMs(verb, raw_body, timeout_seconds) {
     const bodyPrefix = TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === 'string' ? TIMEOUT_MS_PREFIX_VALUE.exec(raw_body) : null
     if (bodyPrefix) {
         const milliseconds = Number(bodyPrefix[1])
-        if (Number.isSafeInteger(milliseconds) && milliseconds <= EXEC_HARD_CEILING_MS) return milliseconds
+        if (Number.isSafeInteger(milliseconds)) return Math.min(milliseconds, EXEC_HARD_CEILING_MS)
     }
     const pollBudgetMs = Math.min(pollTimeoutMs(verb, raw_body, timeout_seconds), pollTimeoutCeilingMs())
     return Math.min(EXEC_HARD_CEILING_MS, Math.max(EXEC_DEFAULT_LIMIT_MS, pollBudgetMs - POLL_MARGIN_PAST_EXEC_TIMEOUT_MS))

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased - a `timeoutMs` above 900000 is refused with the reason it cannot be bought
+
+`agentplug-host` clamps an exec `timeoutMs` to `HARD_CEILING_MS = 900000` and says nothing. gm-mcp made that silence unrecoverable in two places, and the second one is the same class as the poll-ceiling bug fixed in `c9af05e`: a hard limit that quietly does the wrong thing instead of reporting it.
+
+Validation asked whether `milliseconds > MAX_EXEC_TIMEOUT_MS` (`2147483647 - 5000`), a bound no caller reaches, so `timeoutMs=1800000` passed, was forwarded verbatim, and was clamped to 900000 by the daemon. The timed-out reply then reported `595000` -- a number matching neither the request nor what the daemon enforced. `timeoutInputDiagnostic` now rejects an over-ceiling prefix with `timeoutMs must not exceed 900000 milliseconds: agentplug-host clamps a larger value to that ceiling in silence, so a longer child budget cannot be bought; split the work or resume with resume_task`.
+
+`execLimitMs` had the same ceiling but no return for it: `milliseconds <= EXEC_HARD_CEILING_MS` fell through to the poll-derived default, so the `exec_limit_ms` a pending reply reported was the fall-through figure whenever validation was bypassed. It now answers `Math.min(milliseconds, EXEC_HARD_CEILING_MS)`, so a reported `exec_limit_ms` is what the daemon will actually enforce. Measured on `execLimitMs('bash', 'timeoutMs=1800000\necho ok', 999)`: `595000` before, `900000` after.
+
 ## Unreleased - `timeout_seconds` above 240 s is honoured, and a timeout no longer implies the child survives
 
 Two things were true of a long `bash`/`python`/`exec_js` dispatch and neither was visible to the caller. The poll was capped at `MCP_POLL_TIMEOUT_CEILING_MS = 240000`, so `timeout_seconds: 1500` was answered at 240 s with `requested_poll_timeout_ms: 1500000, poll_timeout_capped: true`. And the exec child's own budget was pinned at `EXEC_DEFAULT_LIMIT_SECONDS * 1000 = 300000` no matter what the caller asked for, so the reply could say `claimed_still_in_flight` for work the daemon had already killed at 300 s -- measured on a 300 s python writer: the out-file landed with `{"elapsed_ms":300402,"error_code":"exec_timeout","killed":true,"limit_ms":300000}` while the 240 s reply was still saying "it is still running, not lost". A caller that asked for 400 s got neither the wait nor the work.
