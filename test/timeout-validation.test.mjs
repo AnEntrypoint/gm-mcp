@@ -82,5 +82,20 @@ await test('oversized timeout directives are rejected before a dispatch is writt
     assert.match(reply, /timeoutMs must not exceed/)
 })
 
+await test('a timeoutMs past the exec ceiling is clamped, not replaced by a poll-derived default', () => {
+    // 1800000 passes the unreachable MAX_EXEC_TIMEOUT_MS bound, so it reaches execLimitMs. Falling
+    // through there reported ~595000: neither what was asked for nor what the daemon enforces.
+    assert.equal(execLimitMs('bash', 'timeoutMs=1800000\necho ok', 999), EXEC_CEILING_MS)
+    assert.equal(execLimitMs('bash', 'timeoutMs=1800000\necho ok', undefined), EXEC_CEILING_MS)
+    assert.equal(execLimitMs('bash', 'timeoutMs=420000\necho ok', 999), 420_000)
+})
+
+await test('a timeoutMs past the exec ceiling is rejected with the reason it cannot be bought', async () => {
+    const reply = await gmDispatch({ verb: 'bash', raw_body: 'timeoutMs=1800000\necho ok', session_id: 'timeout-validation', cwd: scratch })
+    assert.match(reply, /timeoutMs must not exceed 900000 milliseconds/)
+    assert.match(reply, /clamps a larger value to that ceiling in silence/)
+    assert.match(reply, /resume_task/)
+})
+
 rmSync(scratch, { recursive: true, force: true })
 console.log(`\n${passed} passed, ${process.exitCode ? 'FAILED' : '0 failed'}`)
