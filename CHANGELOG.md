@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased - prd_list folds its row selector, and a verb's top-level keys resolve under either spelling
+
+`gm.prd_list({id: "SOME-ROW"})` dropped the selector in silence and answered the whole PRD: `id` was not a field of the tool's input schema, so zod stripped it before the dispatch and the verb ran unfiltered. Measured on `C:/dev/spoint` (1019 rows), that call returned `count: 1001` in 178432 characters plus a spill file, while `body: {id: "KISS-n-r209-1"}` returned `count: 1` in 1964. `id`, `status`, `limit` and `full` -- the row selectors `prd-list` declares in `src/verb-bodies.js` -- are now top-level fields of the `prd_list` tool and are folded into `body` by `mergeVerbRangeFields`, exactly as the git verbs fold `rev`/`message`/`paths`; a key named in both places takes its value from `body`, and a call with no selector still lists the whole PRD unchanged. Measured on the same store after the change, `{"id":"KISS-n-r209-1"}` and `body:{"id":"KISS-n-r209-1"}` both answer 1964 characters naming `r209-1` only, and `{"id":"KISS-n-r209-1", body:{"id":"KISS-n-r209-2"}}` answers `r209-2` only.
+
+The fold also never reached `git-push`, `git-commit` or `git-finalize` from `src/`: their aliases were keyed `git_push`/`git_commit`/`git_finalize` while `RUNNER_REGISTRY_VERBS` registers the hyphenated `git-push`/`git-commit`/`git-finalize`, and `VERB_EXTRA_FIELDS`, `VERB_TOP_LEVEL_ALIASES` and `VERB_DESCRIPTION_EXTRA` were read with the registry name. All three lookups now go through `verbToolName`, so a verb and its tool name resolve the same extras and the git verbs fold the keys their descriptions already advertise. `test/prd-list-mcp-tool.test.mjs` covers the schema, the fold, body precedence and the two spellings, and is in `npm test`. `BUNDLE_VERSION` moves to 0.2.30.
+
 ## Unreleased - a verb's body is discoverable, max_chars binds, refusals name the valid set, and every callable name is enumerable
 
 Four frictions hit in one live session, all on the verb surface.
