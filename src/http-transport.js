@@ -81,6 +81,7 @@ function sendJson(res, status, payload) {
 }
 
 function healthPayload(port) {
+    const bundle = typeof healthExtras === 'function' ? healthExtras() : null
     return {
         ok: true,
         service: 'gm-mcp',
@@ -90,10 +91,17 @@ function healthPayload(port) {
         path: MCP_PATH,
         host: DEFAULT_HOST,
         port,
+        bundle,
     }
 }
 
-export async function startHttpServer({ port, host } = {}) {
+let healthExtras = null
+
+export function setHealthExtras(fn) {
+    healthExtras = typeof fn === 'function' ? fn : null
+}
+
+export async function startHttpServer({ port, host, listenHandle = null, listenRetryMs = 0 } = {}) {
     keepServingOnAsyncFailure()
     logSignalExits()
 
@@ -130,22 +138,45 @@ export async function startHttpServer({ port, host } = {}) {
         socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
     })
 
-    try {
-        await new Promise((resolve, reject) => {
-            server.once('error', reject)
-            server.listen(port, host, () => {
-                server.removeListener('error', reject)
-                resolve()
+    // listenHandle is the listening socket of the process this one replaces, adopted over the IPC
+    // channel: binding it instead of the port is what makes a bundle upgrade leave no window in
+    // which nothing answers.
+    const listenOptions = listenHandle ? { handle: listenHandle } : { port, host }
+    // A replacement that got no handle still has to get on the port somehow, and the process it
+    // replaces may still be holding it, so EADDRINUSE is worth retrying for a while rather than
+    // dying on.
+    const retryDeadline = Date.now() + Math.max(0, listenRetryMs)
+    for (;;) {
+        try {
+            await new Promise((resolve, reject) => {
+                server.once('error', reject)
+                server.listen(listenOptions, () => {
+                    server.removeListener('error', reject)
+                    resolve()
+                })
             })
-        })
-    } catch (error) {
-        appendDiagnostic('http-listen-failed', {
-            host,
-            port,
-            code: error?.code ?? null,
-            error: describeError(error),
-        })
-        throw error
+            break
+        } catch (error) {
+            const retryable = error?.code === 'EADDRINUSE' && Date.now() < retryDeadline
+            appendDiagnostic('http-listen-failed', {
+                host,
+                port,
+                adopted_handle: Boolean(listenHandle),
+                code: error?.code ?? null,
+                retrying: retryable,
+                error: describeError(error),
+            })
+            if (!retryable) throw error
+            await new Promise((resolve) => setTimeout(resolve, 250))
+        }
+    }
+
+    if (listenHandle) {
+        try {
+            process.send({ type: 'gm-mcp-handover-ready', pid: process.pid, version: BUNDLE_VERSION })
+        } catch {
+        }
+        appendDiagnostic('http-start-adopted', { host, port, path: MCP_PATH, pid: process.pid, version: BUNDLE_VERSION })
     }
 
     appendDiagnostic('http-start', { host, port, path: MCP_PATH, pid: process.pid, version: BUNDLE_VERSION })
