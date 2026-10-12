@@ -25,9 +25,11 @@ const INTERVAL_ENV = 'GM_MCP_BUNDLE_DRIFT_INTERVAL_SECONDS'
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const shortHash = (hex) => (typeof hex === 'string' ? hex.slice(0, 12) : null)
 
+// An off value turns the switch off; unset or anything else leaves it on. The OFF_VALUES set exists
+// for exactly this, and both README.md and AGENTS.md document `=0` as "turn every reload off".
 function envOff(name) {
     const raw = (process.env[name] || '').trim().toLowerCase()
-    return raw !== '' && !OFF_VALUES.has(raw)
+    return raw !== '' && OFF_VALUES.has(raw)
 }
 
 export function bundleDriftIntervalMs() {
@@ -104,8 +106,10 @@ export function reloadDisabled() {
 
 // A reload is a process replacement, so it may only move to a bundle this one can prove is not
 // older than itself. Anything that cannot be proven is reported as stale and left alone: serving
-// old code loudly beats replacing this process with worse code.
-function reloadRefusal(runningState, installedState, { transport }) {
+// old code loudly beats replacing this process with worse code. A stdio server is not exempt -- see
+// handOverStdioToRefreshedBundle in bundle-refresh.js, which keeps this process as the client's peer
+// and moves the serving onto a child, so the transport is no longer a reason to refuse.
+function reloadRefusal(runningState, installedState) {
     if (!runningState.readable) return { code: 'running-bundle-unreadable', reason: `this process cannot re-read the file it launched from (${runningState.path})` }
     if (!runningState.bundled) return { code: 'running-not-a-bundle', reason: `this process is running from ${runningState.path}, which is not a single-file bundle, so a reload would restart it on every edit` }
     if (!installedState.bundled) return { code: 'installed-not-a-bundle', reason: `${installedState.path} is not a single-file bundle` }
@@ -114,7 +118,6 @@ function reloadRefusal(runningState, installedState, { transport }) {
         return { code: 'no-downgrade', reason: `${installedState.path} carries ${installedState.version} and this process is running ${runningState.version} -- a reload may not move backwards` }
     }
     if (reloadDisabled()) return { code: 'reload-disabled', reason: `${RELOAD_ENV} turns bundle reload off, so this process only reports the staleness` }
-    if (transport === 'stdio') return { code: 'transport-stdio', reason: 'a stdio server cannot replace itself without detaching its client -- reconnect this session to pick up the installed bundle' }
     return { code: null, reason: null }
 }
 
@@ -132,7 +135,7 @@ export function bundleDrift({ transport = process.env.GM_MCP_TRANSPORT || 'stdio
     if (!installedState) return { ...base, stale: false, reloadable: false, refusal: { code: 'installed-bundle-absent', reason: `${runningState.path} is not readable` } }
     const stale = runningState.sha256 !== installedState.sha256
     if (!stale) return { ...base, stale: false, reloadable: false, refusal: null }
-    const refusal = reloadRefusal(runningState, installedState, { transport })
+    const refusal = reloadRefusal(runningState, installedState)
     return {
         ...base,
         stale: true,
@@ -150,6 +153,19 @@ export function bundleStalenessLine(state = bundleDrift()) {
         ? 'reloading between dispatches now'
         : `not reloading -- ${state.refusal_reason}`
     return `gm-mcp: this server is serving bundle ${running} but ${installed} is installed at ${state.path} -- ${action}`
+}
+
+// The line is a fact about this process, not about the dispatch it rides on: the same four lines
+// appended to every reply of a session is a per-verb tax that says nothing new after the first one.
+// One notice per installed bundle per process, re-armed only when the installed bundle itself moves.
+const noticedBundles = new Set()
+
+export function bundleStalenessNotice(state = bundleDrift()) {
+    if (!state?.stale) return null
+    const key = `${state.installed_sha256 ?? ''}|${state.refusal_code ?? ''}|${state.running_sha256 ?? ''}`
+    if (noticedBundles.has(key)) return null
+    noticedBundles.add(key)
+    return bundleStalenessLine(state)
 }
 
 export function bundleHealthBlock(state = bundleDrift()) {

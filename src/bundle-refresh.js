@@ -40,6 +40,176 @@ export function handoverRequested() {
     return (process.env[HANDOVER_ENV] || '').trim() === '1'
 }
 
+const STDIO_READY_LINE = 'connected, serving on stdio'
+const STDIO_READY_TIMEOUT_MS = 30_000
+
+let stdioRelay = null
+
+function stdioRelayPid() {
+    return stdioRelay && stdioRelay.exitCode === null ? (stdioRelay.pid ?? null) : null
+}
+
+// The client's frames must reach exactly one reader. The SDK's transport owns a `data` listener on
+// stdin; dropping it by identity is what stops this process reading, and pausing is what stops the
+// stream buffering bytes the replacement will never see. The identity is the transport's own bound
+// handler, so a build that renames it falls back to `transport.close()`, the public way to do the
+// same thing.
+function detachStdio(transport) {
+    const stdin = process.stdin
+    const removed = []
+    const bound = [transport?._ondata, transport?._onerror].filter((handler) => typeof handler === 'function')
+    for (const handler of bound) {
+        for (const event of ['data', 'error']) {
+            stdin.off(event, handler)
+            removed.push([event, handler])
+        }
+    }
+    if (bound.length === 0 && transport) {
+        try {
+            Promise.resolve(transport.close?.()).catch(() => {})
+        } catch {
+        }
+    }
+    const ok = stdin.listenerCount('data') === 0
+    if (ok) stdin.pause()
+    return {
+        ok,
+        restore: () => {
+            for (const [event, handler] of removed) stdin.on(event, handler)
+        },
+    }
+}
+
+// The replacement says this on stderr once its own stdio transport is connected, which is the only
+// proof that it is serving rather than merely running. Its stderr is forwarded throughout, so the
+// client's log still carries whatever the new bundle writes.
+function waitForStdioReady(child, { timeoutMs = STDIO_READY_TIMEOUT_MS } = {}) {
+    return new Promise((resolve) => {
+        let settled = false
+        const finish = (value) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            resolve(value)
+        }
+        const timer = setTimeout(() => finish(false), timeoutMs)
+        timer.unref?.()
+        child.once('exit', (code, signal) => {
+            appendDiagnostic('bundle-stdio-handover-child-exited-early', { spawned_pid: child.pid ?? null, code, signal })
+            finish(false)
+        })
+        if (!child.stderr) {
+            finish(false)
+            return
+        }
+        child.stderr.on('data', (chunk) => {
+            if (String(chunk).includes(STDIO_READY_LINE)) finish(true)
+        })
+    })
+}
+
+// A stdio server is owned by its client: the client's child process is this one, and
+// `StdioClientTransport` closes the transport on that child's `close` event, so this process may
+// not exit -- but it also may not keep answering from the bytes it booted from. The way out is to
+// stay the client's peer and stop being the server: stdin is piped to a child running the installed
+// bundle and that child's stdout is written back to the client's pipe. The client sees one process
+// and one stream, nothing closes, and every frame after the switch is answered by the installed
+// bundle. MCP stdio frames are newline-delimited JSON, so the bytes are relayed without parsing.
+export async function handOverStdioToRefreshedBundle({ transport = null, state = null, result = {} } = {}) {
+    if (stdioRelayPid() !== null) return { outcome: 'already-handed-over', pid: stdioRelayPid(), relaying: true }
+
+    const drift = state ?? bundleDrift({ transport: 'stdio' })
+    const detail = {
+        reason: result.reason ?? 'installed-bundle-changed',
+        from: drift.running_sha256 ?? result.from ?? null,
+        to: drift.installed_sha256 ?? result.to ?? null,
+        version: `${drift.running_version}${drift.installed_version ? ` -> ${drift.installed_version}` : ''}`,
+        from_pid: process.pid,
+    }
+
+    if (inflightDispatchCount() > 0) {
+        appendDiagnostic('bundle-stdio-handover-deferred', { ...detail, dispatches_inflight: inflightDispatchCount() })
+        return { outcome: 'deferred', reason: 'dispatch-in-flight', dispatches_inflight: inflightDispatchCount() }
+    }
+
+    if (drift.stale === true && drift.reloadable !== true) {
+        appendDiagnostic('bundle-stdio-handover-refused', {
+            ...detail,
+            refusal_code: drift.refusal_code ?? null,
+            refusal_reason: drift.refusal_reason ?? null,
+        })
+        return { outcome: 'refused', reason: drift.refusal_code ?? 'not-reloadable' }
+    }
+
+    console.error(bundleStalenessLine(drift) ?? 'gm-mcp: handing stdio to the installed bundle')
+    appendDiagnostic('bundle-stdio-handover-start', detail)
+
+    const entry = launchedEntryPath()
+    let child = null
+    try {
+        child = spawn(process.execPath, [entry, ...process.argv.slice(2)], {
+            cwd: process.cwd(),
+            windowsHide: true,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env: { ...process.env, GM_MCP_TRANSPORT: 'stdio' },
+        })
+    } catch (error) {
+        appendDiagnostic('bundle-stdio-handover-spawn-failed', { ...detail, entry, error: describeError(error) })
+        return { outcome: 'failed', reason: 'spawn-failed', error: describeError(error) }
+    }
+    if (!child.stdin || !child.stdout) {
+        appendDiagnostic('bundle-stdio-handover-spawn-failed', { ...detail, entry, spawned_pid: child.pid ?? null, error: 'no-stdio-pipes' })
+        try { child.kill() } catch { }
+        return { outcome: 'failed', reason: 'spawn-failed', error: 'no-stdio-pipes' }
+    }
+    child.on('error', (error) => appendDiagnostic('bundle-stdio-handover-child-error', { ...detail, error: describeError(error) }))
+    if (child.stderr) {
+        child.stderr.on('error', () => { })
+        child.stderr.on('data', (chunk) => {
+            try { process.stderr.write(chunk) } catch { }
+        })
+    }
+
+    const ready = await waitForStdioReady(child)
+    if (!ready) {
+        appendDiagnostic('bundle-stdio-handover-not-ready', { ...detail, spawned_pid: child.pid ?? null, entry })
+        try { child.kill() } catch { }
+        return { outcome: 'failed', reason: 'replacement-not-ready' }
+    }
+
+    // A reply this process writes after the switch would still reach the client -- the pipe is
+    // shared and ordered -- but the request behind it belongs to the code that started it, and the
+    // point of the switch is that the next request does not. Defer rather than cut it in half.
+    if (inflightDispatchCount() > 0) {
+        appendDiagnostic('bundle-stdio-handover-deferred', { ...detail, spawned_pid: child.pid ?? null, dispatches_inflight: inflightDispatchCount() })
+        try { child.kill() } catch { }
+        return { outcome: 'deferred', reason: 'dispatch-in-flight', dispatches_inflight: inflightDispatchCount() }
+    }
+
+    const detached = detachStdio(transport)
+    if (!detached.ok) {
+        detached.restore()
+        appendDiagnostic('bundle-stdio-handover-detach-failed', { ...detail, spawned_pid: child.pid ?? null })
+        try { child.kill() } catch { }
+        return { outcome: 'failed', reason: 'stdio-detach-failed' }
+    }
+
+    child.stdin.on('error', (error) => appendDiagnostic('bundle-stdio-handover-relay-stdin-error', { ...detail, error: describeError(error) }))
+    process.stdin.pipe(child.stdin)
+    child.stdout.pipe(process.stdout)
+    stdioRelay = child
+    child.on('exit', (code, signal) => {
+        // The relay dropping out is recoverable: the drift watch is still armed and hands over again
+        // on its next tick, so a replacement that dies does not leave the session on old code.
+        appendDiagnostic('bundle-stdio-handover-child-exit', { ...detail, to_pid: child.pid ?? null, code, signal })
+        try { process.stdin.unpipe(child.stdin) } catch { }
+        if (stdioRelay === child) stdioRelay = null
+    })
+    appendDiagnostic('bundle-stdio-handover', { ...detail, to_pid: child.pid ?? null, entry, relaying: true })
+    console.error(`gm-mcp: stdio handed to pid ${child.pid} running ${drift.installed_version ?? 'the installed bundle'} -- this process stays up and relays`)
+    return { outcome: 'handed-over', pid: child.pid ?? null, relaying: true }
+}
+
 function childStdio() {
     try {
         const file = logFilePath()
