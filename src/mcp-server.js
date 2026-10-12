@@ -227,8 +227,12 @@ export function verbToolInputSchema(verb) {
     return { ...DISPATCH_FIELDS, ...(VERB_EXTRA_FIELDS[verbToolName(verb)] ?? {}) }
 }
 
+// The initialize reply carries this text to the client. A client that reconnects after the verb
+// tools were removed from its cached list has no other signal that the surface changed.
+const SURFACE_INSTRUCTIONS = 'gm-mcp serves one tool, gm_codemode. Every gm verb is a function on `gm` inside its code body: gm_codemode({code: "return await gm.codesearch({query: \'x\'})"}). Call gm.list() for every callable name and gm.describe(name) for a verb schema. The per-verb tools of earlier builds (gm_instruction, gm, fs_read, git_status, ...) are not registered here, so a client holding a cached tool list must re-fetch tools/list.'
+
 export function createServer() {
-    const server = new McpServer({ name: 'gm-mcp', version: BUNDLE_VERSION })
+    const server = new McpServer({ name: 'gm-mcp', version: BUNDLE_VERSION }, { instructions: SURFACE_INSTRUCTIONS })
     const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`
     const tools = new Map()
     const define = (name, config, handler, verb = null) => tools.set(name, { ...config, verb, handler })
