@@ -46,7 +46,7 @@ export function foldVerbArgs(tool, args) {
     if (extra === null) return args
     if (typeof envelope.raw_body === 'string') return envelope
     const named = envelope.body
-    if (named === undefined) return { ...envelope, body: extra }
+    if (named === undefined) return { ...envelope, body: Object.fromEntries(Object.entries(extra).slice(0, 1)) }
     let body = named
     if (typeof body === 'string') {
         try {
