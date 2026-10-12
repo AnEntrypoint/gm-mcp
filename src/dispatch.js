@@ -6,7 +6,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
-import { bundleStalenessNotice } from './bundle-drift.js'
+import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
@@ -1900,12 +1900,25 @@ async function plainTextOwnerTransport(root, sessionId, signal) {
 // place a notice must never be appended: an extra line there is not a note, it is a different file.
 const VERBATIM_REPLY_VERBS = new Set(['fs_read', 'result', 'gm_result'])
 
+// The prose line is noticed once per installed bundle; the machine-readable block rides on every
+// reply while the served bundle differs from the installed one, so an agent can act on it without
+// parsing the sentence.
 function withStaleBundleNotice(verb, text) {
     if (VERBATIM_REPLY_VERBS.has(verb)) return text
     if (typeof text !== 'string' || text === '') return text
-    const line = bundleStalenessNotice()
-    if (!line) return text
-    return `${text.endsWith('\n') ? text : `${text}\n`}\n${line}\n`
+    const drift = bundleDrift()
+    if (!drift.stale) return text
+    const block = yaml.dump({
+        bundle_stale: true,
+        bundle_served_version: drift.running_version,
+        bundle_served_sha: drift.running_sha256,
+        bundle_installed_version: drift.installed_version,
+        bundle_installed_sha: drift.installed_sha256,
+        bundle_reloadable: drift.reloadable === true,
+    }, { lineWidth: 100 })
+    const line = bundleStalenessNotice(drift)
+    const body = `${text.endsWith('\n') ? text : `${text}\n`}${block}`
+    return line ? `${body}\n${line}\n` : body
 }
 
 export async function gmDispatch(args, signal, responseValueObserver) {
