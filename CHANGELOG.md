@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased - a landed spool file is refused as a link before its target is resolved
+
+Two defects in the landed-result read, both found by `verify` running on linux and macos for the first time (run 38224832255, head 4081582c; windows-latest passed because it skips both of them):
+
+- `validateSpoolFile` resolved the spool path before it looked at what the path names, so a link was refused by the containment check as `spool file resolves outside the .gm/exec-spool/out directory that names it: <...>/out/instruction-escape.json` rather than as a non-regular file. That containment message is not the message `test/landed-output.test.mjs` pinned, so the assertion held only on the platform that skipped the test: on linux and macos -- where the test ran -- it failed, even though both refusals refuse and neither reads the target. A link is now refused by `lstat` before `realpath` touches it, so the answer is `spool file must be an unlinked regular spool file` whether the link escapes the spool or not, and the target is never resolved at all.
+
+- `openSpoolRegularFile` asked `/dev/fd/<fd>` (darwin) or `/proc/self/fd/<fd>` (linux) for the open file's path and compared it with the realpath of the spool out directory. On darwin that entry does not resolve to the open file, so `path.relative` walked up out of the out directory and every landed result in the project was refused as `spool file is outside the GM output spool`, which is the `reply.ok === undefined` at `test/landed-output.test.mjs:42` on macos-latest; windows has no descriptor root and skipped the check entirely, and linux escaped it only because `/tmp` is not a symlink. The descriptor root is gone: the question is now asked of the path the descriptor was opened from, by device and inode, after the open -- which is the window a descriptor path could only guess at -- and it is the same code on every platform, so the platform that runs it is not the platform that decides it.
+
+Measured on a Windows box with `node test/landed-output.test.mjs`, before and after. The link fixtures are junctions on win32 and symlinks elsewhere -- a junction needs no privilege, so the link class is witnessed on every platform instead of only on the three that skipped it -- and each link target carries a secret that must not appear in the refusal:
+
+| landed file | before | after |
+| --- | --- | --- |
+| regular file | read | read (unchanged) |
+| hardlink to a file outside the spool | `spool file must be an unlinked regular spool file` | unchanged |
+| link inside the spool | `spool file must be an unlinked regular spool file` | unchanged |
+| link escaping the spool | `spool file resolves outside the .gm/exec-spool/out directory that names it: <...>/out/instruction-escape.json` | `spool file must be an unlinked regular spool file` |
+| out directory that is a link elsewhere | `spool file resolves outside the .gm/exec-spool/out directory that names it` | unchanged |
+| darwin, regular file (CI macos-latest) | `reply.ok` undefined, every landed result refused | the windows path, which reads it |
+
+The escaping-link row is the non-vacuity proof: that case fails on this box before the change and passes after, so the fix is witnessed here and not only on a darwin runner. The darwin row is the one row this box cannot measure, which is why the descriptor check had to stop being darwin-shaped: with the check gone from `/dev/fd`, darwin runs exactly the code windows runs. `landed-output.test.mjs` goes from 2 passed on windows to 5, and the whole `npm test` set passes.
+
+`bin/gm-mcp-server.js` was stale at 2928aaa -- committed 936154 bytes against a fresh build of 937062 -- which is why `verify` failed at its first step on all four platforms and never reached the contracts; it is rebuilt in this commit, as `check-bin-drift` requires.
+
 ## Unreleased - the ten git verbs that fold a revision now fold every other body field they read
 
 The revision lane closed with `limit`, `stat`, `path`, `mode`, `paths` and `files` still stripped at the top level: `GIT_TOP_LEVEL_FIELDS` named only `range|ref|rev`, so a client sending `{"limit": 2}` to `git_log` had the key removed by zod before `mergeVerbRangeFields` ran and the verb read its own default. `codemode` hides this -- `foldVerbArgs` moves an undeclared key into `body` before validation -- so it bites only a raw MCP caller of the verb tool.
