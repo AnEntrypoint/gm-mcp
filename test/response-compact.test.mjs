@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import * as yaml from 'js-yaml'
-import { cleanResponse, compactWireResponse, renderVerbatimFileText, VERBATIM_TEXT_MARKER } from '../src/response-compact.js'
+import { cleanResponse, compactWireResponse, renderVerbatimFileText, withSearchIncompleteness, VERBATIM_TEXT_MARKER, SEARCH_UNPROVEN_KEY, SEARCH_ZERO_FILES_KEY } from '../src/response-compact.js'
 
 const OUT_PATH = 'C:/proj/.gm/exec-spool/out/instruction-task-1-2-3.json'
 
@@ -248,6 +248,60 @@ test('fs_read text is rendered byte-verbatim: tabs, deep and odd indentation, tr
 
 test('verbatim rendering declines payloads without a string data field', () => {
     assert.equal(renderVerbatimFileText({ ok: false, error: 'x' }, () => ''), undefined)
+})
+
+test('a search that scanned 0 files is annotated, not left to read as a clean empty result', () => {
+    const reply = { ok: true, verb: 'codesearch', data: { ok: true, count: '0 lines', files_scanned: 0, matches: [] } }
+    const out = withSearchIncompleteness(reply)
+    assert.equal(out[SEARCH_ZERO_FILES_KEY], true)
+    assert.match(out[SEARCH_UNPROVEN_KEY], /searched 0 files/)
+    assert.equal(Object.keys(out)[0], SEARCH_ZERO_FILES_KEY)
+})
+
+test('zero hits under an incomplete scan is named unproven instead of reading as absence', () => {
+    const reply = { ok: true, verb: 'codesearch', data: { ok: true, exhaustive: false, files_scanned: 6036, matches: [] } }
+    const out = withSearchIncompleteness(reply)
+    assert.match(out[SEARCH_UNPROVEN_KEY], /INCOMPLETE \(exhaustive:false\)/)
+    assert.match(out[SEARCH_UNPROVEN_KEY], /NOT a finding/)
+    assert.equal(Object.keys(out)[0], SEARCH_UNPROVEN_KEY)
+})
+
+test('zero hits under a budget-exhausted scan is named unproven', () => {
+    const reply = { ok: true, verb: 'codesearch', data: { ok: true, budget_exhausted: true, files_scanned: 411, matches: [] } }
+    assert.match(withSearchIncompleteness(reply)[SEARCH_UNPROVEN_KEY], /budget_exhausted/)
+})
+
+test('zero hits from a complete scan is left alone: that zero really is a finding', () => {
+    const reply = { ok: true, verb: 'codesearch', data: { ok: true, exhaustive: true, files_scanned: 8, matches: [], hint: 'absent' } }
+    assert.equal(withSearchIncompleteness(reply), reply)
+})
+
+test('an incomplete scan that found hits is not annotated: only an empty result is ambiguous', () => {
+    const reply = { ok: true, verb: 'codesearch', data: { ok: true, exhaustive: false, files_scanned: 6036, matches: [{ path: 'a.js', line: 1 }] } }
+    assert.equal(withSearchIncompleteness(reply), reply)
+})
+
+test('filename mode counts hits instead of the empty matches list', () => {
+    const reply = { ok: true, verb: 'codesearch', data: { ok: true, exhaustive: false, match_count: 11, returned_count: 0, scanned: 165 } }
+    assert.equal(withSearchIncompleteness(reply), reply)
+})
+
+test('a non-search verb is never annotated', () => {
+    const reply = { ok: true, verb: 'git_status', data: { ok: true, exhaustive: false, files_scanned: 0, matches: [] } }
+    assert.equal(withSearchIncompleteness(reply), reply)
+})
+
+test('the annotation survives cleaning and wire compaction', () => {
+    const reply = { ok: true, verb: 'codesearch', data: { ok: true, exhaustive: false, files_scanned: 6036, matches: [] } }
+    const cleaned = cleanResponse(withSearchIncompleteness(reply), undefined, OUT_PATH)
+    assert.match(cleaned[SEARCH_UNPROVEN_KEY], /INCOMPLETE/)
+    assert.match(compactWireResponse(cleaned, OUT_PATH)[SEARCH_UNPROVEN_KEY], /INCOMPLETE/)
+})
+
+test('the annotation survives a reply cut at a small max_chars', () => {
+    const reply = { ok: true, verb: 'codesearch', data: { ok: true, exhaustive: false, files_scanned: 6036, matches: [] } }
+    const cleaned = cleanResponse(withSearchIncompleteness(reply), undefined, OUT_PATH, undefined, undefined, 40)
+    assert.match(cleaned[SEARCH_UNPROVEN_KEY], /INCOMPLETE \(exhaustive:false\)/)
 })
 
 console.log(`\n${passed} passed, ${process.exitCode ? 'FAILED' : '0 failed'}`)

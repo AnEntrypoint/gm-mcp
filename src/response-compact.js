@@ -54,6 +54,72 @@ const EMPTY_LIST_IS_THE_ANSWER_KEYS = new Set([
     'launch',
 ])
 
+// A search reply that lists no hits is a finding only when the scan saw everything.
+// "0 hits" and "the code is not there" are the same bytes on the wire, so a search reply
+// that shows no hits while the scan did not cover its scope -- or that covered no file at
+// all -- is annotated instead of being left to read as a clean empty result.
+const SEARCH_VERBS = new Set(['codesearch', 'grep', 'codeinsight', 'code_index', 'callers', 'callees', 'impact'])
+
+const INCOMPLETE_SCAN_WHEN_TRUE = ['budget_exhausted', 'timed_out', 'files_truncated', 'listing_incomplete', 'matches_truncated', 'partial']
+
+const INCOMPLETE_SCAN_WHEN_FALSE = ['exhaustive', 'complete']
+
+const SEARCH_SCOPE_SIZE_KEYS = ['files_scanned', 'scanned']
+
+const SEARCH_EMPTY_RESULT_KEYS = ['match_count', 'returned_count', 'files_with_matches']
+
+export const SEARCH_ZERO_FILES_KEY = 'searched_zero_files'
+
+export const SEARCH_UNPROVEN_KEY = 'zero_hits_is_not_a_finding'
+
+NEVER_TRUNCATE_KEYS.add(SEARCH_ZERO_FILES_KEY).add(SEARCH_UNPROVEN_KEY)
+
+function searchScopeSize(source) {
+    for (const key of SEARCH_SCOPE_SIZE_KEYS) {
+        const value = source[key]
+        if (Number.isFinite(value)) return value
+    }
+    return undefined
+}
+
+function incompleteScanReasons(source) {
+    const reasons = []
+    for (const key of INCOMPLETE_SCAN_WHEN_TRUE) if (source[key] === true) reasons.push(key)
+    for (const key of INCOMPLETE_SCAN_WHEN_FALSE) if (source[key] === false) reasons.push(`${key}:false`)
+    return reasons
+}
+
+function searchShowsNoHits(source) {
+    if (Array.isArray(source.matches)) return source.matches.length === 0
+    for (const key of SEARCH_EMPTY_RESULT_KEYS) {
+        const value = source[key]
+        if (Number.isFinite(value)) return value === 0
+    }
+    return true
+}
+
+export function withSearchIncompleteness(out) {
+    if (!out || typeof out !== 'object' || Array.isArray(out)) return out
+    const data = out.data && typeof out.data === 'object' && !Array.isArray(out.data) ? out.data : null
+    const verb = typeof out.verb === 'string' ? out.verb : (data && typeof data.verb === 'string' ? data.verb : '')
+    if (!SEARCH_VERBS.has(verb)) return out
+    const source = data || out
+    const scopeSize = searchScopeSize(source)
+    if (scopeSize === 0) {
+        return {
+            [SEARCH_ZERO_FILES_KEY]: true,
+            [SEARCH_UNPROVEN_KEY]: 'the scan searched 0 files, so this empty result is a scanner failure and NOT a finding: it says nothing about whether the code exists. Name a scope with "path" (or "paths"), confirm the root, and re-run before concluding anything is absent.',
+            ...out,
+        }
+    }
+    const reasons = incompleteScanReasons(source)
+    if (!reasons.length || !searchShowsNoHits(source)) return out
+    return {
+        [SEARCH_UNPROVEN_KEY]: `0 hits shown, but the scan was INCOMPLETE (${reasons.join(', ')}), so this zero is UNPROVEN and NOT a finding: the needle may sit in a file the scan never read. Re-scope with "path"/"glob" and union the per-subtree results, or raise max_results, before concluding the code is absent.`,
+        ...out,
+    }
+}
+
 const PRD_LISTING_KEYS = new Set(['why'])
 
 const POOL_BRIEF_KEYS = new Set(['brief'])
