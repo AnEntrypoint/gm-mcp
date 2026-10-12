@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased - a verb body field named `body` no longer collides with the dispatch envelope
+
+`foldVerbArgs` sorts a `gm.<verb>({...})` call into the dispatch envelope and the verb body by key: a key the tool schema declares stays at the top level, anything else moves into `body`. `body` is declared by every verb tool, because it is the dispatch envelope's body -- and `prd-add` also names its row prose `body`. So `gm.prd_add({id, subject, body, session_id})` put the prose in the envelope's `body`, and when that string did not decode as JSON the fold gave up and returned the envelope alone: `id` and `subject` were dropped, and the prose itself became the request body. `normalizedObjectBody` writes a string body that does not open with `{` out as literal raw text, so the spool file held `Grass near LOD is picked per 32 m chunk by an 8 m stride.` at byte 0 and the runner refused it before `prd-add` ever ran.
+
+The fold now asks the same question `normalizedObjectBody` asks -- does this string open with `{` -- and treats anything that does not as the verb's own field, so it lands as `body:{id, subject, body}` exactly as `gm.gm({verb:'prd-add', body:{id, subject, body}})` sends it. A string that does open with `{` keeps the dispatch-body path, including the repair hint a malformed JSON body gets.
+
+Measured by driving the real tool over a real MCP session -- a server started from the built bundle, `initialize`, `notifications/initialized`, then `tools/call` on `gm_codemode` -- against `C:/dev/spoint`, before and after:
+
+| call inside `gm_codemode` | before | after |
+| --- | --- | --- |
+| `gm.prd_add({id, subject, body, session_id})` | `error_code: failed`, `body_parse_error: true`, `body_parse_error_offset: 0`, `executed: false` | `ok:true, verb: prd-add, added: GM-VERB-BODY-SHAPE-TEST-7391` |
+| `gm['prd-add']({id, subject, body, session_id})` | same refusal | `ok:true, verb: prd-add, added: GM-VERB-BODY-SHAPE-TEST-7391-H` |
+| `gm.gm({verb:'prd-add', body:{id, subject, body, session_id}})` | `ok:true` (the workaround) | `ok:true, verb: prd-add, added: GM-VERB-BODY-SHAPE-TEST-7391-ENV` |
+
+The row is the non-vacuity proof: `prd_list {id:'GM-VERB-BODY-SHAPE-TEST-7391'}` answers `body: Grass near LOD is picked per 32 m chunk by an 8 m stride.`, so the prose reached the row and not only the request.
+
+
 ## Unreleased - a search reply that lists no hits now says whether that zero is a finding
 
 `codesearch` returning nothing and `codesearch` proving the needle is absent were the same bytes on the
