@@ -317,7 +317,7 @@ at launch time.
 | `body` | object | no | JSON body for the dispatch (not valid for plain-text-body verbs) |
 | `raw_body` | string | no | Literal text body for a plain-text-body verb, mutually exclusive with `body` |
 | `cwd` | string | no | Project root containing `.gm/exec-spool` -- defaults to `process.cwd()` |
-| `timeout_seconds` | number | no | Requested poll budget. Default 120, or an exec-family `timeoutMs` prefix plus 5 s. Explicit values override that request; every call is capped at 240 s and returns a resumable task if still pending. |
+| `timeout_seconds` | number | no | Requested poll budget in seconds. Default 120, or an exec-family `timeoutMs` prefix plus 5 s. Explicit values override that request; every call is capped at 600 s (the harness tool-call max, override with `GM_MCP_POLL_TIMEOUT_CEILING_MS`) and returns a resumable task if still pending. For exec-family verbs it also raises the child's own `timeoutMs` budget to match, so a 400 s poll is not spent waiting on work the daemon reaps at 300 s. |
 | `poll_interval_seconds` | number | no | Fallback response check interval when filesystem events are unavailable (default 0.25) |
 | `include_timing` | boolean | no | Include MCP submission-to-response timing and the last response wakeup source |
 | `resume_task` | string | no | The `task` field from a previous `timed_out`/aborted response -- keep polling that SAME dispatch instead of writing a new one |
@@ -444,19 +444,29 @@ produced. The exec family is `exec_js` (aliases `nodejs`, `javascript`, `node`, 
 
 For these verbs the server adds the line itself when `raw_body` lacks one:
 
-- the value is 300000 (`EXEC_DEFAULT_LIMIT_SECONDS`), the daemon default; `timeout_seconds` never changes it and sets only the poll budget
+- the value is the caller's own poll budget minus 5 s, floored at 300000
+  (`EXEC_DEFAULT_LIMIT_SECONDS`, the daemon default) and capped at 900000
+  (agentplug-host's `HARD_CEILING_MS`). A short poll therefore never shortens a
+  child's life, and a long one buys the child the time the caller is waiting for
+- with no `timeout_seconds` the value stays 300000, the daemon default
 - a `raw_body` that already starts with `timeoutMs=<ms>` or `timeout_ms=<ms>`
   (leading whitespace allowed) is sent unchanged -- an explicit line wins
 
 The prefix is the process budget the daemon enforces; `timeout_seconds` requests
-the wrapper's poll budget. Without an explicit poll value, an exec prefix requests
-its duration plus 5 s, with a 120 s minimum. Every initial or resume call is capped
-at 240 s so it can return before a 300 s client transport deadline. A pending reply
-reports `poll_timeout_ms`, `requested_poll_timeout_ms`, `poll_timeout_capped`,
-and the original `task` and spool paths. Resume that same task without a body;
-poll expiration neither stops execution nor queues another dispatch. Because
-the daemon kills the child at `timeoutMs`, an abandoned call never leaves a
-runaway process: it ends at the limit. An aborted call also withdraws its
+the wrapper's poll budget and, for these verbs, raises that process budget to
+match. Without an explicit poll value, an exec prefix requests its duration plus
+5 s, with a 120 s minimum. Every initial or resume call is capped at 600 s, the
+harness tool-call maximum -- set `GM_MCP_POLL_TIMEOUT_CEILING_MS` to move it.
+A pending reply reports `poll_timeout_ms`, `requested_poll_timeout_ms`,
+`poll_timeout_capped`, `poll_timeout_ceiling_ms` and `poll_timeout_cap_reason`
+(a sentence naming why the wait ended, not just a boolean), and for exec verbs
+`exec_limit_ms` plus an `exec_child` sentence stating that gm did NOT kill the
+child and when the daemon will reap it. It also reports the original `task` and
+spool paths. Resume that same task without a body; poll expiration neither stops
+execution nor queues another dispatch. The daemon kills the child at `timeoutMs`,
+so an abandoned call never leaves a runaway process -- it ends at that limit, and
+the reply says so instead of leaving the caller believing the work continues.
+An aborted call also withdraws its
 request from the spool when the daemon has not claimed it yet
 (`request_withdrawn_before_claim`).
 

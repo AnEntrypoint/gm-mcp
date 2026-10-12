@@ -1303,9 +1303,25 @@ const DEFAULT_TIMEOUT_SECONDS = 120
 
 const EXEC_DEFAULT_LIMIT_SECONDS = 300
 
+const EXEC_DEFAULT_LIMIT_MS = EXEC_DEFAULT_LIMIT_SECONDS * 1000
+
+// agentplug-host's exec_js HARD_CEILING_MS. A larger timeoutMs is clamped there in silence, so a
+// wrapper writing the prefix can never buy a child more than this, and must not promise more.
+const EXEC_HARD_CEILING_MS = 900000
+
 const POLL_MARGIN_PAST_EXEC_TIMEOUT_MS = 5000
 
-const MCP_POLL_TIMEOUT_CEILING_MS = 240000
+// A caller's timeout_seconds is honoured up to the harness's own 600s tool-call ceiling. Nothing
+// about the serial lane or the claim sweep needs a shorter wait: a poll that gives up leaves the
+// dispatch claimed and resumable, so it costs the lane nothing extra to have waited longer. Set
+// GM_MCP_POLL_TIMEOUT_CEILING_MS to move it -- a client whose own transport deadline is shorter
+// still gets a resumable reply at that deadline.
+const POLL_TIMEOUT_CEILING_DEFAULT_MS = 600000
+
+export function pollTimeoutCeilingMs() {
+    const configured = Number(process.env.GM_MCP_POLL_TIMEOUT_CEILING_MS)
+    return Number.isFinite(configured) && configured > 0 ? Math.round(configured) : POLL_TIMEOUT_CEILING_DEFAULT_MS
+}
 
 const MAX_TIMER_TIMEOUT_MS = 2_147_483_647
 
@@ -1359,10 +1375,26 @@ export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
     return DEFAULT_TIMEOUT_SECONDS * 1000
 }
 
-export function withTimeoutMsPrefix(verb, raw_body) {
+// The exec child's own budget, in milliseconds: what the daemon writes as the `timeoutMs=` prefix
+// when the body carried none, and therefore the instant the daemon reaps the child. It follows the
+// caller's poll budget instead of standing at the 300s default, because a caller that asked to wait
+// 400s was otherwise answered "still in flight" at 240s for work the daemon had already killed at
+// 300s -- a budget nobody could see or raise. It never shrinks the child's life below the default,
+// so a short poll stays just a short poll.
+export function execLimitMs(verb, raw_body, timeout_seconds) {
+    const bodyPrefix = TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === 'string' ? TIMEOUT_MS_PREFIX_VALUE.exec(raw_body) : null
+    if (bodyPrefix) {
+        const milliseconds = Number(bodyPrefix[1])
+        if (Number.isSafeInteger(milliseconds) && milliseconds <= EXEC_HARD_CEILING_MS) return milliseconds
+    }
+    const pollBudgetMs = Math.min(pollTimeoutMs(verb, raw_body, timeout_seconds), pollTimeoutCeilingMs())
+    return Math.min(EXEC_HARD_CEILING_MS, Math.max(EXEC_DEFAULT_LIMIT_MS, pollBudgetMs - POLL_MARGIN_PAST_EXEC_TIMEOUT_MS))
+}
+
+export function withTimeoutMsPrefix(verb, raw_body, timeout_seconds) {
     if (!TIMEOUT_MS_PREFIX_VERBS.has(verb)) return raw_body
     if (TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return raw_body
-    return `timeoutMs=${EXEC_DEFAULT_LIMIT_SECONDS * 1000}\n${raw_body}`
+    return `timeoutMs=${execLimitMs(verb, raw_body, timeout_seconds)}\n${raw_body}`
 }
 
 const DAEMON_HEARTBEAT_STALE_MS = Number(process.env.GM_MCP_DAEMON_HEARTBEAT_STALE_MS) > 0
@@ -1952,7 +1984,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     // caller passing timeout_seconds: 240 was still answered at the lane's own 120s, a timer it
     // could neither see nor raise.
     const requestedPollTimeoutMs = resume_task ? timeoutMilliseconds(timeout_seconds, DEFAULT_TIMEOUT_SECONDS) : pollTimeoutMs(verb, raw_body, timeout_seconds)
-    const timeoutMs = Math.min(requestedPollTimeoutMs, MCP_POLL_TIMEOUT_CEILING_MS)
+    const pollCeilingMs = pollTimeoutCeilingMs()
+    const timeoutMs = Math.min(requestedPollTimeoutMs, pollCeilingMs)
+    const execMs = EXEC_FAMILY_VERBS.includes(verb) ? execLimitMs(verb, raw_body, timeout_seconds) : null
 
     if (!resume_task) {
         const unavailable = runnerUnavailable(root, spoolDir)
@@ -1964,7 +1998,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         if (isPlainText) {
             ownerTransport = await plainTextOwnerTransport(root, session_id, signal)
             if (signal?.aborted) return toYaml({ error: 'aborted', owner_transport: ownerTransport, wrote_no_new_dispatch: true })
-            const plaintext = withTimeoutMsPrefix(verb, raw_body)
+            const plaintext = withTimeoutMsPrefix(verb, raw_body, timeout_seconds)
             publishSpoolRequest(inDir, inPath, n, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
         } else if (rawBodyText !== undefined) {
             publishSpoolRequest(inDir, inPath, n, rawBodyText)
@@ -2072,12 +2106,24 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 const landedLate = readLandedOutFile()
                 if (landedLate !== undefined) return landedLate
             }
+            const capped = requestedPollTimeoutMs > timeoutMs
+            const execRemainingMs = execMs === null || resume_task ? null : Math.max(0, execMs - (Date.now() - callStartedAtMs))
+            const execNote = execMs === null ? null : [
+                `this timeout does NOT kill the child: the daemon holds it and reaps it only when it reaches its own ${execMs}ms exec budget, measured from the original dispatch start`,
+                execRemainingMs === null ? null : execRemainingMs > 0 ? `about ${Math.ceil(execRemainingMs / 1000)}s from now` : 'which has already elapsed, so the out-file will report killed:true/exec_timeout',
+                `resume this same task with resume_task and a timeout_seconds that outlasts that budget, or set the budget yourself with a timeoutMs=<ms> first line in the body (up to ${EXEC_HARD_CEILING_MS})`,
+            ].filter(Boolean).join('; ')
             return toYaml({
                 timed_out: true,
                 task: n,
                 poll_timeout_ms: timeoutMs,
                 requested_poll_timeout_ms: requestedPollTimeoutMs,
-                poll_timeout_capped: requestedPollTimeoutMs > timeoutMs,
+                poll_timeout_capped: capped,
+                poll_timeout_ceiling_ms: pollCeilingMs,
+                poll_timeout_cap_reason: capped
+                    ? `gm stopped waiting at its ${pollCeilingMs}ms poll ceiling, not because the dispatch failed: set GM_MCP_POLL_TIMEOUT_CEILING_MS higher for this server, or resume_task, to keep waiting on the same dispatch`
+                    : 'gm stopped waiting because the caller-supplied budget ran out; the dispatch itself is untouched',
+                ...(execMs === null ? {} : { exec_limit_ms: execMs, child_reaped_at_exec_limit: true, exec_child: execNote }),
                 resume_task_supported: true,
                 resumed_this_call: Boolean(resume_task),
                 in_path: inPath,

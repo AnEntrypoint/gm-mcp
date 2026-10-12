@@ -59,12 +59,17 @@ what README does not.
   with `timeoutMs=<ms>` requests that value plus 5 s (never less than 120 s),
   because the daemon enforces `timeoutMs` as a wall-clock limit and kills the
   child tree at expiry, answering with `exec_timeout` at that point. The prefix the
-  wrapper injects when the body has none is 300000 (`EXEC_DEFAULT_LIMIT_SECONDS`),
-  the daemon default, while the poll without a prefix stays 120 s. A `resume_task` poll sends no body, so it only has
-  `timeout_seconds` to go on. Every initial or resume poll is capped at 240 s,
-  leaving time for bounded preflight and final recheck before a 300 s client
-  transport deadline. A poll timeout reports requested/applied budgets and the
-  original spool task and paths; it neither cancels nor republishes execution.
+  wrapper injects when the body has none follows the caller's own poll budget
+  minus 5 s, floored at 300000 (`EXEC_DEFAULT_LIMIT_SECONDS`) and capped at
+  900000 (agentplug-host's `HARD_CEILING_MS`), so a caller that asks to wait
+  400 s is not answered "still in flight" for work the daemon reaped at 300 s.
+  The poll without a prefix stays 120 s. A `resume_task` poll sends no body, so it only has
+  `timeout_seconds` to go on. Every initial or resume poll is capped at 600 s, the
+  harness tool-call maximum, overridable with `GM_MCP_POLL_TIMEOUT_CEILING_MS`.
+  A poll timeout reports requested/applied budgets, the ceiling and a sentence
+  saying why the wait ended; it neither cancels nor republishes execution, and it
+  names the exec child's `timeoutMs` deadline instead of implying the work
+  continues indefinitely.
 - `unpackExecOutputEnvelope` parses the exec family's `data` JSON string into an
   object before cleaning, so `stdout`, `stderr` and `result` keep their own
   16000-character cap (`EXEC_OUTPUT_FIELD_TRUNCATE_AT`) instead of sharing the
