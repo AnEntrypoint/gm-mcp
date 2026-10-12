@@ -656,9 +656,13 @@ function openSpoolRegularFile(root, file) {
         if (opened.size > RESULT_FILE_MAX_BYTES) throw new Error(`spool file exceeds ${RESULT_FILE_MAX_BYTES} byte limit`)
         const descriptorPath = openedDescriptorPath(fd)
         if (descriptorPath) {
-            const relative = path.relative(resolvedOutDir, descriptorPath)
+            // Resolved the same way the out directory was: a project reached through a symlink
+            // makes /dev/fd/<fd> report the path as opened, so an unresolved comparison against
+            // the realpath of the out directory refuses every landed result in such a project.
+            const resolvedDescriptor = fs.realpathSync(descriptorPath)
+            const relative = path.relative(resolvedOutDir, resolvedDescriptor)
             if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-                throw new Error('spool file is outside the GM output spool')
+                throw new Error(`spool file is outside the GM output spool: ${resolvedDescriptor} is not under ${resolvedOutDir}`)
             }
         }
         return { fd, file: candidate, size: opened.size, mtimeMs: opened.mtimeMs }
