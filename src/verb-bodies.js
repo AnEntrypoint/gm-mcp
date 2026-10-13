@@ -101,7 +101,7 @@ const VERB_BODY_SCHEMAS = {
         fields: {
             query: { type: 'string', aliases: ['pattern'], description: 'Non-empty needle. Passing query and pattern with different values is refused.' },
             mode: { type: 'string', enum: ['dual', 'literal', 'regex', 'filename', 'comments'], description: 'An unknown mode is refused. literal, regex and filename refuse any field outside the exhaustive set.' },
-            k: { type: 'integer', aliases: ['max_results', 'maxResults', 'limit', 'head_limit'], description: 'Result cap; 0 means unlimited for literal, regex and filename (refused for dual); conflicting values are refused.' },
+            k: { type: 'integer', aliases: ['max_results', 'maxResults', 'limit', 'head_limit'], description: 'Result cap. Defaults to 50 for literal, regex and filename (the reply then reports count, shown and a hint); 0 means unlimited for those modes (refused for dual); conflicting values are refused.' },
             max_matches: { type: 'integer', description: 'Match cap.' },
             max_files: { type: 'integer', description: 'File cap.' },
             max_chars: { type: 'integer', description: 'Byte cap on returned text.' },

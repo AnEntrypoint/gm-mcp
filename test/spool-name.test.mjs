@@ -3,8 +3,6 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import * as yaml from 'js-yaml'
-// The fixture root is a throwaway temp dir: a detached spool runner spawned inside it holds that
-// directory as its cwd, which on Windows makes the fixture undeletable and leaves a daemon behind.
 process.env.GM_MCP_DAEMON_RESPAWN = '0'
 process.env.GM_MCP_RUNNER_WATCHDOG = '0'
 import { gmDispatch, unsafeSpoolName } from '../src/dispatch.js'

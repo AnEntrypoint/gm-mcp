@@ -1,6 +1,4 @@
 import assert from 'node:assert/strict'
-// The staleness this pins is a mismatch between two version numbers, so the assertions run on the
-// pure reporters with a state object: nothing here touches the file this test launched from.
 import { bundleDrift, bundleDriftIntervalMs, bundleHealthBlock, bundleStalenessLine, reloadDisabled } from '../src/bundle-drift.js'
 
 let passed = 0
@@ -67,8 +65,6 @@ await test('an unknown installed version still names the mismatch', () => {
 })
 
 await test('a dev checkout is never reloadable, whatever the installed file is', () => {
-    // This test runs from src/, so the file it launched from is not a bundle: drift detection must
-    // report that and refuse, rather than replacing a node process on every edit.
     const drift = bundleDrift({ transport: 'http' })
     assert.equal(drift.stale, false)
     assert.equal(drift.reloadable, false)

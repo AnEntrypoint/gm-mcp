@@ -4,7 +4,7 @@ MCP server exposing gm's spool dispatch cycle (write, poll, cleaned response) to
 
 ## What it does
 
-Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a single MCP tool call named `gm`, instead of a caller writing the input file, polling for the output file, and reading it as three separate steps.
+Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a single MCP tool call (`gm_codemode`, with `gm.<verb>({...})` calls in its code), instead of a caller writing the input file, polling for the output file, and reading it as three separate steps.
 
 - Writes `.gm/exec-spool/in/<verb>/<N>.txt`
 - Polls `.gm/exec-spool/out/<verb>-<N>.json` until it appears (or a timeout elapses)
@@ -348,12 +348,12 @@ at launch time.
 
 ## Verb tools
 
-Every registry verb is also its own MCP tool. The tool name is the verb name with
-each hyphen replaced by an underscore (`prd-add` becomes `prd_add`,
-`mutable-resolve` becomes `mutable_resolve`; `git_status` and `exec_js` are
-unchanged). The verb tool takes the same parameters as `gm` above except `verb`,
-and forwards to the same dispatch path with that verb set. The registry list
-lives in `src/verbs.js` (`RUNNER_REGISTRY_VERBS`). The generic `gm` tool stays registered.
+The server registers one MCP tool, `gm_codemode`. Every registry verb is a function
+on `gm` inside its code body. Discover names with `gm.list()` and a verb's schema
+with `gm.describe(name)`. Call a verb as `gm.<verb>({...})` or `gm.gm({verb, body})`;
+both take the same dispatch path. The registry list lives in `src/verbs.js`
+(`RUNNER_REGISTRY_VERBS`). A client holding a cached `tools/list` from an earlier
+build must re-fetch it.
 
 ## Wire compaction
 

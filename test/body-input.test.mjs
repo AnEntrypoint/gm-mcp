@@ -45,9 +45,6 @@ test('an escaped quote in a JSON string body survives the round trip', () => {
 })
 
 test('a value carrying a quote-then-closing-brace is one value, not a truncated one', () => {
-    // The repair pass used to read the "}" after the inner quote as the object's closing brace,
-    // cutting the value to "a" and failing the parse on the "}b" left behind. The value has to be
-    // repaired to a\"}b and parsed whole.
     assert.deepEqual(valueOf('{"query":"a"}b"}'), { query: 'a"}b' })
     assert.deepEqual(valueOf('{"query":"a"}b","mode":"literal"}'), { query: 'a"}b', mode: 'literal' })
     assert.deepEqual(valueOf('{"query":"say "hi"}"}'), { query: 'say "hi"}' })

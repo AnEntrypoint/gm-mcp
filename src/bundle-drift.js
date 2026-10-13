@@ -1,11 +1,3 @@
-// A running gm-mcp process is a snapshot of the bundle file it was launched from: node read that
-// file once, and nothing in this process re-reads it. So when something installs a newer bundle
-// over that path -- a lane build, dev-sync, the release channel -- the process keeps answering with
-// its own boot-time code and says nothing about it. That is the staleness this module measures,
-// against the one authority that matters: the bytes now on disk at the path this process launched
-// from. The release-channel check in self-update.js cannot see it, because that one compares the
-// deployed file against a URL and answers "current" whenever the two agree, whatever this process
-// happens to be running.
 import { createHash } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { BUNDLE_VERSION } from './bundle-version.js'
@@ -25,8 +17,6 @@ const INTERVAL_ENV = 'GM_MCP_BUNDLE_DRIFT_INTERVAL_SECONDS'
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const shortHash = (hex) => (typeof hex === 'string' ? hex.slice(0, 12) : null)
 
-// An off value turns the switch off; unset or anything else leaves it on. The OFF_VALUES set exists
-// for exactly this, and both README.md and AGENTS.md document `=0` as "turn every reload off".
 function envOff(name) {
     const raw = (process.env[name] || '').trim().toLowerCase()
     return raw !== '' && OFF_VALUES.has(raw)
@@ -37,8 +27,6 @@ export function bundleDriftIntervalMs() {
     return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : DEFAULT_INTERVAL_MS
 }
 
-// Only a single-file bundle is watcheable. A process running from src/ is a dev checkout whose
-// entry file changes on every edit, and reloading it would restart on every save.
 function isBundle(bytes) {
     if (!bytes || bytes.length === 0) return false
     if (!bytes.subarray(0, BUNDLE_SHEBANG.length).toString('utf8').startsWith(BUNDLE_SHEBANG)) return false
@@ -72,8 +60,6 @@ export function runningBundle() {
 
 let installed = { size: -1, mtimeMs: -1, sha256: null, version: null }
 
-// Hashing a ~1 MB bundle costs a few ms, and the drift watch runs forever, so the hash is taken
-// only when the file's size or mtime actually moved -- the same file stat'd twice is free.
 export function installedBundle() {
     const path = bundleEntryPath()
     let stat = null
@@ -104,11 +90,6 @@ export function reloadDisabled() {
     return envOff(RELOAD_ENV)
 }
 
-// A reload is a process replacement, so it may only move to a bundle this one can prove is not
-// older than itself. Anything that cannot be proven is reported as stale and left alone: serving
-// old code loudly beats replacing this process with worse code. A stdio server is not exempt -- see
-// handOverStdioToRefreshedBundle in bundle-refresh.js, which keeps this process as the client's peer
-// and moves the serving onto a child, so the transport is no longer a reason to refuse.
 function reloadRefusal(runningState, installedState) {
     if (!runningState.readable) return { code: 'running-bundle-unreadable', reason: `this process cannot re-read the file it launched from (${runningState.path})` }
     if (!runningState.bundled) return { code: 'running-not-a-bundle', reason: `this process is running from ${runningState.path}, which is not a single-file bundle, so a reload would restart it on every edit` }
@@ -145,8 +126,6 @@ export function bundleDrift({ transport = process.env.GM_MCP_TRANSPORT || 'stdio
     }
 }
 
-// The exact command that serves the installed bundle: the same launch the host registers, so a
-// restart is the process exiting and the host running this line again.
 export function restartCommand(path = bundleEntryPath()) {
     return `node "${path}"`
 }
@@ -161,14 +140,10 @@ export function bundleStalenessLine(state = bundleDrift()) {
     return `gm-mcp: this server is serving bundle ${running} but ${installed} is installed at ${state.path} -- ${action}`
 }
 
-// Every dispatch reply of a stale process carries the line, because the reply is the only channel
-// an agent reads; stderr goes to the host log, not to the agent.
 export function bundleStalenessNotice(state = bundleDrift()) {
     return bundleStalenessLine(state)
 }
 
-// The stderr announcement is a fact about this process, not about one dispatch: one line per
-// installed bundle per process, re-armed only when the installed bundle itself moves.
 const announcedBundles = new Set()
 
 export function bundleStalenessAnnouncement(state = bundleDrift()) {
@@ -192,8 +167,6 @@ export function bundleHealthBlock(state = bundleDrift()) {
     }
 }
 
-// A reload only ever happens between dispatches (see bundle-refresh.js), so a watcher tick that
-// lands mid-dispatch reports "deferred" and the next tick tries again.
 export function startBundleDriftWatch(onDrift, { intervalMs = bundleDriftIntervalMs(), transport } = {}) {
     let checking = false
     const tick = async () => {

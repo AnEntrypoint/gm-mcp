@@ -83,8 +83,6 @@ await test('oversized timeout directives are rejected before a dispatch is writt
 })
 
 await test('a timeoutMs past the exec ceiling is clamped, not replaced by a poll-derived default', () => {
-    // 1800000 passes the unreachable MAX_EXEC_TIMEOUT_MS bound, so it reaches execLimitMs. Falling
-    // through there reported ~595000: neither what was asked for nor what the daemon enforces.
     assert.equal(execLimitMs('bash', 'timeoutMs=1800000\necho ok', 999), EXEC_CEILING_MS)
     assert.equal(execLimitMs('bash', 'timeoutMs=1800000\necho ok', undefined), EXEC_CEILING_MS)
     assert.equal(execLimitMs('bash', 'timeoutMs=420000\necho ok', 999), 420_000)
