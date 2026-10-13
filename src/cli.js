@@ -1,10 +1,30 @@
 import fs from 'node:fs'
+import path from 'node:path'
 import { main, flagValue } from './index.js'
 import { gmDispatch } from './dispatch.js'
 import { runDevSync } from './dev-sync.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
-import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances } from './singleton.js'
+import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
+import { reapReport, formatFindings } from './leak-reaper.js'
+import { attributePid, globalLedgerPath } from './child-ledger.js'
+
+function repeatedFlag(name) {
+    const values = []
+    const argv = process.argv.slice(3)
+    for (let i = 0; i < argv.length; i++) {
+        const arg = argv[i]
+        if (!arg.startsWith('--')) continue
+        const body = arg.slice(2)
+        const eq = body.indexOf('=')
+        const key = eq === -1 ? body : body.slice(0, eq)
+        if (key !== name) continue
+        if (eq !== -1) values.push(body.slice(eq + 1))
+        else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) values.push(argv[i + 1])
+        else values.push('true')
+    }
+    return values.filter((value) => value !== 'true')
+}
 
 const DISPATCH_USAGE = `gm-mcp ${BUNDLE_VERSION} dispatch <verb> [--body <json|@file|->] [--raw <text|@file|->] [payload]
 
@@ -214,6 +234,42 @@ const COMMANDS = {
         console.log(JSON.stringify({ port, url: httpMcpUrl(port), running: Boolean(health), health }, null, 2))
         return 0
     },
+    'reap': async () => {
+        const apply = process.argv.includes('--apply')
+        const roots = repeatedFlag('root')
+        if (roots.length === 0) roots.push(process.cwd())
+        const report = await reapReport({ roots: roots.map((root) => path.resolve(root)), apply })
+        if (process.argv.includes('--json')) {
+            console.log(JSON.stringify(report, null, 2))
+        } else {
+            console.log(formatFindings(report))
+            if (!apply && report.counts.retire > 0) {
+                console.log(`\n(dry run: nothing was signalled -- re-run with --apply to retire the ${report.counts.retire} above)`)
+            }
+        }
+        return 0
+    },
+    'attribute': async () => {
+        const pid = Number(flagValue('pid'))
+        if (!Number.isInteger(pid) || pid <= 0) {
+            console.error('gm-mcp attribute: --pid <n> is required')
+            return 2
+        }
+        const roots = repeatedFlag('root')
+        if (roots.length === 0) roots.push(process.cwd())
+        const rows = roots.map((root) => attributePid(pid, { root: path.resolve(root) }))
+        const attributed = rows.find((row) => row.attributed === true)
+        const answer = attributed ?? rows[0]
+        console.log(JSON.stringify({ ...answer, ledger: globalLedgerPath(), roots: roots.map((root) => path.resolve(root)) }, null, 2))
+        return attributed ? 0 : 1
+    },
+    'port-pool': async () => {
+        const reclaimed = await reclaimDeadPortRegistries()
+        const preferred = Number(flagValue('preferred')) || defaultHttpPort()
+        const next = allocateHttpPort({ preferred })
+        console.log(JSON.stringify({ range: [PORT_POOL_FROM, PORT_POOL_TO], preferred, reclaimed, allocated: next }, null, 2))
+        return 0
+    },
 }
 
 const command = process.argv[2]
@@ -234,6 +290,15 @@ usage:
   gm-mcp-server.js dispatch <verb> [--body <json>] [--raw <text>] [--cwd <dir>] [--no-ignore] [--help]
                                    run a gm dispatch from the shell and print its reply,
                                    with no MCP client involved
+  gm-mcp-server.js reap [--apply] [--root <dir>]... [--json]
+                                   report leaked processes and leases; without --apply it only
+                                   prints what it WOULD retire, and it never signals a pid it
+                                   cannot attribute or a record whose death it cannot measure
+  gm-mcp-server.js attribute --pid N [--root <dir>]...
+                                   print which dispatch spawned pid N (exit 1 if unattributed)
+  gm-mcp-server.js port-pool [--preferred N]
+                                   reclaim dead port registries and print the port that would
+                                   be allocated next (lowest free, so ports stop ratcheting)
   gm-mcp-server.js pin-local-build [path]   pin the deployed bundle (default ~/.gm-tools/gm-mcp-server.mjs) so a self-update cannot overwrite it
   gm-mcp-server.js unpin-local-build        clear that pin
   gm-mcp-server.js self-update-status       print no-self-update state, local-build pin and deployed bundle sha256

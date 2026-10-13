@@ -5,6 +5,8 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { pidAlive } from './dispatch.js'
+import { portListenerState } from './ports.js'
+import { recordChild } from './child-ledger.js'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { keepServingOnAsyncFailure, logSignalExits } from './transport-guard.js'
 import { DEFAULT_HOST, DEFAULT_PORT, HEALTH_PATH, MCP_PATH } from './http-transport.js'
@@ -157,6 +159,7 @@ export function spawnServerProcess({ port = defaultHttpPort(), host = DEFAULT_HO
         appendDiagnostic('http-singleton-spawn-error', { port, entry, error: describeError(error) })
     })
     child.unref()
+    if (child.pid) recordChild({ pid: child.pid, kind: 'http-server', port, verb: 'ensure-http', note: entry })
     return child.pid ?? null
 }
 
@@ -219,7 +222,7 @@ export function recordHttpInstance({ port = defaultHttpPort(), host = DEFAULT_HO
     return state
 }
 
-function liveSupervisorPid(port, instance = null, now = Date.now()) {
+export function liveSupervisorPid(port, instance = null, now = Date.now()) {
     const state = readStateFile(supervisorStateFilePath(port), port)
     if (state && Number.isInteger(Number(state.pid)) && pidAlive(state.pid) === true) {
         const interval = Number.isFinite(state.interval_ms) ? state.interval_ms : SUPERVISOR_INTERVAL_MS
@@ -231,9 +234,37 @@ function liveSupervisorPid(port, instance = null, now = Date.now()) {
     return null
 }
 
-function recordedServerPid(instance, supervisor) {
+/**
+ * The pid the TCP table names as the listener, with phantom rows filtered out: when a socket is
+ * handed to a child, the table keeps naming the creator, and a creator that has since exited
+ * leaves a row no process owns. A dead owner pid is therefore UNMEASURED, not a different owner.
+ */
+export function portOwnerPid(port) {
+    const state = portListenerState(port)
+    if (state.measured !== true || state.hasListener !== true) return null
+    return pidAlive(state.ownerPid) === true ? state.ownerPid : null
+}
+
+export function portHasListener(port) {
+    const state = portListenerState(port)
+    return state.measured === true ? state.hasListener : null
+}
+
+/**
+ * A recorded pid that is alive is NOT proof this instance still exists: pids are recycled, and
+ * a recycled pid made a dead registry look live forever, which is what kept the port pool
+ * ratcheting upward instead of reusing the port. The pid must also own the listening socket on
+ * the registered port before its liveness counts.
+ */
+export function recordedServerPid(instance, supervisor, port = null) {
+    const state = port === null ? null : portListenerState(port)
+    if (state?.measured === true && state.hasListener === false) return null
+    const ownerPid = port === null ? null : portOwnerPid(port)
     for (const candidate of [Number(instance?.pid), Number(supervisor?.server_pid)]) {
-        if (Number.isInteger(candidate) && candidate > 0 && pidAlive(candidate) === true) return candidate
+        if (!Number.isInteger(candidate) || candidate <= 0) continue
+        if (pidAlive(candidate) !== true) continue
+        if (ownerPid !== null && ownerPid !== candidate) continue
+        return candidate
     }
     return null
 }
@@ -320,7 +351,7 @@ async function retireHttpInstance({ port, pid, reason, version = null }) {
     return true
 }
 
-function dropInstanceFiles(port) {
+export function dropInstanceFiles(port) {
     dropFile(instanceFilePath(port))
     dropFile(supervisorStateFilePath(port))
     dropSingletonStateForPort(port)
@@ -331,7 +362,7 @@ export async function reapDeadHttpInstances() {
     for (const port of registeredHttpPorts()) {
         const instance = readStateFile(instanceFilePath(port), port)
         const supervisor = readStateFile(supervisorStateFilePath(port), port)
-        if (recordedServerPid(instance, supervisor) !== null) continue
+        if (recordedServerPid(instance, supervisor, port) !== null) continue
         if (await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS)) continue
         dropInstanceFiles(port)
         appendDiagnostic('http-instance-reaped-dead', {
@@ -350,7 +381,7 @@ export async function replaceBehindHttpInstances({ now = Date.now() } = {}) {
     for (const port of registeredHttpPorts()) {
         const instance = readStateFile(instanceFilePath(port), port)
         const supervisor = readStateFile(supervisorStateFilePath(port), port)
-        if (recordedServerPid(instance, supervisor) === null) continue
+        if (recordedServerPid(instance, supervisor, port) === null) continue
         if (instance === null && supervisor === null) continue
         const health = await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS)
         if (!health) continue
@@ -398,14 +429,61 @@ export async function reapOrphanedHttpInstances({ now = Date.now() } = {}) {
     return reaped
 }
 
+/**
+ * Port-pool reuse. A port is free only when nothing listens on it AND no live instance is
+ * registered for it; a registered-but-dead port is exactly the one that must come back, so the
+ * reclaim pass runs first and the allocator then returns the LOWEST free port rather than the
+ * next one above the highest ever used.
+ */
+export const PORT_POOL_FROM = 8787
+export const PORT_POOL_TO = 8879
+
+export async function reclaimDeadPortRegistries() {
+    const reclaimed = []
+    for (const port of registeredHttpPorts()) {
+        const instance = readStateFile(instanceFilePath(port), port)
+        const supervisor = readStateFile(supervisorStateFilePath(port), port)
+        if (recordedServerPid(instance, supervisor, port) !== null) continue
+        if (await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS)) continue
+        if (portOwnerPid(port) !== null) continue
+        dropInstanceFiles(port)
+        appendDiagnostic('http-port-reclaimed', { port, instance_pid: instance?.pid ?? null, supervisor_pid: supervisor?.pid ?? null })
+        reclaimed.push(port)
+    }
+    return reclaimed
+}
+
+export function portIsFree(port) {
+    const wanted = Number(port)
+    if (!Number.isInteger(wanted) || wanted <= 0) return false
+    if (portOwnerPid(wanted) !== null) return false
+    const instance = readStateFile(instanceFilePath(wanted), wanted)
+    const supervisor = readStateFile(supervisorStateFilePath(wanted), wanted)
+    return recordedServerPid(instance, supervisor, wanted) === null
+}
+
+export function allocateHttpPort({ preferred = null, from = PORT_POOL_FROM, to = PORT_POOL_TO } = {}) {
+    const wanted = Number(preferred ?? defaultHttpPort())
+    if (Number.isInteger(wanted) && wanted > 0 && portIsFree(wanted)) return wanted
+    for (let port = Math.min(from, to); port <= Math.max(from, to); port += 1) {
+        if (portIsFree(port)) return port
+    }
+    return null
+}
+
 export async function sweepHttpInstances(options = {}) {
+    const reclaimed = await reclaimDeadPortRegistries()
     const orphaned = await reapOrphanedHttpInstances(options)
     const dead = await reapDeadHttpInstances()
     const replaced = await replaceBehindHttpInstances(options)
-    return { dead, replaced, orphaned }
+    return { dead, replaced, orphaned, reclaimed }
 }
 
 export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs = STARTUP_WAIT_MS, wait = true, sweep = true } = {}) {
+    if (port === 'auto') {
+        await reclaimDeadPortRegistries()
+        port = allocateHttpPort({ preferred: defaultHttpPort() }) ?? defaultHttpPort()
+    }
     if (sweep) await reapDeadHttpInstances()
 
     const live = await probeHealth(port)
@@ -504,6 +582,7 @@ export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = su
         appendDiagnostic('http-supervisor-spawn-error', { port, entry, error: describeError(error) })
     })
     child.unref()
+    if (child.pid) recordChild({ pid: child.pid, kind: 'http-supervisor', port, verb: 'http-supervise', note: entry })
     appendDiagnostic('http-supervisor-spawned', { port, pid: child.pid ?? null, interval_ms: intervalMs })
     return { port, pid: child.pid ?? null, started: true, reason: 'spawned' }
 }
