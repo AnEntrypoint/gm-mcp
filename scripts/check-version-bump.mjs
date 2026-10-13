@@ -17,13 +17,23 @@ if (NULL_SHA.test(base)) {
     process.exit(0)
 }
 
-const nameOnly = spawnSync('git', ['diff', '--name-only', `${base}..${head}`], { encoding: 'utf8' })
-if (nameOnly.status !== 0) {
-    console.error(`check-version-bump: git diff ${base}..${head} failed -- ${(nameOnly.stderr || '').trim()}`)
-    process.exit(1)
+// The pushed range is the whole change, but a checkout that only fetched the head cannot resolve
+// it; the single-commit range still catches a src/ edit pushed on its own, which is the common
+// case, and a checkout with no history at all is skipped rather than failed.
+function changedPaths(base, head) {
+    const ranges = [`${base}..${head}`, `${head}^..${head}`]
+    for (const range of ranges) {
+        const diff = spawnSync('git', ['diff', '--name-only', range], { encoding: 'utf8' })
+        if (diff.status === 0) {
+            return diff.stdout.split('\n').map((line) => line.trim()).filter(Boolean)
+        }
+    }
+    console.log(`check-version-bump: neither ${ranges.join(' nor ')} resolves in this checkout -- skipping`)
+    return null
 }
 
-const paths = nameOnly.stdout.split('\n').map((line) => line.trim()).filter(Boolean)
+const paths = changedPaths(base, head)
+if (paths === null) process.exit(0)
 const srcPaths = paths.filter((path) => path.startsWith('src/') && path !== 'src/bundle-version.js')
 
 if (srcPaths.length === 0) {
