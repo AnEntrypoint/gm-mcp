@@ -77,11 +77,12 @@ const GIT_SHOW_DESCRIPTION = ` ${GIT_SHOW_KEYS.join(', ')} are accepted at the t
 
 const PRD_LIST_TYPES = {
     id: z.string(),
-    status: z.enum(['pending', 'ready', 'completed', 'blocked']),
+    status: z.enum(['pending', 'ready', 'completed', 'blocked', 'all']),
     limit: numberLike,
+    offset: numberLike,
     full: booleanLike,
 }
-const PRD_LIST_KEYS = ['id', 'status', 'limit', 'full']
+const PRD_LIST_KEYS = ['id', 'status', 'limit', 'offset', 'full']
 const PRD_LIST_FIELDS = aliasFields('prd_list', PRD_LIST_TYPES, PRD_LIST_KEYS)
 const PRD_LIST_DESCRIPTION = ` ${PRD_LIST_KEYS.join(', ')} are accepted at the top level and folded into body, so {"id":"<row id>"} and body:{"id":"<row id>"} are the same call; a key named in both takes its value from body. Without one of them the whole PRD is listed, which is what a dropped selector used to look like.`
 
