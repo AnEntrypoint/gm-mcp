@@ -17,6 +17,7 @@ import {
 } from './singleton.js'
 
 const BROWSER_NAMES = new Set(['chrome', 'chrome.exe', 'msedge', 'msedge.exe', 'firefox', 'firefox.exe'])
+export const DEFAULT_LEAK_KINDS = ['exec']
 
 /**
  * A reaping verdict is only ever "retire" when every predicate was MEASURED true. A predicate
@@ -28,6 +29,20 @@ export const VERDICT = { RETIRE: 'retire', KEEP: 'keep', UNKNOWN: 'unknown' }
 
 function measure(name, value, pass) {
     return { predicate: name, value, pass }
+}
+
+/**
+ * "No live supervisor", measured per platform. Windows keeps the dead parent's pid on an
+ * orphan, so the parent is simply gone; POSIX RE-PARENTS an orphan to init, so its parent is
+ * alive and is pid 1. Checking only for a dead parent therefore finds orphans on Windows and
+ * finds none at all on Linux and macOS -- the predicate has to mean the right thing on each.
+ * An unmeasured parent (null) is never proof of abandonment.
+ */
+export function parentAbandoned(parentPid) {
+    if (parentPid === null || !Number.isInteger(Number(parentPid)) || Number(parentPid) <= 0) return false
+    if (pidAlive(parentPid) === false) return true
+    if (process.platform === 'win32') return false
+    return Number(parentPid) === 1 || Number(parentPid) === 2
 }
 
 function commandLineOf(pid) {
@@ -119,7 +134,7 @@ export async function assessHttpInstances({ now = Date.now(), roots = [] } = {})
             measure('server-alive', pidAlive(serverPid), pidAlive(serverPid) === true),
             measure('identity-held', identity, identity !== null),
             measure('no-live-supervisor', supervisorPid === null ? true : supervisorPid, supervisorPid === null),
-            measure('parent-dead', parentPid, parentPid !== null && pidAlive(parentPid) === false),
+            measure('parent-abandoned', parentPid, parentAbandoned(parentPid)),
             measure('zero-attached-clients', attached, attached === 0),
             measure('not-user-browser', isProtectedBrowser(serverPid) === false, isProtectedBrowser(serverPid) === false),
         ]
@@ -198,12 +213,17 @@ export async function assessLeases({ roots = [] } = {}) {
 /**
  * Ledger-attributed children. Attribution is the gate: a pid no dispatch claimed is not a
  * candidate at all, which is what keeps this from becoming a bulk process filter.
+ *
+ * Only `exec` children are candidates by default. gm-mcp's own infrastructure children (the
+ * spool runner, the http server, its supervisor) are detached on purpose and are governed by
+ * the http-instance source; retiring them here would kill the machinery that does the reaping.
  */
-export async function assessAttributedChildren({ roots = [], liveSessionIds = null } = {}) {
+export async function assessAttributedChildren({ roots = [], liveSessionIds = null, kinds = DEFAULT_LEAK_KINDS } = {}) {
     const findings = []
     const seen = new Set()
     for (const root of roots) {
         for (const row of attributeRows({ root })) {
+            if (!kinds.includes(row.kind ?? null)) continue
             const pid = Number(row.pid)
             if (seen.has(pid)) continue
             seen.add(pid)
@@ -216,7 +236,7 @@ export async function assessAttributedChildren({ roots = [], liveSessionIds = nu
                 measure('attributed', attributed.dispatch_id ?? row.kind, true),
                 measure('not-self', pid !== process.pid, pid !== process.pid),
                 measure('alive', pidAlive(pid), pidAlive(pid) === true),
-                measure('parent-dead', parentPid, parentPid !== null && pidAlive(parentPid) === false),
+                measure('parent-abandoned', parentPid, parentAbandoned(parentPid)),
                 measure('no-live-lane', sessionLive === null ? 'no-session-recorded' : sessionLive === false, sessionLive === null ? true : sessionLive === false),
                 measure('zero-attached-clients', attached, port === null ? true : attached === 0),
                 measure('not-user-browser', isProtectedBrowser(pid) === false, isProtectedBrowser(pid) === false),
@@ -256,11 +276,11 @@ function removeFile(filePath) {
     }
 }
 
-export async function reapReport({ roots = [], apply = false, liveSessionIds = null, now = Date.now() } = {}) {
+export async function reapReport({ roots = [], apply = false, liveSessionIds = null, kinds = DEFAULT_LEAK_KINDS, now = Date.now() } = {}) {
     const findings = [
         ...(await assessHttpInstances({ roots, now })),
         ...(await assessLeases({ roots })),
-        ...(await assessAttributedChildren({ roots, liveSessionIds })),
+        ...(await assessAttributedChildren({ roots, liveSessionIds, kinds })),
     ]
     const retired = []
     for (const finding of findings) {
