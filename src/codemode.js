@@ -1,12 +1,13 @@
 import { z } from 'zod'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { canonicalToolName, nearestNames } from './verbs.js'
+import { verbDescriptionLead } from './verb-table.js'
 import { verbBodySchema } from './verb-bodies.js'
 import { NOTICES } from './notices.js'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
-const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A verb that names a field `body` of its own (the row prose of prd-add) follows the same rule: a top-level `body` is the dispatch body only when it is an object or JSON object text, so gm.prd_add({id, subject, body}) reaches the verb as body:{id, subject, body}. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns one entry per verb as {name, verb, aliases, description} (verb is omitted when it equals name, aliases when there are any), with the description cut to 80 chars; `gm.list({filter, names_only, max_desc})` narrows it. `gm.help()` returns the notice codes that replies carry. The reply is capped at max_chars (default 24000). `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
+const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A verb that names a field `body` of its own (the row prose of prd-add) follows the same rule: a top-level `body` is the dispatch body only when it is an object or JSON object text, so gm.prd_add({id, subject, body}) reaches the verb as body:{id, subject, body}. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns one entry per verb as {name, aliases?, description?}: the description is the verb text cut to 80 chars, without the boilerplate every runner verb shares, and it is omitted when the verb has none; `gm.describe(name)` gives the runner spelling of the verb, its input schema and its body schema. `gm.list({filter, names_only, max_desc})` narrows it (max_desc 0 gives full descriptions). `gm.help()` returns the notice codes that replies carry. The reply is capped at max_chars (default 24000). `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
 
 function replyText(result) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
@@ -107,12 +108,21 @@ function listEntries(tools, options) {
             .some((field) => typeof field === 'string' && field.toLowerCase().includes(needle)))
     }
     if (opts.names_only === true || opts.names_only === 'true') return rows.map((row) => row.name)
-    return rows.map((row) => ({
-        name: row.name,
-        ...(row.verb !== null && row.verb !== row.name ? { verb: row.verb } : {}),
-        ...(row.aliases ? { aliases: row.aliases } : {}),
-        description: clipDescription(row.description, maxDesc),
-    }))
+    return rows.map((row) => {
+        const description = listSummary(row, maxDesc)
+        return {
+            name: row.name,
+            ...(row.aliases ? { aliases: row.aliases } : {}),
+            ...(description !== '' || maxDesc === 0 ? { description } : {}),
+        }
+    })
+}
+
+function listSummary(row, maxDesc) {
+    if (maxDesc === 0) return row.description
+    const lead = row.verb === null ? '' : verbDescriptionLead(row.verb)
+    const own = row.description.startsWith(lead) ? row.description.slice(lead.length).trimStart() : row.description
+    return clipDescription(own, maxDesc)
 }
 
 function capCodemodeText(text, cap) {

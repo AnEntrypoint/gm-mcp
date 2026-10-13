@@ -10,6 +10,7 @@ import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
+import { tableRow } from './verb-table.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 
 let inflightDispatches = 0
@@ -69,7 +70,7 @@ const FS_READ_RANGE_PAIRS = [['startLine', 'endLine', false], ['start', 'end', f
 const FS_READ_COUNT_KEYS = ['count', 'limit', 'lines']
 const FS_READ_END_KEYS = ['endLine', 'end', 'to']
 const FS_READ_RANGE_BASIS = '1-based, inclusive on both ends'
-const FS_READ_ACCEPTED_KEYS = ['startLine', 'endLine', 'start', 'end', 'count', 'from', 'to', 'offset', 'limit', 'line', 'lines']
+const FS_READ_ACCEPTED_KEYS = tableRow('fs_read').aliases
 const FS_READ_ACCEPTED_PAIRS = 'startLine/endLine, start/end, start/count, from/to, offset/limit, line/lines'
 const FS_READ_KNOWN_NON_RANGE_KEYS = new Set(['path', 'file', 'allowOutsideRoot', 'allow_outside_root', 'session_id', 'max_bytes', 'maxBytes', 'encoding', 'verbose'])
 const FS_READ_RANGE_LOOKING_PATTERNS = [
@@ -576,7 +577,7 @@ function withCodesearchScalarsCoerced(verb, body) {
 
 const CODESEARCH_DEFAULT_K = 50
 const CODESEARCH_DEFAULT_K_MODES = new Set(['literal', 'regex', 'filename'])
-const CODESEARCH_K_ALIASES = ['k', 'max_results', 'maxResults', 'limit', 'head_limit']
+const CODESEARCH_K_ALIASES = ['k', ...tableRow('codesearch').body.fields.k.aliases]
 
 export function withCodesearchDefaultK(verb, body) {
     if (verb !== 'codesearch' || !body || typeof body !== 'object' || Array.isArray(body)) return { body, defaulted: false }

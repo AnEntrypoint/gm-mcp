@@ -3,120 +3,17 @@ import { z } from 'zod'
 import { gmDispatch, gmResult } from './dispatch.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
-import { RUNNER_REGISTRY_VERBS, verbToolName, editDistance } from './verbs.js'
+import { RUNNER_REGISTRY_VERBS, editDistance, verbToolName } from './verbs.js'
+import { VERB_TABLE, runnerVerb, tableRow, verbDescriptionLead } from './verb-table.js'
 import { registerCodeMode } from './codemode.js'
 import { renderBodyHint, bodyShapeLine } from './verb-bodies.js'
 
 const numberLike = z.union([z.number(), z.string()])
 const booleanLike = z.union([z.boolean(), z.string()])
 
-const FS_READ_RANGE_ALIASES = ['startLine', 'endLine', 'start', 'end', 'count', 'from', 'to', 'offset', 'limit', 'line', 'lines']
-const FS_READ_RANGE_PAIR_HELP = 'Pairs are resolved in this order: startLine/endLine, then start/end (start/count also works), then from/to, then offset/limit, then line/lines. endLine/end/to is the last line to return; limit/count/lines is a number of lines, not an end line.'
-const FS_READ_RANGE_LINE_HELP = {
-    startLine: 'First line to return (1-based).',
-    endLine: 'Last line to return (1-based, inclusive).',
-    start: 'First line to return (1-based).',
-    end: 'Last line to return (1-based, inclusive).',
-    count: 'Number of lines to return.',
-    from: 'First line to return (1-based).',
-    to: 'Last line to return (1-based, inclusive).',
-    offset: 'First line to return (1-based).',
-    limit: 'Number of lines to return.',
-    line: 'First line to return (1-based).',
-    lines: 'Number of lines to return.',
-}
-const FS_READ_RANGE_FIELDS = Object.fromEntries(FS_READ_RANGE_ALIASES.map((key) => [key, numberLike.optional().describe(FS_READ_RANGE_LINE_HELP[key])]))
-const VERB_EXTRA_FIELDS = { fs_read: FS_READ_RANGE_FIELDS }
-const GIT_COMMIT_TOP_LEVEL_FIELDS = ['message', 'paths', 'files', 'allow_whole_index', 'recover_remote_moved', 'source_ref', 'rev']
-const GIT_COMMIT_TOP_LEVEL_FIELD_TYPES = {
-    message: z.string(),
-    paths: z.array(z.string()),
-    files: z.array(z.string()),
-    allow_whole_index: booleanLike,
-    recover_remote_moved: booleanLike,
-    source_ref: z.string(),
-    rev: z.string(),
-    ref: z.string(),
-    sha: z.string(),
-    commit: z.string(),
-    stat: booleanLike,
-    path: z.string(),
-}
-const GIT_COMMIT_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(GIT_COMMIT_TOP_LEVEL_FIELDS.map((key) => [key, GIT_COMMIT_TOP_LEVEL_FIELD_TYPES[key].optional()
-    .describe(`Top-level alias of body.${key} for git_finalize/git_commit: folded into body when body does not already name it.`)]))
-for (const verb of ['git_finalize', 'git_commit']) VERB_EXTRA_FIELDS[verb] = GIT_COMMIT_TOP_LEVEL_FIELDS_ZOD
-const GIT_PUSH_TOP_LEVEL_FIELDS = ['rev']
-const GIT_PUSH_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(GIT_PUSH_TOP_LEVEL_FIELDS.map((key) => [key, GIT_COMMIT_TOP_LEVEL_FIELD_TYPES[key].optional()
-    .describe(`Top-level alias of body.${key} for git_push: folded into body when body does not already name it.`)]))
-VERB_EXTRA_FIELDS['git_push'] = GIT_PUSH_TOP_LEVEL_FIELDS_ZOD
-const GIT_SHOW_TOP_LEVEL_FIELDS = ['rev', 'ref', 'sha', 'commit', 'stat', 'path', 'paths', 'files']
-const GIT_SHOW_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(GIT_SHOW_TOP_LEVEL_FIELDS.map((key) => [key, GIT_COMMIT_TOP_LEVEL_FIELD_TYPES[key].optional()
-    .describe(`Top-level alias of body.${key} for git_show: folded into body when body does not already name it.`)]))
-VERB_EXTRA_FIELDS['git_show'] = GIT_SHOW_TOP_LEVEL_FIELDS_ZOD
-const PRD_LIST_TOP_LEVEL_FIELDS = ['id', 'status', 'limit', 'full']
-const PRD_LIST_TOP_LEVEL_FIELD_TYPES = {
-    id: z.string(),
-    status: z.enum(['pending', 'ready', 'completed', 'blocked']),
-    limit: numberLike,
-    full: booleanLike,
-}
-const PRD_LIST_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(PRD_LIST_TOP_LEVEL_FIELDS.map((key) => [key, PRD_LIST_TOP_LEVEL_FIELD_TYPES[key].optional()
-    .describe(`Top-level alias of body.${key} for prd_list: folded into body when body does not already name it.`)]))
-VERB_EXTRA_FIELDS['prd_list'] = PRD_LIST_TOP_LEVEL_FIELDS_ZOD
-const GIT_PATHSPEC_TOP_LEVEL_TYPE = z.union([z.string(), z.array(z.string())])
-const GIT_TOP_LEVEL_FIELDS = {
-    git_log: {
-        range: z.string(), ref: z.string(), rev: z.string(),
-        limit: z.number(), count: z.number(),
-        path: GIT_PATHSPEC_TOP_LEVEL_TYPE, paths: GIT_PATHSPEC_TOP_LEVEL_TYPE, files: GIT_PATHSPEC_TOP_LEVEL_TYPE,
-    },
-    git_diff: {
-        range: z.string(), ref: z.string(), rev: z.string(),
-        staged: z.boolean(), stat: z.boolean(),
-        path: GIT_PATHSPEC_TOP_LEVEL_TYPE, paths: GIT_PATHSPEC_TOP_LEVEL_TYPE, files: GIT_PATHSPEC_TOP_LEVEL_TYPE,
-    },
-    git_revert: { ref: z.string(), paths: z.array(z.string()) },
-    git_reset: { ref: z.string(), rev: z.string(), mode: z.string(), hard: z.boolean(), paths: z.array(z.string()), files: z.array(z.string()) },
-    git_checkout: { ref: z.string(), create: z.boolean(), path: GIT_PATHSPEC_TOP_LEVEL_TYPE, paths: GIT_PATHSPEC_TOP_LEVEL_TYPE, files: GIT_PATHSPEC_TOP_LEVEL_TYPE },
-    git_merge: { ref: z.string(), ff_only: z.boolean(), message: z.string() },
-    git_stash_pop: { ref: z.string() },
-    git_stash_drop: { ref: z.string() },
-    git_worktree_add: { ref: z.string(), rev: z.string(), commit: z.string(), start_point: z.string(), path: z.string(), create: z.boolean(), allowOutsideRoot: z.boolean() },
-    git_status: { path: GIT_PATHSPEC_TOP_LEVEL_TYPE, paths: GIT_PATHSPEC_TOP_LEVEL_TYPE, files: GIT_PATHSPEC_TOP_LEVEL_TYPE, summary: z.boolean(), limit: z.number(), eol: z.boolean() },
-}
-for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) {
-    VERB_EXTRA_FIELDS[verb] = Object.fromEntries(Object.entries(fields).map(([key, type]) => [key, type.optional()
-        .describe(`Top-level alias of body.${key} for ${verb}: folded into body when body does not already name it.`)]))
-}
-const VERB_DESCRIPTION_EXTRA = { fs_read: ` Line ranges are 1-based and inclusive on both ends: ${FS_READ_RANGE_ALIASES.join(', ')} are accepted at the top level and folded into body, and the same keys inside body work identically. ${FS_READ_RANGE_PAIR_HELP} A range-looking key that is not one of them is an error naming the accepted keys rather than a silent whole file. Without any of them the whole file is returned, unchanged.` }
-const VERB_TOP_LEVEL_ALIASES = { fs_read: FS_READ_RANGE_ALIASES, git_finalize: GIT_COMMIT_TOP_LEVEL_FIELDS, git_commit: GIT_COMMIT_TOP_LEVEL_FIELDS, git_push: GIT_PUSH_TOP_LEVEL_FIELDS, git_show: GIT_SHOW_TOP_LEVEL_FIELDS, prd_list: PRD_LIST_TOP_LEVEL_FIELDS }
-for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) VERB_TOP_LEVEL_ALIASES[verb] = Object.keys(fields)
-const FS_READ_PATH_RULE = ` "path" is resolved against the cwd you pass (the project root), never absolutely: an absolute path is refused even when it is inside that root, and so is any path carrying ".."; the refusal names the project-relative form to send instead. allowOutsideRoot:true widens a read verb to another root, never permission to climb out of one, and never applies to fs_write.`
-VERB_DESCRIPTION_EXTRA['fs_read'] += FS_READ_PATH_RULE
-VERB_DESCRIPTION_EXTRA['fs_readdir'] = FS_READ_PATH_RULE
-for (const verb of ['git_finalize', 'git_commit']) {
-    VERB_DESCRIPTION_EXTRA[verb] = ` ${GIT_COMMIT_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body.`
-}
-VERB_DESCRIPTION_EXTRA['git_push'] = ` ${GIT_PUSH_TOP_LEVEL_FIELDS.join(', ')} is accepted at the top level and folded into body, so {"rev":"<sha>"} and body:{"rev":"<sha>"} are the same call; a key named in both takes its value from body.`
-VERB_DESCRIPTION_EXTRA['git_show'] = ` ${GIT_SHOW_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"rev":"<sha>", "stat": true} and body:{"rev":"<sha>", "stat": true} are the same call; a key named in both takes its value from body. Without a rev git_show reads HEAD, and without stat, path, paths or files it prints the whole commit, which is what a dropped field used to look like.`
-VERB_DESCRIPTION_EXTRA['prd_list'] = ` ${PRD_LIST_TOP_LEVEL_FIELDS.join(', ')} are accepted at the top level and folded into body, so {"id":"<row id>"} and body:{"id":"<row id>"} are the same call; a key named in both takes its value from body. Without one of them the whole PRD is listed, which is what a dropped selector used to look like.`
-for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) {
-    const keys = Object.keys(fields)
-    const revisions = keys.filter((key) => key === 'range' || key === 'ref' || key === 'rev')
-    const scoped = keys.filter((key) => !revisions.includes(key))
-    const defaults = [
-        revisions.length > 0 ? `without a revision it falls back to its own default or refuses` : '',
-        scoped.length > 0 ? `without ${scoped.join(', ')} it falls back to its own default too, and a dropped one looks exactly like one never sent` : '',
-    ].filter((part) => part !== '').join('; ')
-    const first = keys[0]
-    const sample = revisions.includes(first) ? 'rev' : 'value'
-    VERB_DESCRIPTION_EXTRA[verb] = ` ${keys.join(', ')} ${keys.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${first}":"<${sample}>"} and body:{"${first}":"<${sample}>"} are the same call; a key named in both takes its value from body. Without one of them ${verb} takes its own default: ${defaults}.`
-}
-VERB_DESCRIPTION_EXTRA['git_reset'] += ` hard:true is the boolean form of mode:"hard" and rev is an alias of ref; paths scope the index only, so hard:true together with paths is refused. mode accepts soft|mixed|hard and hard must be a boolean -- anything else is refused with error_code invalid_args, never coerced to a default. Every ok reply carries mode, hard, reset_to and scope, so the operation that ran is readable without re-reading the repo.`
-
 export function mergeVerbRangeFields(verb, args = {}) {
     const verbKey = verbToolName(verb)
-    const present = (VERB_TOP_LEVEL_ALIASES[verbKey] ?? []).filter((key) => args[key] !== undefined)
+    const present = (tableRow(verb)?.aliases ?? []).filter((key) => args[key] !== undefined)
     if (present.length === 0) return args
     const rest = { ...args }
     for (const key of present) delete rest[key]
@@ -210,7 +107,7 @@ const DISPATCH_FIELDS = {
 }
 
 export function verbToolInputSchema(verb) {
-    return { ...DISPATCH_FIELDS, ...(VERB_EXTRA_FIELDS[verbToolName(verb)] ?? {}) }
+    return { ...DISPATCH_FIELDS, ...(tableRow(verb)?.fields ?? {}) }
 }
 
 const SURFACE_INSTRUCTIONS = 'gm-mcp serves one tool, gm_codemode. Every gm verb is a function on `gm` inside its code body: gm_codemode({code: "return await gm.codesearch({query: \'x\'})"}). Call gm.list() for every callable name and gm.describe(name) for a verb schema. The per-verb tools of earlier builds (gm_instruction, gm, fs_read, git_status, ...) are not registered here, so a client holding a cached tool list must re-fetch tools/list.'
@@ -298,7 +195,6 @@ export function createServer() {
         }
     )
 
-    const dispatchFields = DISPATCH_FIELDS
     const verbDispatch = async (verb, args = {}, extra) => {
         try {
             const text = unknownVerbHint(verb, await gmDispatch({ verb, ...mergeVerbRangeFields(verb, args) }, extra?.signal))
@@ -314,17 +210,18 @@ export function createServer() {
             description: 'Run one gm spool verb dispatch and return its result as flat YAML. Unknown verbs answer unknown_verb. Plain-text verbs (exec_js, bash, python, crawl) take raw_body instead of body. Parameter docs: grep with body {"help": true} lists every mode.',
             inputSchema: {
                 verb: z.string().describe('gm verb name, e.g. instruction, prd-add, git_status, exec_js. No fs_list, fs_glob or exec_bash: use fs_readdir, codesearch with a glob, or exec_js.'),
-                ...dispatchFields,
+                ...DISPATCH_FIELDS,
             },
         },
         async (args = {}, extra) => verbDispatch(args?.verb ?? 'unknown', args, extra)
     )
 
-    for (const verb of RUNNER_REGISTRY_VERBS) {
+    for (const row of VERB_TABLE) {
+        const verb = runnerVerb(row)
         define(
-            verbToolName(verb),
+            row.canonical,
             {
-                description: `gm spool verb \`${verb}\`, dispatched exactly as the generic gm tool dispatches it. Plain-text verbs take raw_body instead of body.${VERB_DESCRIPTION_EXTRA[verbToolName(verb)] ?? ''}${bodyShapeLine(verb)}`,
+                description: `${verbDescriptionLead(verb)}${row.description}${bodyShapeLine(verb)}`,
                 inputSchema: verbToolInputSchema(verb),
             },
             async (args = {}, extra) => verbDispatch(verb, args, extra),

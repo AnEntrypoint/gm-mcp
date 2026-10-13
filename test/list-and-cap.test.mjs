@@ -63,7 +63,7 @@ test('gm.list() is one entry per verb, with aliases as a field and short descrip
         const instruction = entries.find((entry) => (entry.verb ?? entry.name) === 'instruction')
         assert.equal(instruction.name, 'instruction')
         assert.deepEqual(instruction.aliases, ['gm_instruction'])
-        for (const entry of entries) assert.ok(entry.description.length <= 80, `${entry.name} description is not clipped to 80 chars`)
+        for (const entry of entries) assert.ok((entry.description ?? '').length <= 80, `${entry.name} description is not clipped to 80 chars`)
     })
 })
 
@@ -74,7 +74,7 @@ test('gm.list({filter, names_only, max_desc}) narrows the listing', { timeout: 3
         assert.ok(names.every((name) => typeof name === 'string'), 'names_only must return strings')
         const full = JSON.parse(await codemodeText(client, 'return gm.list({filter: "fs_read", max_desc: 0})'))
         assert.ok(full.some((entry) => entry.name === 'fs_read'))
-        const longest = Math.max(...full.map((entry) => entry.description.length))
+        const longest = Math.max(...full.map((entry) => (entry.description ?? '').length))
         assert.ok(longest > 80, 'max_desc: 0 must keep the full description')
     })
 })
