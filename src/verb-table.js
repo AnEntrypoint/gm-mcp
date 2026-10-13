@@ -332,8 +332,20 @@ const MEMORIZE_BODY = {
 const FETCH_TYPES = {
     url: z.string(),
     query: z.string(),
+    q: z.string(),
+    search: z.string(),
     backend: z.string(),
+    engine: z.string(),
     count: numberLike,
+    limit: numberLike,
+    max_results: numberLike,
+    k: numberLike,
+    n: numberLike,
+    kind: z.string(),
+    wiki: z.string(),
+    user: z.string(),
+    repo: z.string(),
+    stars: z.union([z.string(), z.number()]),
     allowed_domains: z.array(z.string()),
     blocked_domains: z.array(z.string()),
     prompt: z.string(),
@@ -344,15 +356,20 @@ const FETCH_TYPES = {
     headers: z.record(z.string(), z.string()),
     timeoutMs: numberLike,
 }
-const FETCH_KEYS = ['url', 'query', 'backend', 'count', 'allowed_domains', 'blocked_domains', 'prompt', 'max_chars', 'answer_max_chars', 'raw', 'method', 'headers', 'timeoutMs']
+const FETCH_KEYS = ['url', 'query', 'q', 'search', 'backend', 'engine', 'count', 'limit', 'max_results', 'k', 'n', 'kind', 'wiki', 'user', 'repo', 'stars', 'allowed_domains', 'blocked_domains', 'prompt', 'max_chars', 'answer_max_chars', 'raw', 'method', 'headers', 'timeoutMs']
 const FETCH_FIELDS = aliasFields('fetch', FETCH_TYPES, FETCH_KEYS)
-const FETCH_DESCRIPTION = ` ${FETCH_KEYS.join(', ')} are accepted at the top level and folded into body, so {"url":"<url>"} and body:{"url":"<url>"} are the same call; a key named in both takes its value from body. The reply is the READABLE page, not the transport payload: HTML is converted to markdown before it is returned (head, script, style, svg, nav, header, footer, aside, form and iframe blocks are dropped; article or main wins over the rest of the document), and a body that is not HTML is returned as it arrived. query (aliases q, search) with no url turns the call into a web search on the same port, walking the keyless backends websearch walks, and backend (alias engine) picks the order. prompt answers that prompt against the converted page and returns the matching passages instead of the page: gm holds no outbound model credential, so answer_mode is always "extractive". max_chars caps the characters returned (default 6000), so one fetch cannot dump a whole page into context; answer_max_chars caps a prompt answer (default 4000). raw:true (aliases full_response, fullResponse) is the escape hatch that returns the original body with no conversion and no prompt answering.`
+const FETCH_DESCRIPTION = ` ${FETCH_KEYS.join(', ')} are accepted at the top level and folded into body, so {"url":"<url>"} and body:{"url":"<url>"} are the same call; a key named in both takes its value from body. The reply is the READABLE page, not the transport payload: HTML is converted to markdown before it is returned (head, script, style, svg, nav, header, footer, aside, form and iframe blocks are dropped; article or main wins over the rest of the document), and a body that is not HTML is returned as it arrived. query (aliases q, search) with no url turns the call into a web search on the same port, walking the same backends websearch walks -- the structured JSON backends github, hn and wikipedia first, then the keyless html engines -- and backend (alias engine) picks the order; kind, wiki, user, repo and stars tune the github and wikipedia backends, count (aliases limit, max_results, k, n) caps the hits and allowed_domains/blocked_domains filter every backend. prompt answers that prompt against the converted page and returns the matching passages instead of the page: gm holds no outbound model credential, so answer_mode is always "extractive". max_chars caps the characters returned (default 6000), so one fetch cannot dump a whole page into context; answer_max_chars caps a prompt answer (default 4000). raw:true (aliases full_response, fullResponse) is the escape hatch that returns the original body with no conversion and no prompt answering.`
 const FETCH_BODY = {
     required: [],
     fields: {
         url: { type: 'string', description: 'Page to fetch. https:// and http:// only; no whitespace and at most 2048 bytes. Required unless query is given.' },
         query: { type: 'string', description: 'With no url, turns the call into a web search on the same port; aliases q and search.' },
-        backend: { type: 'string', description: 'Keyless backend order for a search: a name, a comma-separated list, or a results-page URL template containing {q}. Alias engine; GM_SEARCH_BACKEND sets the same order.' },
+        backend: { type: 'string', description: 'Backend order for a search: github, hn, wikipedia, duckduckgo, mojeek, bing, searxng, brave, marginalia, or a comma-separated list. Alias engine; GM_SEARCH_BACKEND sets the same order.' },
+        kind: { type: 'string', description: 'The github endpoint for a search: repos (the default), code or issues.' },
+        wiki: { type: 'string', description: 'MediaWiki host for the wikipedia backend; default en.wikipedia.org.' },
+        user: { type: 'string', description: 'github qualifier appended to a search query as user:<value>.' },
+        repo: { type: 'string', description: 'github qualifier appended to a search query as repo:<value>.' },
+        stars: { type: 'string', description: 'github qualifier appended to a search query as stars:>=<value>.' },
         count: { type: 'number', description: 'Hits returned by a search. Default 10, ceiling 50; aliases limit, max_results, k and n.' },
         allowed_domains: { type: 'array', description: 'Host suffixes a search result must match to be kept.' },
         blocked_domains: { type: 'array', description: 'Host suffixes that drop a search result.' },
@@ -370,30 +387,47 @@ const FETCH_BODY = {
 
 const WEBSEARCH_TYPES = {
     query: z.string(),
+    q: z.string(),
     url: z.string(),
     engine: z.string(),
+    backend: z.string(),
+    kind: z.string(),
+    wiki: z.string(),
+    user: z.string(),
+    repo: z.string(),
+    stars: z.union([z.string(), z.number()]),
     limit: numberLike,
     max_results: numberLike,
+    maxResults: numberLike,
+    k: numberLike,
     allowed_domains: z.array(z.string()),
     blocked_domains: z.array(z.string()),
     prompt: z.string(),
     max_chars: numberLike,
+    answer_max_chars: numberLike,
+    raw: booleanLike,
     timeoutMs: numberLike,
 }
-const WEBSEARCH_KEYS = ['query', 'url', 'engine', 'limit', 'allowed_domains', 'blocked_domains', 'prompt', 'max_chars', 'timeoutMs']
+const WEBSEARCH_KEYS = ['query', 'q', 'url', 'engine', 'backend', 'kind', 'wiki', 'user', 'repo', 'stars', 'limit', 'max_results', 'maxResults', 'k', 'allowed_domains', 'blocked_domains', 'prompt', 'max_chars', 'answer_max_chars', 'raw', 'timeoutMs']
 const WEBSEARCH_FIELDS = aliasFields('websearch', WEBSEARCH_TYPES, WEBSEARCH_KEYS)
-const WEBSEARCH_DESCRIPTION = ` ${WEBSEARCH_KEYS.join(', ')} are accepted at the top level and folded into body, so {"query":"<query>"} and body:{"query":"<query>"} are the same call; a key named in both takes its value from body. Web discovery stays inside gm: results are fetched over the same fetch port and returned as compact rows (title, url, host, snippet). The built-in engine is duckduckgo, read from https://html.duckduckgo.com/html/, which needs no credential. That endpoint answers a challenge page to some clients, so one call walks the keyless backends in order -- duckduckgo, mojeek, bing, searxng -- and stops at the first that parses into hits, 4 at most; url reads a results page of your own. limit caps the rows returned (default 8, ceiling 25; max_results and k are aliases). allowed_domains keeps only results whose host matches, blocked_domains drops them, and both take host suffixes, so "example.com" matches docs.example.com. prompt answers that prompt against the result titles, urls and snippets the same extractive way fetch answers one.`
+const WEBSEARCH_DESCRIPTION = ` ${WEBSEARCH_KEYS.join(', ')} are accepted at the top level and folded into body, so {"query":"<query>"} and body:{"query":"<query>"} are the same call; a key named in both takes its value from body. Web discovery stays inside gm: results are fetched over the same fetch port and returned as compact rows (title, url, host, snippet, source). One call walks the structured JSON backends FIRST -- github, hn, wikipedia -- because each answers machine-readable JSON with no credential and no challenge page, and only then falls back to the keyless html engines -- duckduckgo, mojeek, bing, searxng, brave, marginalia -- which answer a CAPTCHA or consent page to some clients; it stops at the first backend that parses into hits, 7 at most, and every attempt is reported in attempts. engine (alias backend) picks one or a comma-separated list; url reads a results page of your own, and a url answering JSON is parsed as JSON. kind selects the github endpoint: repos (the default), code or issues; user, repo and stars become github qualifiers and a qualifier written into the query (user:lanmower, repo:owner/name, stars:>100) is passed through. wiki names the MediaWiki host, default en.wikipedia.org. limit caps the rows returned (default 8, ceiling 25; max_results, maxResults and k are aliases). allowed_domains keeps only results whose host matches and blocked_domains drops them, both host suffixes, and both filter every backend, so a backend whose rows are all filtered out does not stop the walk. prompt answers that prompt against the result titles, urls and snippets the same extractive way fetch answers one.`
 const WEBSEARCH_BODY = {
     required: [],
     fields: {
         query: { type: 'string', description: 'What to search for; q is an alias. Required unless url is given.' },
-        url: { type: 'string', description: 'Read this search engine results page instead of building one from query.' },
-        engine: { type: 'string', description: 'duckduckgo, the default and the only built-in engine; any other engine is reached by passing its results page as url.' },
+        url: { type: 'string', description: 'Read this search results page instead of building one from query; a url answering JSON is parsed as JSON.' },
+        engine: { type: 'string', description: 'Backend order: github, hn, wikipedia, duckduckgo, mojeek, bing, searxng, brave, marginalia, or a comma-separated list. Alias backend; GM_SEARCH_BACKEND sets the same order. The JSON backends are tried first.' },
+        kind: { type: 'string', description: 'The github endpoint: repos (the default), code or issues.' },
+        wiki: { type: 'string', description: 'MediaWiki host for the wikipedia backend; default en.wikipedia.org. Any MediaWiki install works.' },
+        user: { type: 'string', description: 'github qualifier appended to q as user:<value>; a user: qualifier already in the query is passed through.' },
+        repo: { type: 'string', description: 'github qualifier appended to q as repo:<value>; a repo: qualifier already in the query is passed through.' },
+        stars: { type: 'string', description: 'github qualifier appended to q as stars:>=<value>; a stars: qualifier already in the query is passed through.' },
         limit: { type: 'number', description: 'Rows returned. Default 8, ceiling 25; aliases max_results, maxResults and k.' },
-        allowed_domains: { type: 'array', description: 'Host suffixes to keep; a non-matching result is dropped.' },
-        blocked_domains: { type: 'array', description: 'Host suffixes to drop; a matching result is removed.' },
+        allowed_domains: { type: 'array', description: 'Host suffixes to keep; a non-matching result is dropped. Applied to every backend.' },
+        blocked_domains: { type: 'array', description: 'Host suffixes to drop; a matching result is removed. Applied to every backend.' },
         prompt: { type: 'string', description: 'Answered against the kept rows instead of returning the whole listing.' },
         max_chars: { type: 'number', description: 'Cap on characters returned. Default 20000.' },
+        answer_max_chars: { type: 'number', description: 'Cap on the characters of a prompt answer. Default 4000.' },
         raw: { type: 'boolean', description: 'Return the raw search page with no result parsing.' },
         timeoutMs: { type: 'number', description: 'Transport timeout in milliseconds. Default 30000, ceiling 600000.' },
     },
@@ -407,6 +441,7 @@ const ROWS = [
     { canonical: 'fs_stat', body: FS_STAT_BODY },
     { canonical: 'fetch', aliases: FETCH_KEYS, fields: FETCH_FIELDS, description: FETCH_DESCRIPTION, body: FETCH_BODY },
     { canonical: 'websearch', aliases: WEBSEARCH_KEYS, fields: WEBSEARCH_FIELDS, description: WEBSEARCH_DESCRIPTION, body: WEBSEARCH_BODY },
+    { canonical: 'web_search', aliases: WEBSEARCH_KEYS, fields: WEBSEARCH_FIELDS, description: WEBSEARCH_DESCRIPTION, body: WEBSEARCH_BODY },
     { canonical: 'env_get' },
     { canonical: 'kv_get' },
     { canonical: 'kv_put' },
