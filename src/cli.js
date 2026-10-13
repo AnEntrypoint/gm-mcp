@@ -164,13 +164,13 @@ const COMMANDS = {
     dispatch: dispatchCommand,
     'pin-local-build': () => {
         const deployedPath = process.argv[3]
-        const pin = deployedPath ? pinLocalBuild(deployedPath) : pinLocalBuild()
-        console.log(`gm-mcp ${BUNDLE_VERSION}: pinned ${pin.path} (sha256 ${pin.sha256}) as a local build in ${localBuildPinPath()} -- the release channel can no longer overwrite it`)
+        const localBuildPin = deployedPath ? pinLocalBuild(deployedPath) : pinLocalBuild()
+        console.log(`gm-mcp ${BUNDLE_VERSION}: pinned ${localBuildPin.path} (sha256 ${localBuildPin.sha256}) as a local build in ${localBuildPinPath()} -- the release channel can no longer overwrite it`)
         return 0
     },
     'unpin-local-build': () => {
-        const pinPath = clearLocalBuildPin()
-        console.log(`gm-mcp ${BUNDLE_VERSION}: cleared the local-build pin at ${pinPath} -- the release channel may update the deployed bundle again`)
+        const clearedLocalBuildPinPath = clearLocalBuildPin()
+        console.log(`gm-mcp ${BUNDLE_VERSION}: cleared the local-build pin at ${clearedLocalBuildPinPath} --the release channel may update the deployed bundle again`)
         return 0
     },
     'self-update-status': () => {
