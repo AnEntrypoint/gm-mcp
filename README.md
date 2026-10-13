@@ -178,8 +178,12 @@ for the heartbeat to come back, and only then answers
 restart command -- and writes no ticket, so nothing is left queued behind a
 daemon that will never claim it. A project with no `.status.json` at all is
 the registration path rather than a dead daemon and still dispatches, as does
-one mid-handoff (`daemonBootGraceActive`, `runner_update_in_progress`). Opt
-out with `GM_MCP_DAEMON_PREFLIGHT=0`.
+one mid-handoff (`daemonBootGraceActive`, `runner_update_in_progress`) and
+one whose daemon-guard is restarting the daemon (`restarting: true` in
+`.status.json`, refreshed every guard poll; the `daemon` block reports
+`restarting`, `restart_reason` and `restart_attempt`, and a poll that hits its
+deadline inside the window keeps waiting, 15 s at a time, up to the ceiling).
+Opt out with `GM_MCP_DAEMON_PREFLIGHT=0`.
 
 ## Transport: stdio (default) and streamable HTTP
 
