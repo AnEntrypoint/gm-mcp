@@ -24,6 +24,19 @@ export function portListenerState(port) {
         if (Number.isInteger(pid) && pid > 0) return { measured: true, hasListener: true, ownerPid: pid }
         return { measured: true, hasListener: false, ownerPid: null }
     } catch (error) {
+        if (error?.code === 'ENOENT') return ssListenerState(wanted)
+        return { measured: true, hasListener: false, ownerPid: null }
+    }
+}
+
+// Linux hosts without lsof: ss names the listener's pid in its users:(("name",pid=N,fd=M)) column.
+function ssListenerState(wanted) {
+    try {
+        const text = execFileSync('ss', ['-H', '-ltnp', `sport = :${wanted}`], { encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'] })
+        if (text.trim() === '') return { measured: true, hasListener: false, ownerPid: null }
+        const pid = Number.parseInt(/pid=(\d+)/.exec(text)?.[1] ?? '', 10)
+        return { measured: true, hasListener: true, ownerPid: Number.isInteger(pid) && pid > 0 ? pid : null }
+    } catch (error) {
         return error?.code === 'ENOENT' ? { measured: false, hasListener: null, ownerPid: null } : { measured: true, hasListener: false, ownerPid: null }
     }
 }
