@@ -231,9 +231,11 @@ export function verbToolInputSchema(verb) {
 // tools were removed from its cached list has no other signal that the surface changed.
 const SURFACE_INSTRUCTIONS = 'gm-mcp serves one tool, gm_codemode. Every gm verb is a function on `gm` inside its code body: gm_codemode({code: "return await gm.codesearch({query: \'x\'})"}). Call gm.list() for every callable name and gm.describe(name) for a verb schema. The per-verb tools of earlier builds (gm_instruction, gm, fs_read, git_status, ...) are not registered here, so a client holding a cached tool list must re-fetch tools/list.'
 
+const PROCESS_INSTRUCTION_SESSION_ID = `mcp-instruction-${process.pid}-${Date.now()}`
+
 export function createServer() {
     const server = new McpServer({ name: 'gm-mcp', version: BUNDLE_VERSION }, { instructions: SURFACE_INSTRUCTIONS })
-    const instructionSessionId = `mcp-instruction-${process.pid}-${Date.now()}`
+    const instructionSessionId = PROCESS_INSTRUCTION_SESSION_ID
     const tools = new Map()
     const define = (name, config, handler, verb = null) => tools.set(name, { ...config, verb, handler })
 
