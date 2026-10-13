@@ -242,6 +242,8 @@ export function createServer() {
         {
             description: 'Dispatch a gm instruction and return its reply. Omitting session_id uses a stable server-local session.',
             inputSchema: {
+                verb: z.string().optional().describe('gm spool verb to dispatch, e.g. phase-status, health, transition. Omitted means instruction.'),
+                body: z.union([z.record(z.string(), z.unknown()), z.string()]).optional().describe('Body for a non-instruction verb (an object, or a string holding a JSON object). Ignored for instruction, which takes prompt.'),
                 prompt: z.string().optional().describe('Current task prompt. Omitted means an empty prompt.'),
                 session_id: z.string().optional().describe('Optional gm session id.'),
                 cwd: z.string().optional().describe('Project root holding .gm/exec-spool. Pass it on every call: it selects the project daemon and search root. It is not forwarded into the verb body.'),
@@ -257,9 +259,10 @@ export function createServer() {
         },
         async (args = {}, extra) => {
             try {
+                const verb = args.verb || 'instruction'
                 const text = await gmDispatch({
-                    verb: 'instruction',
-                    body: args.resume_task ? undefined : {
+                    verb,
+                    body: args.resume_task ? undefined : verb !== 'instruction' ? (args.body ?? {}) : {
                         prompt: args.prompt ?? '',
                         ...(args.mode ? { mode: args.mode } : {}),
                         ...(args.git_root_override ? { git_root_override: args.git_root_override } : {}),
