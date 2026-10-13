@@ -329,13 +329,74 @@ const MEMORIZE_BODY = {
     },
 }
 
+const FETCH_TYPES = {
+    url: z.string(),
+    prompt: z.string(),
+    max_chars: numberLike,
+    answer_max_chars: numberLike,
+    raw: booleanLike,
+    method: z.string(),
+    headers: z.record(z.string(), z.string()),
+    timeoutMs: numberLike,
+}
+const FETCH_KEYS = ['url', 'prompt', 'max_chars', 'answer_max_chars', 'raw', 'method', 'headers', 'timeoutMs']
+const FETCH_FIELDS = aliasFields('fetch', FETCH_TYPES, FETCH_KEYS)
+const FETCH_DESCRIPTION = ` ${FETCH_KEYS.join(', ')} are accepted at the top level and folded into body, so {"url":"<url>"} and body:{"url":"<url>"} are the same call; a key named in both takes its value from body. The reply is the READABLE page, not the transport payload: HTML is converted to markdown before it is returned (head, script, style, svg, nav, header, footer, aside, form and iframe blocks are dropped; article or main wins over the rest of the document), and a body that is not HTML is returned as it arrived. prompt answers that prompt against the converted page and returns the matching passages instead of the page: gm holds no outbound model credential, so answer_mode is always "extractive". max_chars caps the characters returned (default 20000), so one fetch cannot dump a whole page into context; answer_max_chars caps a prompt answer (default 4000). raw:true (aliases full_response, fullResponse) is the escape hatch that returns the original body with no conversion and no prompt answering.`
+const FETCH_BODY = {
+    required: ['url'],
+    fields: {
+        url: { type: 'string', description: 'Page to fetch. https:// and http:// only; no whitespace and at most 2048 bytes.' },
+        prompt: { type: 'string', description: 'When present the reply answers this against the converted page and returns the matching passages, not the page. Answering is extractive: the passages are verbatim from the page.' },
+        max_chars: { type: 'number', description: 'Cap on characters returned. Default 20000, ceiling 4000000.' },
+        answer_max_chars: { type: 'number', description: 'Cap on the characters of a prompt answer. Default 4000.' },
+        raw: { type: 'boolean', description: 'Return the original response body with no markdown conversion and no prompt answering. Aliases full_response and fullResponse.' },
+        method: { type: 'string', description: 'HTTP method; GET when absent.' },
+        headers: { type: 'object', description: 'Request headers.' },
+        body: { type: 'string', description: 'Request body, sent when method carries one.' },
+        timeoutMs: { type: 'number', description: 'Transport timeout in milliseconds. Default 60000, ceiling 600000.' },
+        opts: { type: 'object', description: 'Transport options object; method, headers and body are folded into it.' },
+    },
+}
+
+const WEBSEARCH_TYPES = {
+    query: z.string(),
+    url: z.string(),
+    engine: z.string(),
+    limit: numberLike,
+    max_results: numberLike,
+    allowed_domains: z.array(z.string()),
+    blocked_domains: z.array(z.string()),
+    prompt: z.string(),
+    max_chars: numberLike,
+    timeoutMs: numberLike,
+}
+const WEBSEARCH_KEYS = ['query', 'url', 'engine', 'limit', 'allowed_domains', 'blocked_domains', 'prompt', 'max_chars', 'timeoutMs']
+const WEBSEARCH_FIELDS = aliasFields('websearch', WEBSEARCH_TYPES, WEBSEARCH_KEYS)
+const WEBSEARCH_DESCRIPTION = ` ${WEBSEARCH_KEYS.join(', ')} are accepted at the top level and folded into body, so {"query":"<query>"} and body:{"query":"<query>"} are the same call; a key named in both takes its value from body. Web discovery stays inside gm: results are fetched over the same fetch port and returned as compact rows (title, url, host, snippet). The built-in engine is duckduckgo, read from https://html.duckduckgo.com/html/, which needs no credential; pass url to read another engine's results page instead. limit caps the rows returned (default 8, ceiling 25; max_results and k are aliases). allowed_domains keeps only results whose host matches, blocked_domains drops them, and both take host suffixes, so "example.com" matches docs.example.com. prompt answers that prompt against the result titles, urls and snippets the same extractive way fetch answers one.`
+const WEBSEARCH_BODY = {
+    required: [],
+    fields: {
+        query: { type: 'string', description: 'What to search for; q is an alias. Required unless url is given.' },
+        url: { type: 'string', description: 'Read this search engine results page instead of building one from query.' },
+        engine: { type: 'string', description: 'duckduckgo, the default and the only built-in engine; any other engine is reached by passing its results page as url.' },
+        limit: { type: 'number', description: 'Rows returned. Default 8, ceiling 25; aliases max_results, maxResults and k.' },
+        allowed_domains: { type: 'array', description: 'Host suffixes to keep; a non-matching result is dropped.' },
+        blocked_domains: { type: 'array', description: 'Host suffixes to drop; a matching result is removed.' },
+        prompt: { type: 'string', description: 'Answered against the kept rows instead of returning the whole listing.' },
+        max_chars: { type: 'number', description: 'Cap on characters returned. Default 20000.' },
+        raw: { type: 'boolean', description: 'Return the raw search page with no result parsing.' },
+        timeoutMs: { type: 'number', description: 'Transport timeout in milliseconds. Default 30000, ceiling 600000.' },
+    },
+}
+
 // One row per registry verb, in the runner's registry order.
 const ROWS = [
     { canonical: 'fs_read', aliases: FS_READ_RANGE_ALIASES, fields: FS_READ_RANGE_FIELDS, description: FS_READ_DESCRIPTION, body: FS_READ_BODY },
     { canonical: 'fs_write', body: FS_WRITE_BODY },
     { canonical: 'fs_readdir', description: FS_READ_PATH_RULE, body: FS_READDIR_BODY },
     { canonical: 'fs_stat', body: FS_STAT_BODY },
-    { canonical: 'fetch' },
+    { canonical: 'fetch', aliases: FETCH_KEYS, fields: FETCH_FIELDS, description: FETCH_DESCRIPTION, body: FETCH_BODY },
+    { canonical: 'websearch', aliases: WEBSEARCH_KEYS, fields: WEBSEARCH_FIELDS, description: WEBSEARCH_DESCRIPTION, body: WEBSEARCH_BODY },
     { canonical: 'env_get' },
     { canonical: 'kv_get' },
     { canonical: 'kv_put' },
