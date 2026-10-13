@@ -1239,6 +1239,7 @@ function startRunnerWatchdog(root) {
 }
 
 function sleep(ms, signal) {
+    if (signal?.aborted) return Promise.reject(new Error('aborted'))
     return new Promise((resolve, reject) => {
         const onAbort = () => {
             clearTimeout(t)
