@@ -145,26 +145,37 @@ export function bundleDrift({ transport = process.env.GM_MCP_TRANSPORT || 'stdio
     }
 }
 
+// The exact command that serves the installed bundle: the same launch the host registers, so a
+// restart is the process exiting and the host running this line again.
+export function restartCommand(path = bundleEntryPath()) {
+    return `node "${path}"`
+}
+
 export function bundleStalenessLine(state = bundleDrift()) {
     if (!state?.stale) return null
     const installed = `${state.installed_version ?? 'unknown version'} (sha ${shortHash(state.installed_sha256)})`
     const running = `${state.running_version} (sha ${shortHash(state.running_sha256)})`
     const action = state.reloadable
         ? 'reloading between dispatches now'
-        : `not reloading -- ${state.refusal_reason} -- to serve it, restart this server process: a running gm-mcp cannot replace itself, so only a fresh start picks up new code`
+        : `restart required (${state.refusal_reason}): run \`${restartCommand(state.path)}\` -- a running gm-mcp cannot replace itself, so only a fresh start serves the installed bundle`
     return `gm-mcp: this server is serving bundle ${running} but ${installed} is installed at ${state.path} -- ${action}`
 }
 
-// The line is a fact about this process, not about the dispatch it rides on: the same four lines
-// appended to every reply of a session is a per-verb tax that says nothing new after the first one.
-// One notice per installed bundle per process, re-armed only when the installed bundle itself moves.
-const noticedBundles = new Set()
-
+// Every dispatch reply of a stale process carries the line, because the reply is the only channel
+// an agent reads; stderr goes to the host log, not to the agent.
 export function bundleStalenessNotice(state = bundleDrift()) {
+    return bundleStalenessLine(state)
+}
+
+// The stderr announcement is a fact about this process, not about one dispatch: one line per
+// installed bundle per process, re-armed only when the installed bundle itself moves.
+const announcedBundles = new Set()
+
+export function bundleStalenessAnnouncement(state = bundleDrift()) {
     if (!state?.stale) return null
     const key = `${state.installed_sha256 ?? ''}|${state.refusal_code ?? ''}|${state.running_sha256 ?? ''}`
-    if (noticedBundles.has(key)) return null
-    noticedBundles.add(key)
+    if (announcedBundles.has(key)) return null
+    announcedBundles.add(key)
     return bundleStalenessLine(state)
 }
 
