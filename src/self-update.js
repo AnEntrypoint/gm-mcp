@@ -36,13 +36,13 @@ export function localBuildPinPath() {
     return path.join(agentplugDir(), LOCAL_BUILD_PIN_FILE)
 }
 
-export function selfUpdateFreezeReason() {
+export function noSelfUpdateReason() {
     const envValue = process.env[NO_SELF_UPDATE_ENV]
     if (envValue !== undefined && !SELF_UPDATE_OFF_VALUES.has(envValue.trim().toLowerCase())) {
-        return `${NO_SELF_UPDATE_ENV}=${JSON.stringify(envValue)} freezes the deployed bundle (set it to 0 to allow updates again)`
+        return `${NO_SELF_UPDATE_ENV}=${JSON.stringify(envValue)} suppresses self-update of the deployed bundle (set it to 0 to allow updates again)`
     }
     const marker = noSelfUpdateFilePath()
-    if (existsSync(marker)) return `${marker} exists, which freezes the deployed bundle (delete that file to allow updates again)`
+    if (existsSync(marker)) return `${marker} exists, which suppresses self-update of the deployed bundle (delete that file to allow updates again)`
     return null
 }
 
@@ -141,7 +141,7 @@ export function selfUpdateStatus() {
         running_from_deployed_bundle: isRunningFromDeployedBundle(deployedPath),
         deployed_sha256: bytes ? sha256(bytes) : null,
         deployed_pinned_as_local_build: Boolean(bytes && pin && pin.sha256 === sha256(bytes)),
-        frozen_by: selfUpdateFreezeReason(),
+        frozen_by: noSelfUpdateReason(),
         no_self_update_file: noSelfUpdateFilePath(),
         no_self_update_file_present: existsSync(noSelfUpdateFilePath()),
         local_build_pin_path: localBuildPinPath(),
@@ -211,8 +211,8 @@ export async function refreshStaleDeployedBundle() {
         appendDiagnostic('self-update-refused', { code, reason, deployed_bundle: deployedPath })
         return { outcome: 'refused', code, reason, deployed_bundle: deployedPath }
     }
-    const frozen = selfUpdateFreezeReason()
-    if (frozen) return refuse('frozen', frozen)
+    const suppressed = noSelfUpdateReason()
+    if (suppressed) return refuse('frozen', suppressed)
 
     const stampPath = `${deployedPath}.checked`
     if (checkedRecently(stampPath)) return { outcome: 'checked-recently' }
