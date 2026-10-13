@@ -1255,7 +1255,7 @@ function sleep(ms, signal) {
 
 function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
     return new Promise((resolve, reject) => {
-        let watcher
+        let outWatch
         let wakeTimer
         let fallbackTimer
         let settled = false
@@ -1264,7 +1264,7 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
             settled = true
             clearTimeout(wakeTimer)
             clearTimeout(fallbackTimer)
-            watcher?.close()
+            outWatch?.close()
             signal?.removeEventListener('abort', onAbort)
             if (error) reject(error)
             else resolve(wakeSource)
@@ -1275,13 +1275,13 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
         }
         signal?.addEventListener('abort', onAbort, { once: true })
         try {
-            watcher = fs.watch(outDir, { persistent: false }, wake)
-            watcher.on('error', () => {
-                watcher?.close()
-                watcher = undefined
+            outWatch = fs.watch(outDir, { persistent: false }, wake)
+            outWatch.on('error', () => {
+                outWatch?.close()
+                outWatch = undefined
             })
         } catch {
-            watcher = undefined
+            outWatch = undefined
         }
         if (fs.existsSync(outPath)) return finish('already_landed')
         wakeTimer = setTimeout(() => finish('deadline'), Math.max(1, waitMs))
