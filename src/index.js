@@ -4,7 +4,7 @@ import { installStdioGuards } from './transport-guard.js'
 import { startHttpServer, httpListenOptions, setHealthExtras } from './http-transport.js'
 import { defaultHttpPort, ensureHttpSingletonInBackground, ensureHttpSupervisor, httpSingletonEnabled, recordHttpInstance } from './singleton.js'
 import { adoptHandedOverHandle, handOverStdioToRefreshedBundle, handOverToRefreshedBundle, handoverRequested, HANDOVER_LISTEN_RETRY_MS } from './bundle-refresh.js'
-import { bundleHealthBlock, bundleStalenessNotice, startBundleDriftWatch } from './bundle-drift.js'
+import { bundleHealthBlock, bundleStalenessAnnouncement, startBundleDriftWatch } from './bundle-drift.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runReleaseBridgeInBackground } from './release-bridge.js'
 import { appendDiagnostic, describeError } from './server-log.js'
@@ -46,7 +46,7 @@ function seedHttpSingletonInBackground({ skipPort = null } = {}) {
 // handOverStdioToRefreshedBundle.
 function watchForStaleBundle({ handOver = null, transportKind = 'stdio' } = {}) {
     return startBundleDriftWatch((state) => {
-        const line = bundleStalenessNotice(state)
+        const line = bundleStalenessAnnouncement(state)
         if (line) console.error(line)
         if (handOver && state?.reloadable === true) return handOver(state)
         appendDiagnostic('bundle-stale-no-handover', { ...state, transport: transportKind })

@@ -47,7 +47,8 @@ await test('a stale bundle that cannot be reloaded says why instead of promising
         refusal_code: 'transport-stdio',
         refusal_reason: 'a stdio server cannot replace itself without detaching its client',
     }))
-    assert.match(line, /not reloading -- a stdio server cannot replace itself/)
+    assert.match(line, /restart required \(a stdio server cannot replace itself/)
+    assert.match(line, /run `node "[^`]+"`/)
     assert.doesNotMatch(line, /reloading between dispatches/)
 })
 
