@@ -166,7 +166,32 @@ function fsReadReplyFields(out) {
     return Object.keys(nested).some((key) => key in rest) ? rest : { ...rest, ...nested }
 }
 
+function fsReadTruncation(verb, body, out) {
+    if (verb !== 'fs_read') return out
+    if (!out || typeof out !== 'object' || Array.isArray(out) || out.ok === false) return out
+    const fields = fsReadReplyFields(out)
+    const requested = fsReadRequestedRange(body)
+    let requestedLast
+    if (requested) {
+        if (requested.end !== undefined) requestedLast = requested.end
+        else if (requested.count) requestedLast = requested.start + requested.count - 1
+    }
+    const returnedLast = Number(fields.end_line)
+    const returnedStart = Number(fields.start_line)
+    const hasReturned = Number.isFinite(returnedLast)
+    const clamped = requestedLast !== undefined && hasReturned && returnedLast < requestedLast
+    const byteCut = fields.truncated_at_bytes === true
+    const extra = { truncated: byteCut || clamped }
+    if (requestedLast !== undefined) extra.requested_range = { start_line: requested.start, end_line: requestedLast }
+    if (hasReturned) extra.returned_range = { start_line: Number.isFinite(returnedStart) ? returnedStart : requested?.start ?? 1, end_line: returnedLast }
+    return { ...out, ...extra }
+}
+
 export function applyFsReadRangeFallback(verb, body, out) {
+    return fsReadTruncation(verb, body, applyFsReadRangeFallbackRaw(verb, body, out))
+}
+
+function applyFsReadRangeFallbackRaw(verb, body, out) {
     if (verb !== 'fs_read') return out
     if (!out || typeof out !== 'object' || Array.isArray(out)) return out
     const fields = fsReadReplyFields(out)
