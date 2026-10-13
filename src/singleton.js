@@ -1,5 +1,5 @@
 import { agentplugDir } from './paths.js'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn } from './process-port.js'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -64,14 +64,19 @@ export function launchedEntryPath() {
 }
 
 function readStateFile(filePath, port = null) {
+    let state
     try {
-        const state = JSON.parse(readFileSync(filePath, 'utf8'))
-        if (!state || typeof state !== 'object') return null
-        if (port !== null && Number(state.port) !== Number(port)) return null
-        return state
-    } catch {
+        state = JSON.parse(readFileSync(filePath, 'utf8'))
+    } catch (error) {
+        if (error?.code !== 'ENOENT') appendDiagnostic('singleton-state-corrupt', { file: filePath, error: describeError(error) })
         return null
     }
+    if (!state || typeof state !== 'object') {
+        appendDiagnostic('singleton-state-corrupt', { file: filePath, error: 'not a JSON object' })
+        return null
+    }
+    if (port !== null && Number(state.port) !== Number(port)) return null
+    return state
 }
 
 function writeStateFile(filePath, state) {

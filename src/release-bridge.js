@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { execFile } from 'node:child_process'
+import { execFile } from './process-port.js'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'

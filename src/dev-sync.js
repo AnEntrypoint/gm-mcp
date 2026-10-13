@@ -1,5 +1,5 @@
 import { agentplugDir } from './paths.js'
-import { spawn } from 'node:child_process'
+import { spawn } from './process-port.js'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
