@@ -1,19 +1,4 @@
 #!/usr/bin/env node
-// Installs (or refreshes) the boot-time start and the periodic guard of the
-// shared gm-mcp HTTP server, then makes sure one is listening right now.
-//
-// Idempotent: every artifact it writes sits inside a marker block, and the
-// block is replaced wholesale on each run. Nothing here starts a second server
-// when one is already up -- "node <entry> ensure-http" probes /health first and
-// the probe is the authority.
-//
-// The hook and the crontab live outside this repo ($HOME/beforestart and
-// $HOME/crontab), which is why they are written by this installer rather than
-// edited by hand: run it again to reproduce them.
-//
-// usage:
-//   node scripts/install-autostart.mjs [--entry <bundle>] [--hook <file>]
-//        [--cron-file <file>] [--log <file>] [--no-hook] [--no-cron] [--check] [--uninstall]
 
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
@@ -85,9 +70,6 @@ function cronBlock() {
     return [
         BEGIN,
         `@reboot '${nodeBin}' '${entry}' ensure-http >> '${logFile}' 2>&1`,
-        // Minutely, not every five: a shell client (gmc.py) that POSTs straight
-        // to the port has no dispatch to seed one, so a killed server is simply
-        // gone until a guard runs. One probe of a healthy server is a fetch.
         `*/1 * * * * '${nodeBin}' '${entry}' ensure-http >> '${logFile}' 2>&1`,
         END,
     ].join('\n')

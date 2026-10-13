@@ -10,7 +10,7 @@ import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
-import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 
 let inflightDispatches = 0
 
@@ -295,7 +295,7 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
     let notice = `reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nspill_file: ${spillPath}\n${spillNote}`
     if (matchesTotal !== undefined && matchesReturned < matchesTotal) {
         notice += `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n`
-        notice += `matches_note: the matches list above is NOT complete -- it holds ${matchesReturned} of ${matchesTotal}, because this reply was cut at max_chars=${maxChars}; the full list is in result_artifact.path when one was reported and in spill_file for the entries cut here, or raise max_chars, or scope with "path"/"glob" and union the per-subtree results.\n`
+        notice += `matches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
     }
     const room = Math.max(0, maxChars - notice.length)
     if (head.length > room) {
@@ -377,9 +377,6 @@ const JSON_CONTROL_CHARACTER_ESCAPES = { '\n': '\\n', '\r': '\\r', '\t': '\\t', 
 
 const JSON_OBJECT_TEXT = /^\s*\{/
 
-// Every one of these is what an unescaped backslash, quote or stray brace in a hand-written JSON
-// string body looks like to JSON.parse; the repair hint has to name the escape, not the newline
-// trick that only applies to a raw line break inside a value.
 const ESCAPE_LOOKING_JSON_ERROR = /Bad escaped character|Unterminated string|Unexpected non-whitespace|Unexpected token|Expected ',' or '\}'/
 
 function nextNonWhitespaceIndex(text, from) {
@@ -402,12 +399,6 @@ function keyTokenFollows(text, from) {
     return colon >= 0 && text[colon] === ':'
 }
 
-// A "}" that follows a quote is not evidence that the quote ends the literal: in
-// {"query":"a"}b"} the "}" belongs to the value, and treating it as the closing brace cuts the
-// value to "a" and leaves "}b" as junk that then fails the parse with an unrelated message. A
-// closer ends the literal only when it really closes every container still open and nothing but
-// whitespace follows, which is a check against the container stack rather than a guess from the
-// character.
 function closesEveryOpenContainer(text, fromIndex, openContainers) {
     let index = fromIndex
     for (let depth = openContainers.length; depth > 0; depth -= 1) {
@@ -583,6 +574,43 @@ function withCodesearchScalarsCoerced(verb, body) {
     return coerced
 }
 
+const CODESEARCH_DEFAULT_K = 50
+const CODESEARCH_DEFAULT_K_MODES = new Set(['literal', 'regex', 'filename'])
+const CODESEARCH_K_ALIASES = ['k', 'max_results', 'maxResults', 'limit', 'head_limit']
+
+export function withCodesearchDefaultK(verb, body) {
+    if (verb !== 'codesearch' || !body || typeof body !== 'object' || Array.isArray(body)) return { body, defaulted: false }
+    if (!CODESEARCH_DEFAULT_K_MODES.has(body.mode)) return { body, defaulted: false }
+    if (CODESEARCH_K_ALIASES.some((key) => body[key] !== undefined)) return { body, defaulted: false }
+    return { body: { ...body, k: CODESEARCH_DEFAULT_K }, defaulted: true }
+}
+
+export function withCodesearchDefaultKHint(defaulted, verb, out) {
+    if (!defaulted || verb !== 'codesearch' || !out || typeof out !== 'object' || Array.isArray(out)) return out
+    const nested = out.data && typeof out.data === 'object' && !Array.isArray(out.data) && Array.isArray(out.data.matches)
+    const source = nested ? out.data : out
+    if (!Array.isArray(source.matches)) return out
+    const shown = source.matches.length
+    const total = Number(/^(\d+) lines?\b/.exec(String(source.count ?? ''))?.[1] ?? shown)
+    if (total <= shown) return out
+    const hint = {
+        shown,
+        total,
+        default_k: CODESEARCH_DEFAULT_K,
+        hint: `showing ${shown} of ${total} matches (default k=${CODESEARCH_DEFAULT_K}): raise k (0 = all) or scope with path/glob`,
+    }
+    return nested ? { ...out, data: { ...out.data, ...hint } } : { ...out, ...hint }
+}
+
+function withQuietAdmission(out) {
+    if (!out || typeof out !== 'object' || Array.isArray(out)) return out
+    const waited = Number(out.admission_waited_ms)
+    const quiet = (out.admission_decision === undefined || out.admission_decision === 'admitted') && !(waited > 0)
+    if (!quiet) return out
+    const { admission_band, admission_decision, admission_waited_ms, ...rest } = out
+    return rest
+}
+
 const RESULT_CHUNK_DEFAULT_CHARACTERS = 12000
 const RESULT_CHUNK_MAX_CHARACTERS = 16000
 const RESULT_FILE_MAX_BYTES = 4 * 1024 * 1024
@@ -611,9 +639,6 @@ function validateSpoolFile(candidate) {
     const dir = path.dirname(candidate)
     if (!isSpoolOutDirectory(dir)) throw new Error(`spool file must name a file inside a .gm/exec-spool/out directory: ${candidate}`)
     if (!fs.existsSync(candidate)) throw new Error(`spool file does not exist: ${candidate}`)
-    // Refused before the path is resolved: a link is not a regular spool file whatever it names,
-    // and resolving it first made the refusal report the target instead of the link -- which is
-    // also why the refusal is the same message whether the link escapes the spool or not.
     const before = fs.lstatSync(candidate)
     if (!before.isFile() || before.nlink !== 1) throw new Error('spool file must be an unlinked regular spool file')
     const resolvedOutDir = fs.realpathSync(dir)
@@ -639,8 +664,6 @@ function spoolFilePath(root, file) {
     throw failure
 }
 
-// Follows a link rather than refusing it, so a path swapped for one after the open is seen as
-// what it now names; it reads no content.
 function statOrUndefined(candidate) {
     try {
         return fs.statSync(candidate)
@@ -657,13 +680,6 @@ function openSpoolRegularFile(root, file) {
         if (!opened.isFile() || opened.nlink !== 1) throw new Error('spool file must be an unlinked regular spool file')
         if (opened.dev !== before.dev || opened.ino !== before.ino) throw new Error('spool file changed while opening')
         if (opened.size > RESULT_FILE_MAX_BYTES) throw new Error(`spool file exceeds ${RESULT_FILE_MAX_BYTES} byte limit`)
-        // Re-asked of the path the descriptor was opened from, after the open, on every platform.
-        // A descriptor root is not portable: /proc/self/fd exists on linux only and /dev/fd on
-        // darwin does not resolve to the open file at all, so containment read from such a path
-        // refused every landed result in a project reached through a symlink, while windows has
-        // no descriptor root to read and skipped the check entirely. The path answers it by
-        // identity instead -- the file it names now must be the file the descriptor holds -- and
-        // answers it after the open, which is the window a descriptor path could only guess at.
         const stillNamed = statOrUndefined(candidate)
         if (!stillNamed || stillNamed.dev !== opened.dev || stillNamed.ino !== opened.ino) {
             throw new Error(`spool file is outside the GM output spool: ${candidate} no longer names the file that was opened`)
@@ -1307,17 +1323,10 @@ const EXEC_DEFAULT_LIMIT_SECONDS = 300
 
 const EXEC_DEFAULT_LIMIT_MS = EXEC_DEFAULT_LIMIT_SECONDS * 1000
 
-// agentplug-host's exec_js HARD_CEILING_MS. A larger timeoutMs is clamped there in silence, so a
-// wrapper writing the prefix can never buy a child more than this, and must not promise more.
 const EXEC_HARD_CEILING_MS = 900000
 
 const POLL_MARGIN_PAST_EXEC_TIMEOUT_MS = 5000
 
-// A caller's timeout_seconds is honoured up to the harness's own 600s tool-call ceiling. Nothing
-// about the serial lane or the claim sweep needs a shorter wait: a poll that gives up leaves the
-// dispatch claimed and resumable, so it costs the lane nothing extra to have waited longer. Set
-// GM_MCP_POLL_TIMEOUT_CEILING_MS to move it -- a client whose own transport deadline is shorter
-// still gets a resumable reply at that deadline.
 const POLL_TIMEOUT_CEILING_DEFAULT_MS = 600000
 
 export function pollTimeoutCeilingMs() {
@@ -1380,12 +1389,6 @@ export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
     return DEFAULT_TIMEOUT_SECONDS * 1000
 }
 
-// The exec child's own budget, in milliseconds: what the daemon writes as the `timeoutMs=` prefix
-// when the body carried none, and therefore the instant the daemon reaps the child. It follows the
-// caller's poll budget instead of standing at the 300s default, because a caller that asked to wait
-// 400s was otherwise answered "still in flight" at 240s for work the daemon had already killed at
-// 300s -- a budget nobody could see or raise. It never shrinks the child's life below the default,
-// so a short poll stays just a short poll.
 export function execLimitMs(verb, raw_body, timeout_seconds) {
     const bodyPrefix = TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === 'string' ? TIMEOUT_MS_PREFIX_VALUE.exec(raw_body) : null
     if (bodyPrefix) {
@@ -1625,9 +1628,6 @@ export function readSpoolDispatchState(spoolDir, verb, task) {
 
 const DISPATCH_WAIT_LEDGER_FILE = '.dispatch-wait.json'
 
-// The daemon rewrites that ledger when a dispatch changes stage and on a few answer paths, never on
-// a timer, so a row can outlive the stage it names by as long as the dispatch it describes. Past
-// this age the row is quoted as a snapshot rather than as a reading of what is happening now.
 const DISPATCH_WAIT_LEDGER_STALE_MS = 5000
 
 const DISPATCH_WAIT_STATE_NOTES = {
@@ -1639,10 +1639,6 @@ const DISPATCH_WAIT_STATE_NOTES = {
     claimed_running: 'the daemon is executing the request',
 }
 
-// A lane wait with no lane named is not a lane wait: the daemon records a null lane for a verb that
-// has no project serial lane, and such a verb is admitted without ever queueing on one. What the row
-// then carries is the stage recorded at the moment of the claim, so the state text alone would have
-// the caller hunting for a lane that nothing holds.
 function dispatchWaitStateNote(state, lane) {
     const note = DISPATCH_WAIT_STATE_NOTES[state] ?? 'unrecognized state'
     if (state !== 'claimed_waiting_for_serial_lane' || lane !== null) return note
@@ -1898,13 +1894,8 @@ async function plainTextOwnerTransport(root, session_id, signal) {
     return transport
 }
 
-// A reply that is file content or a paged spill file is handed back byte for byte, so it is the one
-// place a notice must never be appended: an extra line there is not a note, it is a different file.
 const VERBATIM_REPLY_VERBS = new Set(['fs_read', 'result', 'gm_result'])
 
-// The prose line is noticed once per installed bundle; the machine-readable block rides on every
-// reply while the served bundle differs from the installed one, so an agent can act on it without
-// parsing the sentence.
 function withStaleBundleNotice(verb, text) {
     if (VERBATIM_REPLY_VERBS.has(verb)) return text
     if (typeof text !== 'string' || text === '') return text
@@ -1983,6 +1974,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     if (timeoutDiagnostic) return `error: ${timeoutDiagnostic}`
 
     let normalizedBody
+    let codesearchKDefaulted = false
     let rawBodyText
     if (!resume_task && !isPlainText) {
         const normalized = normalizedObjectBody(verb, body)
@@ -1995,7 +1987,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             const diagnostic = objectBodyDiagnostic(verb, globCoerced.value)
             if (diagnostic) return `error: ${diagnostic}`
             const coerced = withCodesearchScalarsCoerced(verb, globCoerced.value)
-            normalizedBody = withAssertedInstructionHash(verb, fsReadRangeCanonicalBody(verb, coerced))
+            const withDefaultK = withCodesearchDefaultK(verb, coerced)
+            codesearchKDefaulted = withDefaultK.defaulted
+            normalizedBody = withAssertedInstructionHash(verb, fsReadRangeCanonicalBody(verb, withDefaultK.body))
         }
     }
 
@@ -2018,10 +2012,6 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         })
     }
 
-    // Computed before the request is published: the daemon's lane wait is bounded by the budget this
-    // caller is actually going to poll for, so the channel rides the body it publishes. Without it a
-    // caller passing timeout_seconds: 240 was still answered at the lane's own 120s, a timer it
-    // could neither see nor raise.
     const requestedPollTimeoutMs = resume_task ? timeoutMilliseconds(timeout_seconds, DEFAULT_TIMEOUT_SECONDS) : pollTimeoutMs(verb, raw_body, timeout_seconds)
     const pollCeilingMs = pollTimeoutCeilingMs()
     const timeoutMs = Math.min(requestedPollTimeoutMs, pollCeilingMs)
@@ -2043,10 +2033,6 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             publishSpoolRequest(inDir, inPath, n, rawBodyText)
         } else {
             const fullBody = { ...normalizedBody, session_id }
-            // Reserved: the runner strips this member before it hashes the body for the lane's FIFO
-            // identity and before it hands the body to the plugin, so the channel is invisible to
-            // both. Only a JSON body carries it -- an extra line in a plain-text script body would
-            // be script the caller never wrote.
             fullBody._agentplug_lane_wait_ms = timeoutMs
             if (verb === 'instruction') {
                 const leases = leaseSessionsFor(root)
@@ -2082,9 +2068,11 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 const collides = Object.keys(data).some(k => k in rest)
                 if (!collides) out = { ...rest, ...data }
             }
+            if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
             if (ownerTransport && ownerTransport !== 'header-v1' && out && typeof out === 'object' && !Array.isArray(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
             out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, out))
+            out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
             else out = withDispatchWait(out, Date.now() - callStartedAtMs)
             if (out && typeof out === 'object' && out.instruction_unchanged === true && bodyCarriesInstructionHash(normalizedBody)) {

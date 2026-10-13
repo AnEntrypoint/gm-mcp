@@ -234,11 +234,6 @@ export function liveSupervisorPid(port, instance = null, now = Date.now()) {
     return null
 }
 
-/**
- * The pid the TCP table names as the listener, with phantom rows filtered out: when a socket is
- * handed to a child, the table keeps naming the creator, and a creator that has since exited
- * leaves a row no process owns. A dead owner pid is therefore UNMEASURED, not a different owner.
- */
 export function portOwnerPid(port) {
     const state = portListenerState(port)
     if (state.measured !== true || state.hasListener !== true) return null
@@ -250,12 +245,6 @@ export function portHasListener(port) {
     return state.measured === true ? state.hasListener : null
 }
 
-/**
- * A recorded pid that is alive is NOT proof this instance still exists: pids are recycled, and
- * a recycled pid made a dead registry look live forever, which is what kept the port pool
- * ratcheting upward instead of reusing the port. The pid must also own the listening socket on
- * the registered port before its liveness counts.
- */
 export function recordedServerPid(instance, supervisor, port = null) {
     const state = port === null ? null : portListenerState(port)
     if (state?.measured === true && state.hasListener === false) return null
@@ -272,6 +261,47 @@ export function recordedServerPid(instance, supervisor, port = null) {
 export function establishedConnectionCount(port) {
     const wanted = Number(port)
     if (!Number.isInteger(wanted) || wanted <= 0) return null
+    const locals = establishedLocalPorts()
+    if (locals === null) return null
+    return locals.filter((local) => local === wanted).length
+}
+
+function establishedLocalPorts() {
+    if (process.platform !== 'win32') {
+        const viaSs = establishedLocalPortsViaSs()
+        if (viaSs !== null) return viaSs
+    }
+    return establishedLocalPortsViaNetstat()
+}
+
+function localPortOf(address) {
+    const match = /[:.](\d+)$/.exec(address ?? '')
+    return match === null ? null : Number(match[1])
+}
+
+function establishedLocalPortsViaSs() {
+    let text = ''
+    try {
+        text = execFileSync('ss', ['-Htn', 'state', 'established'], {
+            encoding: 'utf8',
+            timeout: 10_000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        })
+    } catch {
+        return null
+    }
+    const locals = []
+    for (const line of text.split('\n')) {
+        const fields = line.trim().split(/\s+/)
+        if (fields.length < 4) continue
+        const local = localPortOf(fields[2])
+        if (local === null) return null
+        locals.push(local)
+    }
+    return locals
+}
+
+function establishedLocalPortsViaNetstat() {
     let text = ''
     try {
         text = execFileSync('netstat', ['-an'], {
@@ -283,20 +313,18 @@ export function establishedConnectionCount(port) {
     } catch {
         return null
     }
-    if (!text.includes('ESTABLISHED')) return 0
+    if (!text.includes('ESTABLISHED')) return []
     const localFieldIndex = process.platform === 'win32' ? 1 : 3
-    let parsed = 0
-    let attached = 0
+    const locals = []
     for (const line of text.split('\n')) {
         const fields = line.trim().split(/\s+/)
         if (fields.length < 4 || !/^tcp/i.test(fields[0])) continue
         if (!fields.includes('ESTABLISHED')) continue
-        const localPort = /[:.](\d+)$/.exec(fields[localFieldIndex] ?? '')
-        if (localPort === null) return null
-        parsed += 1
-        if (Number(localPort[1]) === wanted) attached += 1
+        const local = localPortOf(fields[localFieldIndex])
+        if (local === null) return null
+        locals.push(local)
     }
-    return parsed === 0 ? null : attached
+    return locals.length === 0 ? null : locals
 }
 
 export function parentPidOf(pid) {
@@ -429,12 +457,6 @@ export async function reapOrphanedHttpInstances({ now = Date.now() } = {}) {
     return reaped
 }
 
-/**
- * Port-pool reuse. A port is free only when nothing listens on it AND no live instance is
- * registered for it; a registered-but-dead port is exactly the one that must come back, so the
- * reclaim pass runs first and the allocator then returns the LOWEST free port rather than the
- * next one above the highest ever used.
- */
 export const PORT_POOL_FROM = 8787
 export const PORT_POOL_TO = 8879
 

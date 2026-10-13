@@ -6,11 +6,6 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { RUNNER_REGISTRY_VERBS } from '../src/verbs.js'
 
-// The served surface is the one codemode tool: every gm verb is reached through it, so the
-// bundle's own tool list no longer names each verb. What has to hold is that the tool is
-// served at all, that every registry verb is still reachable by name through it, and that a
-// verb reached that way still carries the body fields its spool schema declares -- a schema
-// that silently drops a field is the defect this file exists to catch.
 const BUNDLE = path.resolve('bin/gm-mcp-server.js')
 
 async function withBundle(fn) {

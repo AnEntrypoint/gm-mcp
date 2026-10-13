@@ -1,10 +1,5 @@
 name: build-verify
 
-# The name carries "build" on purpose: AnEntrypoint/gm pins gm-mcp as a submodule and its
-# bump-pins workflow holds the pin while any run whose *name* matches
-# release|publish|build|wasm is non-green, so a red run here holds that bump.
-# Renaming this workflow past that silently releases the hold.
-
 on:
   push:
     branches: [main]
@@ -22,10 +17,10 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-latest # linux x64
-          - ubuntu-24.04-arm # linux arm64
-          - macos-latest # macos arm64
-          - windows-latest # windows x64
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - windows-latest
     defaults:
       run:
         shell: bash

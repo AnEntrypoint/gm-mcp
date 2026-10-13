@@ -3,13 +3,6 @@ import path from 'node:path'
 
 const GIT_TIMEOUT_MS = 60_000
 
-// gm asks the same repo-layout question -- `rev-parse --show-toplevel` above all -- on every
-// MCP call that needs a repo root, and every question is a process spawn. The answer is a pure
-// function of the on-disk gitdir layout, so it is answered once per (directory, question) and
-// asked again only after a git command that can move that layout runs in a directory sharing a
-// path prefix with the cached one. Nothing that gates a write is in the flag list:
-// `status --porcelain`, `hash-object` and gating `ls-files` still reach git every time, and
-// each of them drops the answers it can invalidate.
 const LAYOUT_QUESTION_FLAGS = new Set([
     '--show-toplevel',
     '--show-prefix',

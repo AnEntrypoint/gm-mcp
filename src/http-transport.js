@@ -47,8 +47,6 @@ function rejectOversizedBody(req, res) {
     return true
 }
 
-// The Content-Length check alone lets a chunked body through uncapped, so the stream is counted
-// as it arrives and the parsed body is handed to the transport, which then never reads the socket.
 async function readCappedJsonBody(req) {
     const chunks = []
     let total = 0
@@ -169,13 +167,7 @@ export async function startHttpServer({ port, host, listenHandle = null, listenR
         socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
     })
 
-    // listenHandle is the listening socket of the process this one replaces, adopted over the IPC
-    // channel: binding it instead of the port is what makes a bundle upgrade leave no window in
-    // which nothing answers.
     const listenOptions = listenHandle ? { handle: listenHandle } : { port, host }
-    // A replacement that got no handle still has to get on the port somehow, and the process it
-    // replaces may still be holding it, so EADDRINUSE is worth retrying for a while rather than
-    // dying on.
     const retryDeadline = Date.now() + Math.max(0, listenRetryMs)
     for (;;) {
         try {

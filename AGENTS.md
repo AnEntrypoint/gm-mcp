@@ -77,6 +77,6 @@ Repo-source facts that structure and naming cannot carry. The exec-family `timeo
 
 ## Verbs, witnesses and probes
 
-- **Verb list.** `RUNNER_REGISTRY_VERBS` (`src/verbs.js`) is a static copy of the runner's verb set. Each entry is its own MCP tool, named by `verbToolName` (hyphens become underscores), and dispatched under its registry name. A verb missing from the list has no tool of its own, but the generic `gm` tool still dispatches it.
+- **Verb list.** `RUNNER_REGISTRY_VERBS` (`src/verbs.js`) is a static copy of the runner's verb set. Each entry is a `gm.<verb>` binding inside the single registered MCP tool `gm_codemode` (`src/codemode.js:168`), named by `verbToolName` (hyphens become underscores). A verb missing from the list has no `gm.<verb>` binding.
 - **Witness and probe scripts.** `scripts/pool-observe-served-witness.mjs` checks the served client's pool-observe output against the candidate contract in rs-plugkit `crates/plugkit-core/src/orchestrator/pool_rank.rs`. `test/mcp-http-probe.mjs [port] [idleSeconds]` and `test/http-session-resume.mjs [port] [idleSeconds]` are manual probes, not part of `npm test`; the second defaults to port 8791, leaving the live singleton on 8787 alone.
 - **Stale probe expectations.** `test/http-session-resume.mjs` expects a 200 GET heartbeat carrying `retry:` and an `http-empty-body-ignored` event. Current `src/` answers GET with 405 and emits no such event, so those checks do not match this build (not run).

@@ -39,11 +39,6 @@ function seedHttpSingletonInBackground({ skipPort = null } = {}) {
     }
 }
 
-// A stale bundle the watch cannot reload (older, unreadable, no version, reload switched off) is
-// reported and left alone: the refusal is the whole point of the check, so handing over anyway would
-// move this process onto worse code under a message saying it would not. Stdio hands the frames to a
-// child instead of exiting, because exiting is what detaches the client -- see
-// handOverStdioToRefreshedBundle.
 function watchForStaleBundle({ handOver = null, transportKind = 'stdio' } = {}) {
     return startBundleDriftWatch((state) => {
         const line = bundleStalenessAnnouncement(state)
