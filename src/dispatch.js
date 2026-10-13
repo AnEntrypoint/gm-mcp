@@ -6,6 +6,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
+import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
@@ -1214,6 +1215,7 @@ function ensureSpoolRunnerRunning(root) {
     child.on('error', () => settle(-1))
     child.on('exit', (code) => settle(code))
     recordRunnerEnsureInflight(root, entry)
+    if (child.pid) recordChild({ root, pid: child.pid, kind: 'spool-runner', verb: 'spool', note: 'daemon sweeper for this project' })
     try {
         fs.writeFileSync(path.join(spoolDirOf(root), '.runner-ensure.lock'), `${child.pid} ${now}`, 'utf8')
     } catch {
@@ -1239,7 +1241,6 @@ function startRunnerWatchdog(root) {
 }
 
 function sleep(ms, signal) {
-    if (signal?.aborted) return Promise.reject(new Error('aborted'))
     return new Promise((resolve, reject) => {
         const onAbort = () => {
             clearTimeout(t)
