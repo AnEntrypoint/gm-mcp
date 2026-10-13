@@ -9,7 +9,7 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
 - Writes `.gm/exec-spool/in/<verb>/<N>.txt`
 - Polls `.gm/exec-spool/out/<verb>-<N>.json` until it appears (or a timeout elapses)
 - Returns the response as flat YAML text, auto-cleaned for readability:
-  - opaque internal ids (`dispatch_id`, `request_fingerprint`) stripped
+  - `request_fingerprint` stripped; `dispatch_id` kept and printed as the first line of every spool reply (see "Dispatch id")
   - the redundant `response`/`data` nesting levels flattened to the top (unless a field name would collide)
   - long text fields (e.g. `instruction`'s full phase prose) truncated with a pointer naming the on-disk file to read for the full text -- the plain-text-body verbs get a far larger budget so their `stdout` comes back inline (see "Long text inline limits")
   - hit-array ranking internals (`cos`/`recency` in `recall_hits`/`bm25_hits`/`vector_hits`/`commits`) dropped, `score` retained as ranked evidence
@@ -400,6 +400,21 @@ entry exactly repeats its corresponding structured `counts` row as `path:count`.
 All count rows, totals and scan metadata remain unchanged. The original out-file
 and `full_response: true` retain the repeated array; incomplete, failed and
 nonmatching replies keep it.
+
+### Dispatch id
+
+Every reply that comes from a spool dispatch, ok or failed, opens with `dispatch_id: <id>`. It is
+taken from the raw out-file after every other rewrite, because an exec or search reply keeps its
+`data:` block above the id, a rebuilt `fs_read` range reply drops it, and the 24000-char reply cap or
+`max_chars` cut it off (5 of 495 real replies lost it that way). The id is the run's key in
+`.gm/exec-spool/.dispatch-ledger.json`, so `gm.prd_resolve({id, witness_evidence, witness_dispatch_id:
+"<id>"})` (alias `dispatch_id`) binds a PRD row to that run with no out-file reading. `gm_result` on a
+spool `.json` names it too; `full_response: true` keeps the native layout. A daemon notice for a
+dispatch that never ran (`dispatch_orphaned`, `session_id_task_mismatch`) has no id and gets none.
+
+Replies render as YAML with no line folding (`lineWidth: -1`). Width 100 turned 289 of 534 real replies
+into `>-` scalars: tool output re-wrapped at column 100 with line breaks turned into blank lines, 51 of
+60 truncation pointers split across lines, and 2.5% more bytes.
 
 ### Long text inline limits
 

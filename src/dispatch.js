@@ -10,7 +10,11 @@ import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
 import { tableRow } from './verb-table.js'
-import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withDispatchIdFirst, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+
+function renderYaml(value) {
+    return yaml.dump(value, { lineWidth: -1 })
+}
 
 let inflightDispatches = 0
 
@@ -299,10 +303,13 @@ function largestMatchesKeptWithinBudget(out, holder, budget, toYaml) {
     return low
 }
 
+const DISPATCH_ID_LEAD_LINE = /^dispatch_id: [^\n]*\n/
+
 function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
     if (text.length <= maxChars) return text
     fs.writeFileSync(spillPath, text)
-    const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
+    const leadLength = DISPATCH_ID_LEAD_LINE.exec(text)?.[0].length ?? 0
+    const budget = Math.max(leadLength, maxChars - REPLY_NOTICE_RESERVE_CHARS)
     const holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
     let head = text
     let matchesTotal
@@ -322,7 +329,7 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
         notice += `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n`
         notice += `matches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
     }
-    const room = Math.max(0, maxChars - notice.length)
+    const room = Math.max(leadLength, maxChars - notice.length)
     if (head.length > room) {
         const cut = head.slice(0, room)
         const lastBreak = cut.lastIndexOf('\n')
@@ -791,6 +798,14 @@ function parseResultDocument(text) {
     }
 }
 
+function spoolJsonDispatchId(text) {
+    try {
+        return JSON.parse(text)?.dispatch_id
+    } catch {
+        return undefined
+    }
+}
+
 function wholeNumber(value) {
     if (typeof value === 'number') return Number.isInteger(value) ? value : undefined
     if (typeof value === 'string' && /^[0-9]+$/.test(value.trim())) return Number(value.trim())
@@ -800,7 +815,7 @@ function wholeNumber(value) {
 export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_DEFAULT_CHARACTERS, cwd, root, projectPath }) {
     const namedRoot = [cwd, root, projectPath].find(value => typeof value === 'string' && value.trim())
     const rootDir = namedRoot ? path.resolve(namedRoot.trim()) : path.resolve(process.cwd())
-    const toYaml = value => yaml.dump(value, { lineWidth: 100 })
+    const toYaml = renderYaml
     if (typeof result_file !== 'string' || !result_file) return toYaml({ error: 'result_file required' })
     if (field !== undefined && (typeof field !== 'string' || !field)) return toYaml({ error: 'field must be a non-empty string when provided' })
     const pageOffset = wholeNumber(offset)
@@ -814,17 +829,21 @@ export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_
             let totalCharacters
             let nextOffset
             let resolvedField
+            let dispatchId
             if (field) {
-                const selected = resultField(parseResultDocument(readAllBounded(fd, size)), field)
+                const document = parseResultDocument(readAllBounded(fd, size))
+                const selected = resultField(document, field)
+                dispatchId = document?.dispatch_id
                 content = JSON.stringify(selected.value, null, 2)
                 resolvedField = selected.path
                 totalCharacters = content.length
                 nextOffset = pageOffset + pageLimit < totalCharacters ? pageOffset + pageLimit : undefined
             } else {
                 ({ content, totalCharacters, nextOffset } = readUtf8Page(fd, size, pageOffset, pageLimit))
+                if (file.endsWith('.json')) dispatchId = spoolJsonDispatchId(readAllBounded(fd, size))
             }
             const page = field ? content.slice(pageOffset, pageOffset + pageLimit) : content
-            return toYaml({
+            return toYaml(withDispatchIdFirst({
                 result_file: file,
                 ...(resolvedField ? { field: resolvedField } : {}),
                 offset: pageOffset,
@@ -832,7 +851,7 @@ export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_
                 total_characters: totalCharacters,
                 ...(nextOffset === undefined ? { complete: true } : { next_offset: nextOffset }),
                 content: page,
-            })
+            }, dispatchId))
         } finally {
             fs.closeSync(fd)
         }
@@ -1961,14 +1980,14 @@ function withStaleBundleNotice(verb, text) {
     if (typeof text !== 'string' || text === '') return text
     const drift = bundleDrift()
     if (!drift.stale) return text
-    const block = yaml.dump({
+    const block = renderYaml({
         bundle_stale: true,
         bundle_served_version: drift.running_version,
         bundle_served_sha: drift.running_sha256,
         bundle_installed_version: drift.installed_version,
         bundle_installed_sha: drift.installed_sha256,
         bundle_reloadable: drift.reloadable === true,
-    }, { lineWidth: 100 })
+    })
     const line = bundleStalenessNotice(drift)
     const body = `${text.endsWith('\n') ? text : `${text}\n`}${block}`
     return line ? `${body}\n${line}\n` : body
@@ -2000,7 +2019,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const resolvedRoot = resolveDispatchRoot(cwd)
     if (resolvedRoot.error) {
         appendDiagnostic('dispatch-root-refused', { verb, root: resolvedRoot.refused_root, reason: resolvedRoot.refused_reason })
-        return yaml.dump(resolvedRoot, { lineWidth: 100 })
+        return renderYaml(resolvedRoot)
     }
     if (resolvedRoot.root_source !== 'cwd') {
         appendDiagnostic('dispatch-root-defaulted', { verb, root: resolvedRoot.root, source: resolvedRoot.root_source })
@@ -2019,7 +2038,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     fs.mkdirSync(outDir, { recursive: true })
     const callStartedAtMs = Date.now()
     let lastWakeSource = 'initial_check'
-    const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })
+    const toYaml = renderYaml
 
     const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === 'string'
     if (!resume_task && isPlainText && typeof raw_body !== 'string') {
@@ -2116,6 +2135,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             landedAtMs = opened.mtimeMs
             const original = JSON.parse(readAllBounded(opened.fd, opened.size))
             responseValueObserver?.(original)
+            const dispatchId = original?.dispatch_id
             const parsed = full_response ? original : unpackExecOutputEnvelope(verb, original)
             applySessionLeaseVerdict(parsed, { body: normalizedBody ?? body, root })
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
@@ -2150,6 +2170,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 }
                 out = out && typeof out === 'object' && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
             }
+            if (!full_response) out = withDispatchIdFirst(out, dispatchId)
             const rendered = (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
             const spillNote = verb === 'fs_read' ? fsReadSpillNote(out, rendered) : ''
             return capReplyText(rendered, replyMaxChars(max_chars), `${outPath}.reply.txt`, out, toYaml, spillNote)

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.43 - a spool reply opens with its dispatch_id
+
+`prd-resolve` binds a row to a run through `witness_dispatch_id`, and the operator reported that the
+wrapper strips that id, so the caller digs the out-file by hand. The installed
+`~/.gm-tools/gm-mcp-server.mjs` (0.2.1, sha256 db097c49...) does: its `NOISE_KEYS` still lists
+`dispatch_id`, and 6 of 6 live replies carried no id. The source has kept the id since 2779167, but
+only by key order: an exec or search reply keeps its `data:` block above it (`data.ok` blocks
+flattening), so the 24000-char reply cap or a small `max_chars` cut it off (live on 0.2.42:
+`exec_js` printing 32 KB, `max_chars` 600 and `max_chars` 120 all answered with no id; 5 of 495 real
+replies), and `applyFsReadRangeFallback` and `fsReadUnknownRangeReply` rebuild the reply object
+without it. `withDispatchIdFirst` now runs last in `readLandedOutFile`, from the raw out-file, so every
+default spool reply, ok or failed, opens with `dispatch_id: <id>`; `capReplyText` never cuts that
+line; `gmResult` names it for a spool `.json`; `full_response` keeps the native layout. Measured on 537
+real out-files through the real resume path: replies opening with the id 206 -> 495 (every out-file
+that carries one; the other 42 are `dispatch_orphaned` and `session_id_task_mismatch` notices of
+dispatches that never ran), replies with no id at all 5 -> 0. Live on the rebuilt bundle, `prd-add`,
+`exec_js`, then `prd-resolve {id, witness_evidence, witness_dispatch_id: <id from the reply>}` answered
+`witness_dispatch_id_verified: true` via the ledger, also through the alias `dispatch_id`, a
+`codesearch` id, and a second session. The `gm_codemode` and `initialize` text, the verb table's
+`witness_dispatch_id` field, README.md and AGENTS.md now say so.
+
+Replies also render with `lineWidth: -1` (`renderYaml`). Width 100 folded 289 of 534 real replies
+into `>-` scalars: tool output re-wrapped at column 100 with line breaks turned into blank lines, and
+51 of the 60 truncation pointers (`full text at <path> field '<key>'`) split across lines, so a caller
+could not match the path. Measured on the 537-reply corpus: 1244357 -> 1212699 bytes (-2.5%), no pointer
+split, and the 530 untruncated replies parse to identical values before and after.
+
 ## 0.2.42 - a restarting daemon reads as restarting, not dead
 
 A daemon-guard restart window used to read as a dead daemon: `readDaemonLiveness` saw a stale
