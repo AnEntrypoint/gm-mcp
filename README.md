@@ -418,7 +418,7 @@ own `max_bytes`/`offset`/`limit` are daemon-side and were never the problem --
 they were being cut down again on the way out.
 
 A line range belongs to the `fs_read` request itself:
-`{"path":"src/dsp/audio_thread.cpp","startLine":1040,"endLine":1100}` -- or
+`{"path":"src/dispatch.js","startLine":1040,"endLine":1100}` -- or
 `start`/`end`, `start`/`count`, `from`/`to`, `offset`/`limit`, `line`/`lines`,
 at the top level or inside `body` -- returns just those lines, 1-based and
 inclusive on both ends, with `total_lines`, `start_line`, `end_line` and a
