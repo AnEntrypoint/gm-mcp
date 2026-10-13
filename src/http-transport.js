@@ -47,12 +47,43 @@ function rejectOversizedBody(req, res) {
     return true
 }
 
+// The Content-Length check alone lets a chunked body through uncapped, so the stream is counted
+// as it arrives and the parsed body is handed to the transport, which then never reads the socket.
+async function readCappedJsonBody(req) {
+    const chunks = []
+    let total = 0
+    for await (const chunk of req) {
+        total += chunk.length
+        if (total > MAX_BODY_BYTES) return { tooLarge: true }
+        chunks.push(chunk)
+    }
+    try {
+        return { body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }
+    } catch {
+        return { malformed: true }
+    }
+}
+
+function sendJsonRpcError(res, status, code, message) {
+    sendJson(res, status, { jsonrpc: '2.0', error: { code, message }, id: null })
+}
+
 async function serveStatelessMcpRequest(req, res) {
     if (req.method !== 'POST') {
         sendJson(res, 405, { error: `stateless transport serves no ${req.method} stream; POST JSON-RPC to ${MCP_PATH}` })
         return
     }
     if (rejectOversizedBody(req, res)) return
+    const read = await readCappedJsonBody(req)
+    if (read.tooLarge) {
+        res.setHeader('connection', 'close')
+        sendJson(res, 413, { error: `request body exceeds the ${MAX_BODY_BYTES} byte cap` })
+        return
+    }
+    if (read.malformed) {
+        sendJsonRpcError(res, 400, -32700, 'Parse error: request body is not JSON')
+        return
+    }
     normalizeProtocolVersion(req)
     const mcp = createServer()
     const transport = new StreamableHTTPServerTransport({
@@ -67,7 +98,7 @@ async function serveStatelessMcpRequest(req, res) {
         void mcp.close().catch(() => {})
     })
     await mcp.connect(transport)
-    await transport.handleRequest(req, res)
+    await transport.handleRequest(req, res, read.body)
 }
 
 function sendJson(res, status, payload) {
