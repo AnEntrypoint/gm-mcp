@@ -186,7 +186,7 @@ const PRD_RESOLVE_BODY = {
     fields: {
         id: { type: 'string', aliases: ['prd_id', 'mutable_id', 'item_id', 'slug', 'key'], description: 'Row id to close.' },
         witness_evidence: { type: 'string', aliases: ['witness', 'evidence'], description: 'Mandatory on every resolve: the observed output that closes the row.' },
-        witness_dispatch_id: { type: 'string', aliases: ['dispatch_id'], description: 'Dispatch id recorded in this project\'s .gm/exec-spool/.dispatch-ledger.json. Supplying it replaces the four witness_* fields below.' },
+        witness_dispatch_id: { type: 'string', aliases: ['dispatch_id'], description: 'The dispatch_id on the first line of a gm reply: pass the id of the run that proves the row (it is recorded in this project\'s .gm/exec-spool/.dispatch-ledger.json). Replaces the four witness_* fields below.' },
         witness_exit_code: { type: 'integer', description: 'Binding option B, with the three fields after it: all four or none. Must be 0.' },
         witness_output_sha256: { type: 'string', description: '64 lowercase hex chars of the witness output file.' },
         witness_output_path: { type: 'string', description: 'Witness output path relative to the project root, with no "..".' },
