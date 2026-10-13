@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawnSync } from './process-port.js'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'

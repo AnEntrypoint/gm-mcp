@@ -8,6 +8,10 @@ import { bundleHealthBlock, bundleStalenessAnnouncement, startBundleDriftWatch }
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runReleaseBridgeInBackground } from './release-bridge.js'
 import { appendDiagnostic, describeError } from './server-log.js'
+import { installSpoolPort } from './spool-port.js'
+import { nodeSpoolPort } from './spool-port-node.js'
+
+installSpoolPort(nodeSpoolPort)
 
 export { createServer } from './mcp-server.js'
 
