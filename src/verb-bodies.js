@@ -106,7 +106,7 @@ const VERB_BODY_SCHEMAS = {
             max_files: { type: 'integer', description: 'File cap.' },
             max_chars: { type: 'integer', description: 'Byte cap on returned text.' },
             timeout_ms: { type: 'integer', description: 'Scan budget in milliseconds.' },
-            path: { type: 'string', aliases: ['paths', 'files'], description: 'Scopes the scan to a subtree.' },
+            path: { type: 'string', aliases: ['paths', 'files'], description: 'Scopes the scan to a subtree; dual applies it to its ranked rows and its literal fallback.' },
             root: { type: 'string', aliases: ['projectPath', 'cwd'], description: 'Searches another project.' },
             glob: { type: 'string', aliases: ['path_glob'], description: 'Path glob; a "!" prefix negates.' },
             exclude: { type: 'string', aliases: ['exclude_glob', 'exclude_globs'], description: 'Exclusion glob.' },
