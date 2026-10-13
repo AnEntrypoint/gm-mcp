@@ -2,10 +2,11 @@ import { z } from 'zod'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { canonicalToolName, nearestNames } from './verbs.js'
 import { verbBodySchema } from './verb-bodies.js'
+import { NOTICES } from './notices.js'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
-const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A verb that names a field `body` of its own (the row prose of prd-add) follows the same rule: a top-level `body` is the dispatch body only when it is an object or JSON object text, so gm.prd_add({id, subject, body}) reaches the verb as body:{id, subject, body}. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns every callable name as {name, verb, description}; `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
+const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A verb that names a field `body` of its own (the row prose of prd-add) follows the same rule: a top-level `body` is the dispatch body only when it is an object or JSON object text, so gm.prd_add({id, subject, body}) reaches the verb as body:{id, subject, body}. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns one entry per verb as {name, verb, aliases, description} (verb is omitted when it equals name, aliases when there are any), with the description cut to 80 chars; `gm.list({filter, names_only, max_desc})` narrows it. `gm.help()` returns the notice codes that replies carry. The reply is capped at max_chars (default 24000). `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
 
 function replyText(result) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
@@ -25,15 +26,8 @@ function unknownNameError(name, names) {
     return new Error(`no gm tool named ${name} -- nearest callable names: ${nearest.join(', ')}. Call gm.list() for every callable name.`)
 }
 
-// A dispatch body is an object or JSON object text. normalizedObjectBody in dispatch.js asks the
-// same question of a string body before it decides what to write: a string that does not open with
-// `{` is not JSON to it, and it writes the string out as literal raw text.
 const JSON_OBJECT_TEXT = /^\s*\{/
 
-// A verb tool's top-level schema is the dispatch envelope (body, raw_body, session_id, cwd, ...)
-// plus that verb's own top-level aliases. Anything else the caller names is a verb body field, and
-// zod strips unknown keys, so it has to move into `body` before validation or it never reaches the
-// verb: gm.codesearch({query:'x'}) is the same dispatch as gm.gm({verb:'codesearch', body:{query:'x'}}).
 export function foldVerbArgs(tool, args) {
     if (!tool?.verb) return args
     if (!args || typeof args !== 'object' || Array.isArray(args)) return args
@@ -50,13 +44,6 @@ export function foldVerbArgs(tool, args) {
     }
     if (typeof envelope.raw_body === 'string') return envelope
     const named = envelope.body
-    // `body` names two different things: the dispatch envelope's body, and a body field of the verb
-    // itself -- prd-add calls its row prose `body`, so gm.prd_add({id, subject, body}) has to reach
-    // the verb as body:{id, subject, body}, exactly as gm.gm({verb:'prd-add', body:{...}}) does. A
-    // top-level `body` that does not open with `{` cannot be dispatch body text: normalizedObjectBody
-    // in dispatch.js applies the same test before it writes a string body out as literal raw text,
-    // which is what put the row prose at byte 0 of the spool file and made the request unparseable.
-    // A string that does open with `{` keeps the dispatch-body path, errors and all.
     if (typeof named === 'string' && !JSON_OBJECT_TEXT.test(named)) {
         return { ...envelope, body: { ...extra, body: named } }
     }
@@ -72,6 +59,66 @@ export function foldVerbArgs(tool, args) {
     }
     if (!body || typeof body !== 'object' || Array.isArray(body)) return envelope
     return { ...envelope, body: { ...extra, ...body } }
+}
+
+const DEFAULT_LIST_DESC_CHARS = 80
+const DEFAULT_CODEMODE_MAX_CHARS = 24000
+
+function canonicalCatalog(tools) {
+    const namesByVerb = new Map()
+    for (const [name, tool] of tools) {
+        if (!tool.verb) continue
+        if (!namesByVerb.has(tool.verb)) namesByVerb.set(tool.verb, [])
+        namesByVerb.get(tool.verb).push(name)
+    }
+    const rows = []
+    for (const [name, tool] of tools) {
+        if (!tool.verb) {
+            rows.push({ name, verb: null, description: tool.description ?? '' })
+            continue
+        }
+        const names = namesByVerb.get(tool.verb)
+        const preferred = canonicalToolName(tool.verb)
+        const canonical = names.includes(preferred) ? preferred : names[0]
+        if (name !== canonical) continue
+        const aliases = names.filter((other) => other !== canonical)
+        rows.push({ name, verb: tool.verb, ...(aliases.length > 0 ? { aliases } : {}), description: tool.description ?? '' })
+    }
+    return rows
+}
+
+function nonNegativeNumber(value, fallback) {
+    const parsed = Number(value)
+    return value !== undefined && Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback
+}
+
+function clipDescription(text, max) {
+    if (max === 0 || text.length <= max) return text
+    return `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`
+}
+
+function listEntries(tools, options) {
+    const opts = options && typeof options === 'object' && !Array.isArray(options) ? options : {}
+    const maxDesc = nonNegativeNumber(opts.max_desc, DEFAULT_LIST_DESC_CHARS)
+    const needle = typeof opts.filter === 'string' && opts.filter.trim() !== '' ? opts.filter.trim().toLowerCase() : null
+    let rows = canonicalCatalog(tools)
+    if (needle) {
+        rows = rows.filter((row) => [row.name, row.verb, row.description, ...(row.aliases ?? [])]
+            .some((field) => typeof field === 'string' && field.toLowerCase().includes(needle)))
+    }
+    if (opts.names_only === true || opts.names_only === 'true') return rows.map((row) => row.name)
+    return rows.map((row) => ({
+        name: row.name,
+        ...(row.verb !== null && row.verb !== row.name ? { verb: row.verb } : {}),
+        ...(row.aliases ? { aliases: row.aliases } : {}),
+        description: clipDescription(row.description, maxDesc),
+    }))
+}
+
+function capCodemodeText(text, cap) {
+    if (text.length <= cap) return text
+    const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${cap}\n`
+    return `${text.slice(0, Math.max(0, cap - notice.length))}${notice}`
 }
 
 function bindings(tools, { session_id, cwd }, extra) {
@@ -93,7 +140,8 @@ function bindings(tools, { session_id, cwd }, extra) {
         return tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then(replyText)
     }
     const api = {
-        list: () => [...tools].map(([name, tool]) => ({ name, verb: tool.verb ?? null, description: tool.description })),
+        list: (options) => listEntries(tools, options),
+        help: () => ({ notices: NOTICES, list_options: { filter: 'substring of name, verb, alias or description', names_only: 'true returns names only', max_desc: `description chars (default ${DEFAULT_LIST_DESC_CHARS}, 0 = full)` }, codemode_max_chars: `reply cap (default ${DEFAULT_CODEMODE_MAX_CHARS})` }),
         describe: (name) => {
             const resolved = resolve(name)
             if (!resolved) throw unknownNameError(name, names)
@@ -123,13 +171,6 @@ function bindings(tools, { session_id, cwd }, extra) {
     })
 }
 
-// The body returns whatever it likes: a plain object built out of verb replies, a bare number, a
-// function, a BigInt, a structure that reaches itself. JSON.stringify alone answers two of those
-// wrong. It drops what it cannot render, so a function-valued or undefined field vanishes -- {r:
-// undefined} prints as {}, which reads the same as a payload that never arrived -- and it throws
-// on a BigInt and on a cycle, which surfaced as "gm_codemode code threw" and lost the reply and
-// every console.log line above it. Render the un-renderable as text instead, so the shape of the
-// value survives; fall back to String(value) only when there is nothing left to render.
 function jsonText(value) {
     const parents = new WeakMap()
     const replacer = function (key, v) {
@@ -144,7 +185,7 @@ function jsonText(value) {
     }
     let text
     try {
-        text = JSON.stringify(value, replacer, 2)
+        text = JSON.stringify(value, replacer)
     } catch {
         return textOf(value)
     }
@@ -173,6 +214,7 @@ export function registerCodeMode(server, tools) {
                 code: z.string().describe('Async JavaScript body. Call gm tools as gm.<name>({...}) -- the object you pass is the verb body, so gm.codesearch({query:"x"}) == gm.gm({verb:"codesearch", body:{query:"x"}}); discover them with gm.list() and gm.describe(name).'),
                 session_id: z.string().optional().describe('Default session_id for every gm call that does not pass its own.'),
                 cwd: z.string().optional().describe('Default cwd for every gm call that does not pass its own.'),
+                max_chars: z.number().optional().describe('Reply cap in characters for the returned text (default 24000). Past it the text is cut and reply_truncated is true.'),
             },
         },
         async (args = {}, extra) => {
@@ -182,8 +224,9 @@ export function registerCodeMode(server, tools) {
             try {
                 const gm = bindings(tools, { session_id, cwd: args.cwd }, extra)
                 const value = await new AsyncFunction('gm', 'console', args.code)(gm, logger)
-                const text = [...logs, formatValue(value)].filter((line) => line !== '').join('\n')
-                return { content: [{ type: 'text', text }] }
+                const joined = [...logs, formatValue(value)].filter((line) => line !== '').join('\n')
+                const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
+                return { content: [{ type: 'text', text: capCodemodeText(joined, cap) }] }
             } catch (error) {
                 const detail = describeError(error)
                 appendDiagnostic('codemode-threw', { error: detail })

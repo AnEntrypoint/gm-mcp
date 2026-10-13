@@ -44,12 +44,6 @@ function rotateIfLarge(file) {
     }
 }
 
-/**
- * Records one child pid the spool caused to exist, so a pid seen later on the box can be
- * attributed to the dispatch that spawned it instead of to a manual census. Attribution is
- * also the reaper's safety predicate: a pid no ledger owns is never a reaping candidate, so
- * an unattributed process is reported as unknown and left alone.
- */
 export function recordChild({ root = null, pid, kind = 'child', verb = null, dispatch_id = null, session_id = null, task = null, port = null, writer = 'mcp', note = null } = {}) {
     const numericPid = Number(pid)
     if (!Number.isInteger(numericPid) || numericPid <= 0) return null
@@ -125,11 +119,6 @@ export function readLedger(root = null) {
     return rows
 }
 
-/**
- * Every ledger row that names this pid, newest last, with the identity fields a caller needs
- * to decide whether the child is still the child it was: a re-used pid answers pidAlive the
- * same as the original, so the row's ppid, kind and port are the discriminator.
- */
 export function attributePid(pid, { root = null } = {}) {
     const wanted = Number(pid)
     if (!Number.isInteger(wanted) || wanted <= 0) return { pid: null, attributed: false, reason: 'no-pid' }

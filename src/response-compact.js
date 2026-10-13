@@ -54,10 +54,6 @@ const EMPTY_LIST_IS_THE_ANSWER_KEYS = new Set([
     'launch',
 ])
 
-// A search reply that lists no hits is a finding only when the scan saw everything.
-// "0 hits" and "the code is not there" are the same bytes on the wire, so a search reply
-// that shows no hits while the scan did not cover its scope -- or that covered no file at
-// all -- is annotated instead of being left to read as a clean empty result.
 const SEARCH_VERBS = new Set(['codesearch', 'grep', 'codeinsight', 'code_index', 'callers', 'callees', 'impact'])
 
 const INCOMPLETE_SCAN_WHEN_TRUE = ['budget_exhausted', 'timed_out', 'files_truncated', 'listing_incomplete', 'matches_truncated', 'partial']
@@ -108,16 +104,37 @@ export function withSearchIncompleteness(out) {
     if (scopeSize === 0) {
         return {
             [SEARCH_ZERO_FILES_KEY]: true,
-            [SEARCH_UNPROVEN_KEY]: 'the scan searched 0 files, so this empty result is a scanner failure and NOT a finding: it says nothing about whether the code exists. Name a scope with "path" (or "paths"), confirm the root, and re-run before concluding anything is absent.',
+            [SEARCH_UNPROVEN_KEY]: 'scanner_zero_files: searched 0 files, not a finding; see gm.help',
             ...out,
         }
     }
     const reasons = incompleteScanReasons(source)
     if (!reasons.length || !searchShowsNoHits(source)) return out
     return {
-        [SEARCH_UNPROVEN_KEY]: `0 hits shown, but the scan was INCOMPLETE (${reasons.join(', ')}), so this zero is UNPROVEN and NOT a finding: the needle may sit in a file the scan never read. Re-scope with "path"/"glob" and union the per-subtree results, or raise max_results, before concluding the code is absent.`,
+        [SEARCH_UNPROVEN_KEY]: `unproven_zero: scan INCOMPLETE (${reasons.join(', ')}); this zero is NOT a finding; see gm.help`,
         ...out,
     }
+}
+
+const SEARCH_PROSE_NOTICE_KEYS = new Map([
+    ['query_note', 'query_regex'],
+    ['exhaustive_note', 'exhaustive_scope'],
+    ['file_source_detail', 'file_source_git'],
+])
+
+function withNoticeCodesAt(level) {
+    const replaced = {}
+    for (const [key, value] of Object.entries(level)) {
+        replaced[key] = SEARCH_PROSE_NOTICE_KEYS.has(key) && typeof value === 'string' ? SEARCH_PROSE_NOTICE_KEYS.get(key) : value
+    }
+    return replaced
+}
+
+export function withNoticeCodes(out) {
+    if (!out || typeof out !== 'object' || Array.isArray(out)) return out
+    const top = withNoticeCodesAt(out)
+    if (top.data && typeof top.data === 'object' && !Array.isArray(top.data)) return { ...top, data: withNoticeCodesAt(top.data) }
+    return top
 }
 
 const PRD_LISTING_KEYS = new Set(['why'])

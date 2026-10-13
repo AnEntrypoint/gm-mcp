@@ -19,25 +19,12 @@ import {
 const BROWSER_NAMES = new Set(['chrome', 'chrome.exe', 'msedge', 'msedge.exe', 'firefox', 'firefox.exe'])
 export const DEFAULT_LEAK_KINDS = ['exec']
 
-/**
- * A reaping verdict is only ever "retire" when every predicate was MEASURED true. A predicate
- * whose value could not be measured (null) is not a pass: it downgrades the verdict to
- * "unknown", and an unknown process is never signalled. That is the whole safety property --
- * the reaper would rather leave a leak standing than retire live work it could not prove dead.
- */
 export const VERDICT = { RETIRE: 'retire', KEEP: 'keep', UNKNOWN: 'unknown' }
 
 function measure(name, value, pass) {
     return { predicate: name, value, pass }
 }
 
-/**
- * "No live supervisor", measured per platform. Windows keeps the dead parent's pid on an
- * orphan, so the parent is simply gone; POSIX RE-PARENTS an orphan to init, so its parent is
- * alive and is pid 1. Checking only for a dead parent therefore finds orphans on Windows and
- * finds none at all on Linux and macOS -- the predicate has to mean the right thing on each.
- * An unmeasured parent (null) is never proof of abandonment.
- */
 export function parentAbandoned(parentPid) {
     if (parentPid === null || !Number.isInteger(Number(parentPid)) || Number(parentPid) <= 0) return false
     if (pidAlive(parentPid) === false) return true
@@ -67,7 +54,6 @@ function isProtectedBrowser(pid) {
     if (command === null) return false
     const lowered = command.toLowerCase()
     if (![...BROWSER_NAMES].some((name) => lowered.includes(name.toLowerCase()))) return false
-    // A browser launched with a profile dir belongs to a lane; one without it is the user's own.
     return !/--user-data-dir[=\s]/.test(lowered)
 }
 
@@ -92,12 +78,6 @@ function verdictOf(predicates, extra = {}) {
     return { verdict: VERDICT.RETIRE, predicates, ...extra }
 }
 
-/**
- * gm-mcp HTTP singleton instances. The registry is itself the attribution, so these need no
- * ledger row. The added predicate over the existing sweep is identity: a recorded pid that is
- * alive but does not own the listening socket is a RE-USED pid, and treating it as live is what
- * let a dead registry keep its port forever.
- */
 export async function assessHttpInstances({ now = Date.now(), roots = [] } = {}) {
     const findings = []
     for (const port of registeredHttpPorts()) {
@@ -121,9 +101,6 @@ export async function assessHttpInstances({ now = Date.now(), roots = [] } = {})
         const ownerPid = portOwnerPid(port)
         const health = await probeHealth(port)
         const healthPid = Number(health?.pid ?? 0)
-        // Identity is proven by the socket owner or by the server naming itself on /health. A
-        // TCP row naming a pid that no longer exists is a phantom (socket handed to a child), so
-        // it is unmeasured rather than a contradiction -- otherwise 8787 could never be assessed.
         const identity = ownerPid === serverPid ? 'socket-owner' : (healthPid > 0 && healthPid === serverPid ? 'health-pid' : null)
         const supervisorPid = liveSupervisorPid(port, instance, now)
         const parentPid = parentPidOf(serverPid)
@@ -151,11 +128,6 @@ export async function assessHttpInstances({ now = Date.now(), roots = [] } = {})
     return findings
 }
 
-/**
- * Browser/accelerated-session leases. A heartbeat proves a writer is running, not that the
- * thing it leases exists, so a lease is retired on positive evidence of death -- holder dead,
- * browser dead, or the recorded DevTools port refusing a connection -- regardless of heartbeat.
- */
 export async function assessLeases({ roots = [] } = {}) {
     const findings = []
     for (const root of roots) {
@@ -210,14 +182,6 @@ export async function assessLeases({ roots = [] } = {}) {
     return findings
 }
 
-/**
- * Ledger-attributed children. Attribution is the gate: a pid no dispatch claimed is not a
- * candidate at all, which is what keeps this from becoming a bulk process filter.
- *
- * Only `exec` children are candidates by default. gm-mcp's own infrastructure children (the
- * spool runner, the http server, its supervisor) are detached on purpose and are governed by
- * the http-instance source; retiring them here would kill the machinery that does the reaping.
- */
 export async function assessAttributedChildren({ roots = [], liveSessionIds = null, kinds = DEFAULT_LEAK_KINDS } = {}) {
     const findings = []
     const seen = new Set()

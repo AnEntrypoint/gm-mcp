@@ -1,5 +1,3 @@
-// Spawns real processes that really leak, then proves the reaper retires exactly those and
-// leaves a live-attached one standing. Run: node test/leak-reaper.test.mjs
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -38,8 +36,6 @@ server.listen(0, '127.0.0.1', () => {
 setInterval(() => {}, 1000)
 `
 
-// The intermediate exits at once, so the server it detaches is genuinely orphaned: its parent
-// is dead while it keeps listening. That is the leak class, reproduced rather than described.
 const ORPHANER = `
 const { spawn } = require('child_process')
 const fs = require('fs')
@@ -66,7 +62,7 @@ function waitForFile(file, timeoutMs = 15_000) {
 const scriptPath = path.join(root, 'leak-server.js')
 writeFileSync(scriptPath, LEAK_SOURCE, 'utf8')
 
-function spawnLeak(tag) {
+function spawnLeak(tag, leaks) {
     const pidFile = path.join(root, `${tag}.pid`)
     const portFile = path.join(root, `${tag}.port`)
     for (const file of [pidFile, portFile]) {
@@ -76,7 +72,10 @@ function spawnLeak(tag) {
         env: { ...process.env, LEAK_SCRIPT: scriptPath, LEAK_PID_FILE: pidFile, LEAK_PORT_FILE: portFile },
         stdio: 'ignore',
     })
-    return { pid: Number(waitForFile(pidFile)), port: Number(waitForFile(portFile)) }
+    const leak = { pid: Number(waitForFile(pidFile)) }
+    leaks.push(leak)
+    leak.port = Number(waitForFile(portFile))
+    return leak
 }
 
 const leaks = []
@@ -91,17 +90,14 @@ const cleanup = () => {
 process.on('exit', cleanup)
 
 console.log('leak-reaper: spawning two orphaned servers that refuse to exit')
-const leakA = spawnLeak('a')
-const leakB = spawnLeak('b')
-leaks.push(leakA, leakB)
+const leakA = spawnLeak('a', leaks)
+const leakB = spawnLeak('b', leaks)
 assert.ok(pidAlive(leakA.pid) === true, 'leak A is running')
 assert.ok(pidAlive(leakB.pid) === true, 'leak B is running')
 
-// Attribution: the ledger, not a manual census, says which dispatch owns a pid.
 recordChild({ root, pid: leakA.pid, kind: 'exec', verb: 'exec_js', dispatch_id: '1791850000000-500-attribution-proof', session_id: 'session-dead-lane', task: '7', port: leakA.port })
 recordChild({ root, pid: leakB.pid, kind: 'exec', verb: 'exec_js', dispatch_id: '1791850000001-500-leak-b', session_id: 'session-dead-lane', task: '8', port: leakB.port })
 
-// (2) A live-attached instance must NOT be reaped: hold a real client connection on B.
 const client = net.createConnection({ host: '127.0.0.1', port: leakB.port })
 await new Promise((resolve, reject) => {
     client.once('connect', resolve)
@@ -129,13 +125,11 @@ check('retire requires every predicate measured, so an unattributed pid is never
     assert.ok(stranger.every((entry) => entry.pid === leakA.pid || entry.pid === leakB.pid), 'only ledger-owned pids are candidates')
 })
 
-// (1) Dry run must not signal anything.
 check('dry run signals nothing', () => {
     assert.equal(first.retired.length, 0)
     assert.equal(pidAlive(leakA.pid), true)
 })
 
-// Now apply: leak A goes, and no manual step was involved.
 const applied = await reapReport({ roots: [root], apply: true, liveSessionIds: new Set() })
 const retiredA = applied.retired.find((entry) => entry.pid === leakA.pid)
 check('apply retires the proven orphan with no manual action', () => {
@@ -151,7 +145,6 @@ check('the retired pid is gone', () => {
     assert.notEqual(pidAlive(leakA.pid), true, 'leak A is still alive after retirement')
 })
 
-// With the client gone, B is now provably unattached and must be reaped too.
 client.destroy()
 await new Promise((resolve) => setTimeout(resolve, 300))
 const second = await reapReport({ roots: [root], apply: true, liveSessionIds: new Set() })
@@ -161,8 +154,6 @@ check('B is reaped once its client disconnects', () => {
     assert.equal(finding.verdict, 'retire', `verdict was ${finding.verdict}: ${JSON.stringify(finding.protected_by ?? finding.unmeasured)}`)
 })
 
-// (3) Port reuse: a registry whose recorded pid is ALIVE but does not own the port is a dead
-// registry wearing a recycled pid. It must come back into the pool.
 const freeProbe = net.createServer()
 await new Promise((resolve) => freeProbe.listen(0, '127.0.0.1', resolve))
 const recycledPort = freeProbe.address().port

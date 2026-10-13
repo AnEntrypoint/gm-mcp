@@ -1,17 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import net from 'node:net'
 
-/**
- * Port facts the reaper and the singleton both need. Every function here answers null when it
- * could not measure, never false: "unmeasured" and "nothing is listening" are different claims,
- * and only the second one may license retiring anything.
- */
 
-/**
- * Tri-state listener fact. `measured:false` means the probe itself failed and nothing is known;
- * `hasListener:false` is a positive measurement that nothing is bound -- the two must never be
- * conflated, because only the second one may license reusing or retiring a port.
- */
 export function portListenerState(port) {
     const wanted = Number(port)
     if (!Number.isInteger(wanted) || wanted <= 0) return { measured: false, hasListener: null, ownerPid: null }

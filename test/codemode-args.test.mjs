@@ -50,8 +50,6 @@ test('a verb top-level alias is left for the dispatcher to fold', () => {
     assert.deepEqual(foldVerbArgs(toolFor('prd-list'), { id: 'ROW-1' }), { id: 'ROW-1' })
     assert.deepEqual(foldVerbArgs(toolFor('git_commit'), { message: 'm', paths: ['a'] }), { message: 'm', paths: ['a'] })
     assert.deepEqual(foldVerbArgs(toolFor('git_push'), { rev: 'abc123' }), { rev: 'abc123' })
-    // git_status declares limit, path, paths, files, summary and eol as top-level aliases, so they
-    // stay out of the body here and mergeVerbRangeFields folds them on the way to the verb.
     assert.deepEqual(foldVerbArgs(toolFor('git_status'), { limit: 5, path: 'a' }), { limit: 5, path: 'a' })
     assert.deepEqual(foldVerbArgs(toolFor('git_log'), { limit: 5 }), { limit: 5 })
     assert.deepEqual(foldVerbArgs(toolFor('git_reset'), { mode: 'hard' }), { mode: 'hard' })
@@ -62,8 +60,6 @@ test('a tool that is not a verb dispatch is untouched', () => {
     assert.equal(foldVerbArgs({ verb: null, inputSchema: { verb: true } }, args), args)
 })
 
-// The tool handler is the real one registerCodeMode installs, so this is the same path a live
-// gm_codemode call takes: bindings -> foldVerbArgs -> zod validation -> tool handler.
 async function runCodemode(tools, code) {
     let handler = null
     registerCodeMode({ registerTool: (_name, _config, fn) => { handler = fn } }, tools)

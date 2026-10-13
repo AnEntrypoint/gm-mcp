@@ -12,12 +12,20 @@ const booleanLike = z.union([z.boolean(), z.string()])
 
 const FS_READ_RANGE_ALIASES = ['startLine', 'endLine', 'start', 'end', 'count', 'from', 'to', 'offset', 'limit', 'line', 'lines']
 const FS_READ_RANGE_PAIR_HELP = 'Pairs are resolved in this order: startLine/endLine, then start/end (start/count also works), then from/to, then offset/limit, then line/lines. endLine/end/to is the last line to return; limit/count/lines is a number of lines, not an end line.'
-const FS_READ_RANGE_FIELDS = Object.fromEntries(FS_READ_RANGE_ALIASES.map((key) => {
-    const isCount = key === 'count' || key === 'limit' || key === 'lines'
-    const isStart = key === 'startLine' || key === 'start' || key === 'from' || key === 'offset' || key === 'line'
-    const role = isCount ? 'Number of lines to return, not an end line' : isStart ? 'First line to return' : 'Last line to return'
-    return [key, numberLike.optional().describe(`${role} (1-based, inclusive on both ends). ${FS_READ_RANGE_PAIR_HELP}`)]
-}))
+const FS_READ_RANGE_LINE_HELP = {
+    startLine: 'First line to return (1-based).',
+    endLine: 'Last line to return (1-based, inclusive).',
+    start: 'First line to return (1-based).',
+    end: 'Last line to return (1-based, inclusive).',
+    count: 'Number of lines to return.',
+    from: 'First line to return (1-based).',
+    to: 'Last line to return (1-based, inclusive).',
+    offset: 'First line to return (1-based).',
+    limit: 'Number of lines to return.',
+    line: 'First line to return (1-based).',
+    lines: 'Number of lines to return.',
+}
+const FS_READ_RANGE_FIELDS = Object.fromEntries(FS_READ_RANGE_ALIASES.map((key) => [key, numberLike.optional().describe(FS_READ_RANGE_LINE_HELP[key])]))
 const VERB_EXTRA_FIELDS = { fs_read: FS_READ_RANGE_FIELDS }
 const GIT_COMMIT_TOP_LEVEL_FIELDS = ['message', 'paths', 'files', 'allow_whole_index', 'recover_remote_moved', 'source_ref', 'rev']
 const GIT_COMMIT_TOP_LEVEL_FIELD_TYPES = {
@@ -55,21 +63,6 @@ const PRD_LIST_TOP_LEVEL_FIELD_TYPES = {
 const PRD_LIST_TOP_LEVEL_FIELDS_ZOD = Object.fromEntries(PRD_LIST_TOP_LEVEL_FIELDS.map((key) => [key, PRD_LIST_TOP_LEVEL_FIELD_TYPES[key].optional()
     .describe(`Top-level alias of body.${key} for prd_list: folded into body when body does not already name it.`)]))
 VERB_EXTRA_FIELDS['prd_list'] = PRD_LIST_TOP_LEVEL_FIELDS_ZOD
-// The git verbs below resolve a revision from body fields the MCP layer has to let through:
-// git_log and git_diff read range|ref|rev through body_revision, in that order. git_reset reads
-// ref|rev and then mode|hard, so a rev alias folds into the revision it resolves and a hard alias
-// into the mode it selects -- both are named here, or a caller reading this schema cannot see that
-// git_reset has a hard mode at all. git_revert reads ref alone, so a rev alias would fold a key the
-// verb ignores and look like a working call that silently reverted something else. git_branch is
-// absent for the opposite reason: it accepts only remote|all and refuses an unknown body field, so
-// a top-level ref would turn a working listing into a refusal. git_worktree_add reads ref as the
-// branch name and rev|commit|start_point as the commit to land on, so all three aliases are named
-// here: without them a caller asking for a worktree at a sha has no field this schema carries.
-// A pathspec field is read by body_pathspecs as one string or a list of them; git_revert, git_reset
-// and git_worktree_add read theirs with as_array/as_str instead, so those are typed to match or the
-// handler silently sees nothing. Every other type is the one the handler reads: as_bool and as_u64
-// are None on a string, so a boolean alias is z.boolean() and a numeric one is z.number() -- a call
-// sending "true" is refused here rather than arriving as false.
 const GIT_PATHSPEC_TOP_LEVEL_TYPE = z.union([z.string(), z.array(z.string())])
 const GIT_TOP_LEVEL_FIELDS = {
     git_log: {
@@ -98,9 +91,6 @@ for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) {
 const VERB_DESCRIPTION_EXTRA = { fs_read: ` Line ranges are 1-based and inclusive on both ends: ${FS_READ_RANGE_ALIASES.join(', ')} are accepted at the top level and folded into body, and the same keys inside body work identically. ${FS_READ_RANGE_PAIR_HELP} A range-looking key that is not one of them is an error naming the accepted keys rather than a silent whole file. Without any of them the whole file is returned, unchanged.` }
 const VERB_TOP_LEVEL_ALIASES = { fs_read: FS_READ_RANGE_ALIASES, git_finalize: GIT_COMMIT_TOP_LEVEL_FIELDS, git_commit: GIT_COMMIT_TOP_LEVEL_FIELDS, git_push: GIT_PUSH_TOP_LEVEL_FIELDS, git_show: GIT_SHOW_TOP_LEVEL_FIELDS, prd_list: PRD_LIST_TOP_LEVEL_FIELDS }
 for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) VERB_TOP_LEVEL_ALIASES[verb] = Object.keys(fields)
-// The verb refuses an absolute path even when it sits inside the project: containment is checked
-// on the relative form. That is intentional, and the refusal already names the relative form to
-// send, but the caller only learns it after a failed call -- so the tool description carries it.
 const FS_READ_PATH_RULE = ` "path" is resolved against the cwd you pass (the project root), never absolutely: an absolute path is refused even when it is inside that root, and so is any path carrying ".."; the refusal names the project-relative form to send instead. allowOutsideRoot:true widens a read verb to another root, never permission to climb out of one, and never applies to fs_write.`
 VERB_DESCRIPTION_EXTRA['fs_read'] += FS_READ_PATH_RULE
 VERB_DESCRIPTION_EXTRA['fs_readdir'] = FS_READ_PATH_RULE
@@ -122,10 +112,6 @@ for (const [verb, fields] of Object.entries(GIT_TOP_LEVEL_FIELDS)) {
     const sample = revisions.includes(first) ? 'rev' : 'value'
     VERB_DESCRIPTION_EXTRA[verb] = ` ${keys.join(', ')} ${keys.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${first}":"<${sample}>"} and body:{"${first}":"<${sample}>"} are the same call; a key named in both takes its value from body. Without one of them ${verb} takes its own default: ${defaults}.`
 }
-// The generated line above cannot say this for git_reset: its old handler read neither rev nor
-// hard, so a caller sending them got a mixed reset to HEAD that answered ok. Both are read now,
-// and the reply names the mode and scope it applied -- but a mode it cannot apply is refused
-// rather than substituted, so a dropped field is no longer silent either way.
 VERB_DESCRIPTION_EXTRA['git_reset'] += ` hard:true is the boolean form of mode:"hard" and rev is an alias of ref; paths scope the index only, so hard:true together with paths is refused. mode accepts soft|mixed|hard and hard must be a boolean -- anything else is refused with error_code invalid_args, never coerced to a default. Every ok reply carries mode, hard, reset_to and scope, so the operation that ran is readable without re-reading the repo.`
 
 export function mergeVerbRangeFields(verb, args = {}) {
@@ -213,7 +199,7 @@ function withVerbRejectionHint(verb, text) {
 const DISPATCH_FIELDS = {
     body: z.union([z.record(z.string(), z.unknown()), z.string()]).optional().describe('Dispatch body, an object or JSON string. session_id is added when absent. Not for plain-text verbs. Search verbs accept root (alias projectPath, cwd) to search another project.'),
     raw_body: z.string().optional().describe('Literal body for plain-text verbs, sent unescaped. Mutually exclusive with body. Prefer forward slashes in Windows paths.'),
-    session_id: z.string().describe('gm session id, required on every call.'),
+    session_id: z.string().optional().describe('gm session id. gm_codemode fills in its own when omitted.'),
     cwd: z.string().optional().describe('Project root holding .gm/exec-spool. Pass it on every call: it selects the project daemon and search root. It is not forwarded into the verb body.'),
     timeout_seconds: numberLike.optional().describe('Poll budget in seconds (default 120, ceiling 600 = the harness tool-call max; override with GM_MCP_POLL_TIMEOUT_CEILING_MS). A timeout keeps the dispatch running; resume it with resume_task.'),
     poll_interval_seconds: numberLike.optional().describe('Fallback poll interval in seconds (default 0.25) when filesystem events are unavailable.'),
@@ -227,8 +213,6 @@ export function verbToolInputSchema(verb) {
     return { ...DISPATCH_FIELDS, ...(VERB_EXTRA_FIELDS[verbToolName(verb)] ?? {}) }
 }
 
-// The initialize reply carries this text to the client. A client that reconnects after the verb
-// tools were removed from its cached list has no other signal that the surface changed.
 const SURFACE_INSTRUCTIONS = 'gm-mcp serves one tool, gm_codemode. Every gm verb is a function on `gm` inside its code body: gm_codemode({code: "return await gm.codesearch({query: \'x\'})"}). Call gm.list() for every callable name and gm.describe(name) for a verb schema. The per-verb tools of earlier builds (gm_instruction, gm, fs_read, git_status, ...) are not registered here, so a client holding a cached tool list must re-fetch tools/list.'
 
 const PROCESS_INSTRUCTION_SESSION_ID = `mcp-instruction-${process.pid}-${Date.now()}`
