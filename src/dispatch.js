@@ -331,9 +331,9 @@ function withCheckoutCreateHint(verb, body, out) {
 }
 
 let counter = 0
-function nextN(sessionId) {
+function nextN(session_id) {
     counter += 1
-    return `${sessionId}-${process.pid}-${Date.now()}-${counter}`
+    return `${session_id}-${process.pid}-${Date.now()}-${counter}`
 }
 
 const UNEXPANDED_INTERPOLATION = /\$\{[^}]*\}|\$\(|\$env:|\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%|`/i
@@ -943,7 +943,7 @@ function sharedDaemonWillSweep() {
 
 const LEASES_DIR = path.join(AGENTPLUG_DIR, 'leases')
 
-export function ensureAgentLease(root, sessionId) {
+export function ensureAgentLease(root, session_id) {
     const entry = path.resolve(root)
     const key = leaseKeyFor(entry)
     const file = path.join(LEASES_DIR, `${key}.${process.pid}.lease`)
@@ -953,14 +953,14 @@ export function ensureAgentLease(root, sessionId) {
             writeFileAtomically(file, entry)
             appendDiagnostic('lease-attached', { root: entry, pid: process.pid, lease_file: file })
         }
-        if (sessionId) recordLeaseSession(key, process.pid, sessionId)
+        if (session_id) recordLeaseSession(key, process.pid, session_id)
     } catch (error) {
         appendDiagnostic('lease-write-failed', { root: entry, error: String(error?.message || error) })
     }
 }
 
-function refreshCallerHeartbeat(root, sessionId) {
-    const heartbeat = path.join(root, '.gm', 'pool', `${sessionId}.live`)
+function refreshCallerHeartbeat(root, session_id) {
+    const heartbeat = path.join(root, '.gm', 'pool', `${session_id}.live`)
     try {
         const now = new Date()
         fs.utimesSync(heartbeat, now, now)
@@ -987,14 +987,14 @@ function readTextOrNull(file) {
     }
 }
 
-function leaseSessionSidecarName(key, pid, sessionId) {
-    const tag = createHash('sha256').update(sessionId).digest('hex').slice(0, 16)
+function leaseSessionSidecarName(key, pid, session_id) {
+    const tag = createHash('sha256').update(session_id).digest('hex').slice(0, 16)
     return `${key}.${pid}.${tag}.session`
 }
 
-function recordLeaseSession(key, pid, sessionId) {
-    const file = path.join(LEASES_DIR, leaseSessionSidecarName(key, pid, sessionId))
-    if (readTextOrNull(file) !== sessionId) writeFileAtomically(file, sessionId)
+function recordLeaseSession(key, pid, session_id) {
+    const file = path.join(LEASES_DIR, leaseSessionSidecarName(key, pid, session_id))
+    if (readTextOrNull(file) !== session_id) writeFileAtomically(file, session_id)
 }
 
 const LEASE_SESSION_SIDECAR = /^([0-9a-f]{16})\.(\d+)\.([0-9a-f]{16})\.session$/
@@ -1020,9 +1020,9 @@ export function leaseSessionsFor(root) {
             }
             continue
         }
-        const sessionId = readTextOrNull(sidecar)?.trim()
-        if (!sessionId) continue
-        sessions.push({ session_id: sessionId, pid, live: pidAlive(pid) === true })
+        const session_id = readTextOrNull(sidecar)?.trim()
+        if (!session_id) continue
+        sessions.push({ session_id, pid, live: pidAlive(pid) === true })
     }
     return sessions
 }
@@ -1814,8 +1814,8 @@ function withResumeDisclosure(out, disclosure) {
 
 const deliveredInstructionHashByOwner = new Map()
 
-function instructionOwnerKey(root, sessionId) {
-    return `${path.resolve(root)} ${sessionId}`
+function instructionOwnerKey(root, session_id) {
+    return `${path.resolve(root)} ${session_id}`
 }
 
 const deliveredReplyHashByOwner = new Map()
@@ -1830,17 +1830,17 @@ function bodyCarriesInstructionHash(body) {
     return !!body && typeof body === 'object' && INSTRUCTION_HASH_KEYS.some(k => !!body[k])
 }
 
-function rememberDeliveredInstructionHash(verb, parsed, root, sessionId) {
+function rememberDeliveredInstructionHash(verb, parsed, root, session_id) {
     if (verb !== 'instruction' || !parsed || parsed.ok === false) return
     const data = parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed
     const hash = typeof data.instruction_hash === 'string' ? data.instruction_hash : ''
     if (!hash) return
     const prose = typeof data.instruction === 'string' ? data.instruction : ''
     if (prose || data.instruction_unchanged === true) {
-        deliveredInstructionHashByOwner.set(instructionOwnerKey(root, sessionId), hash)
+        deliveredInstructionHashByOwner.set(instructionOwnerKey(root, session_id), hash)
     }
     if (typeof data.reply_hash === 'string' && data.reply_hash) {
-        deliveredReplyHashByOwner.set(instructionOwnerKey(root, sessionId), data.reply_hash)
+        deliveredReplyHashByOwner.set(instructionOwnerKey(root, session_id), data.reply_hash)
     }
 }
 
@@ -1864,7 +1864,7 @@ function ownerHeaderRuntimeIdentity(root) {
     return JSON.stringify([root, GLOBAL_DAEMON_STATUS_PATH, status.pid, status.daemon_boot_ts, hash])
 }
 
-async function plainTextOwnerTransport(root, sessionId, signal) {
+async function plainTextOwnerTransport(root, session_id, signal) {
     const before = ownerHeaderRuntimeIdentity(root)
     if (before && ownerHeaderCapabilityByRuntime.has(before)) {
         const cached = await ownerHeaderCapabilityByRuntime.get(before)
@@ -1874,7 +1874,7 @@ async function plainTextOwnerTransport(root, sessionId, signal) {
         let response
         try {
             await gmDispatch({
-                verb: 'phase-status', body: {}, session_id: sessionId,
+                verb: 'phase-status', body: {}, session_id,
                 cwd: root, timeout_seconds: 20, full_response: true,
             }, signal, value => { response = value })
         } catch { return 'unverified' }
