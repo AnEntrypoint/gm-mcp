@@ -15,7 +15,7 @@ const INSTALLED_GUEST_FILE = 'gm.wasm'
 const GUEST_DIR = 'plugins'
 const STATE_FILE = 'gm-mcp-release-bridge.json'
 const LOCK_FILE = 'gm-mcp-release-bridge.lock'
-const RUNNER_PIN_FILE = 'agentplug-runner.local-build.json'
+const RUNNER_LOCAL_BUILD_PIN_FILE = 'agentplug-runner.local-build.json'
 const RUNNER_FREEZE_FILE = 'agentplug-runner.no-self-update'
 const RUNNER_FREEZE_ENV = 'AGENTPLUG_NO_SELF_UPDATE'
 const GUEST_SIDELOAD_FILE = 'gm.local-dev-sideload.json'
@@ -256,7 +256,7 @@ async function reconcileRunner(release) {
         return { outcome: 'deferred', reason: 'runner-update-in-progress' }
     }
     const installedSha = sha256(readFileSync(runnerPath))
-    if (readJson(path.join(agentplugDir(), RUNNER_PIN_FILE))?.sha256 === installedSha) {
+    if (readJson(path.join(agentplugDir(), RUNNER_LOCAL_BUILD_PIN_FILE))?.sha256 === installedSha) {
         return { outcome: 'refused', reason: 'local-build-pinned', installed_sha256: installedSha }
     }
 
