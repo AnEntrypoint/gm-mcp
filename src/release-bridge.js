@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
-import { compareVersions, selfUpdateFreezeReason } from './self-update.js'
+import { compareVersions, noSelfUpdateReason } from './self-update.js'
 import { agentplugDir, toolsDir } from './paths.js'
 import { inflightDispatchCount, pidAlive } from './dispatch.js'
 import { appendDiagnostic } from './server-log.js'
@@ -16,8 +16,8 @@ const GUEST_DIR = 'plugins'
 const STATE_FILE = 'gm-mcp-release-bridge.json'
 const LOCK_FILE = 'gm-mcp-release-bridge.lock'
 const RUNNER_LOCAL_BUILD_PIN_FILE = 'agentplug-runner.local-build.json'
-const RUNNER_FREEZE_FILE = 'agentplug-runner.no-self-update'
-const RUNNER_FREEZE_ENV = 'AGENTPLUG_NO_SELF_UPDATE'
+const RUNNER_NO_SELF_UPDATE_FILE = 'agentplug-runner.no-self-update'
+const RUNNER_NO_SELF_UPDATE_ENV = 'AGENTPLUG_NO_SELF_UPDATE'
 const GUEST_SIDELOAD_FILE = 'gm.local-dev-sideload.json'
 const GUEST_BUILD_FILE = 'gm.build.json'
 const RUNNER_VERSION_FILE = 'agentplug-runner.version'
@@ -227,15 +227,15 @@ function swapIn(target, candidate, backupLabel) {
     }
 }
 
-export function bridgeFreezeReason() {
-    const gmMcp = selfUpdateFreezeReason()
+export function bridgeNoSelfUpdateReason() {
+    const gmMcp = noSelfUpdateReason()
     if (gmMcp) return gmMcp
-    const envValue = process.env[RUNNER_FREEZE_ENV]
+    const envValue = process.env[RUNNER_NO_SELF_UPDATE_ENV]
     if (envValue !== undefined && !OFF_VALUES.has(envValue.trim().toLowerCase())) {
-        return `${RUNNER_FREEZE_ENV}=${JSON.stringify(envValue)} freezes runner updates`
+        return `${RUNNER_NO_SELF_UPDATE_ENV}=${JSON.stringify(envValue)} suppresses runner self-update`
     }
-    const marker = path.join(agentplugDir(), RUNNER_FREEZE_FILE)
-    if (existsSync(marker)) return `${marker} exists, which freezes runner updates`
+    const marker = path.join(agentplugDir(), RUNNER_NO_SELF_UPDATE_FILE)
+    if (existsSync(marker)) return `${marker} exists, which suppresses runner self-update`
     return null
 }
 
@@ -370,8 +370,8 @@ function acquireLock() {
 
 export async function runReleaseBridge() {
     if ((process.env.GM_MCP_RELEASE_BRIDGE || '').trim() === '0') return { outcome: 'disabled' }
-    const frozen = bridgeFreezeReason()
-    if (frozen) return { outcome: 'frozen', reason: frozen }
+    const suppressed = bridgeNoSelfUpdateReason()
+    if (suppressed) return { outcome: 'frozen', reason: suppressed }
 
     mkdirSync(agentplugDir(), { recursive: true })
     const lockPath = acquireLock()

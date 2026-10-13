@@ -236,12 +236,12 @@ usage:
                                    with no MCP client involved
   gm-mcp-server.js pin-local-build [path]   pin the deployed bundle (default ~/.gm-tools/gm-mcp-server.mjs) so a self-update cannot overwrite it
   gm-mcp-server.js unpin-local-build        clear that pin
-  gm-mcp-server.js self-update-status       print freeze state, local-build pin and deployed bundle sha256
+  gm-mcp-server.js self-update-status       print no-self-update state, local-build pin and deployed bundle sha256
 
 register the durable transport instead of stdio with:
   claude mcp remove gm -s user && claude mcp add --transport http gm ${'http://127.0.0.1:'}${defaultHttpPort()}${'/mcp'} -s user
 
-freeze a self-update without a pin by setting ${'GM_MCP_NO_SELF_UPDATE'}=1 or creating ${noSelfUpdateFilePath()}`)
+suppress self-update without a pin by setting ${'GM_MCP_NO_SELF_UPDATE'}=1 or creating ${noSelfUpdateFilePath()}`)
     process.exit(0)
 }
 
