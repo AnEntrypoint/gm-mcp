@@ -50,9 +50,29 @@ test('a reply with no range applied is sliced client side', () => {
     assert.equal(out.next_start_line, 4)
 })
 
-test('a reply that already carries a range is left alone', () => {
+test('a reply that already carries a range keeps its fields', () => {
     const landed = { ok: true, verb: 'fs_read', path: 'f', start_line: 1, returned_lines: 2, content: 'l1\nl2' }
-    assert.equal(applyFsReadRangeFallback('fs_read', { path: 'f' }, landed), landed)
+    const out = applyFsReadRangeFallback('fs_read', { path: 'f' }, landed)
+    assert.deepEqual(out, { ...landed, truncated: false })
+})
+
+test('an endLine past the last line sets truncated and reports both ranges', () => {
+    const out = applyFsReadRangeFallback('fs_read', { path: 'f', startLine: 2, endLine: 9 }, { ok: true, verb: 'fs_read', path: 'f', data: file })
+    assert.equal(out.clamped_to_total_lines, true)
+    assert.equal(out.truncated, true)
+    assert.deepEqual(out.requested_range, { start_line: 2, end_line: 9 })
+    assert.deepEqual(out.returned_range, { start_line: 2, end_line: 4 })
+})
+
+test('a read that covers the request is not truncated', () => {
+    const out = applyFsReadRangeFallback('fs_read', { path: 'f', startLine: 2, endLine: 3 }, { ok: true, verb: 'fs_read', path: 'f', data: file })
+    assert.equal(out.truncated, false)
+    assert.equal(out.clamped_to_total_lines, undefined)
+})
+
+test('a byte-capped read is truncated even with no range requested', () => {
+    const out = applyFsReadRangeFallback('fs_read', { path: 'f' }, { ok: true, verb: 'fs_read', path: 'f', truncated_at_bytes: true, data: file })
+    assert.equal(out.truncated, true)
 })
 
 test('an unrecognised range key is refused, never dropped', () => {
