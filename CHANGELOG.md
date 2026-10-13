@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.40 - a stale server says restart required, with the command
+
+A stale process was reporting `bundle_stale` in the reply, but its restart instruction went to stderr,
+which the agent never reads, and the reply carried no command. `bundleStalenessLine` now names
+`restart required` and the exact launch command (`node "<installed bundle>"`) whenever the reload is
+refused. `bundleStalenessNotice` is no longer deduplicated, so every dispatch reply of a stale process
+carries the line; the stderr announcement keeps its once-per-bundle dedupe as `bundleStalenessAnnouncement`.
+Measured before on 0.2.39 served with `GM_MCP_BUNDLE_DRIFT_RELOAD=0` and 0.2.40 installed: the reply had
+`bundle_stale: true` and no restart text. A current server's reply has no staleness fields.
+
 ## Unreleased - the initialize reply names the served surface
 
 A session that connected before the single `gm_codemode` surface kept its cached per-verb tool
