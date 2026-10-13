@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.42 - a restarting daemon reads as restarting, not dead
+
+A daemon-guard restart window used to read as a dead daemon: `readDaemonLiveness` saw a stale
+heartbeat with a gone pid, `daemonNotRunning` spawned a competing runner, and the poll loop ended
+in `timed_out` with `daemon.alive: false` although the guard was bringing a replacement up. The
+runner now stamps `restarting: true`, `restart_reason`, `restart_attempt`, `restart_max_attempts`,
+`previous_pid`, `restart_started_ts` and `restart_ts` into `.status.json` and `daemon-status.json`
+for the whole window (guard restart, or a runner-handoff by the outgoing daemon). `readRestartMarker`
+reads that marker while `restart_ts` is under 15 s old and the window is under 120 s; the `daemon`
+block then carries `restarting: true` with those fields and a note naming the window; the pre-flight
+and the runner watchdog do not spawn a runner into it; and a poll that reaches its deadline inside
+the window extends by 15 s at a time up to the poll ceiling, reporting `restart_wait_extended_ms`.
+Measured on the scratch project: a dispatch written 3 s after the daemon was killed was claimed by
+the replacement without a timeout.
+
 ## 0.2.40 - a stale server says restart required, with the command
 
 A stale process was reporting `bundle_stale` in the reply, but its restart instruction went to stderr,
