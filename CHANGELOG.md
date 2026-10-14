@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.46 - a spool nobody sweeps is not written to; a reaped read is retried once
+
+Three failures that each cost a 120 s wait and, in the first two, a ticket left behind.
+
+- **A subdirectory spool is never swept.** A dispatch with cwd `<project>/ui` wrote its in-file into
+  `ui/.gm/exec-spool`, a spool the daemon never claims: the runner registers every path as the nearest ancestor
+  holding a `.git` (`agentplug_host::project_root`) and sweeps only that root. The nested `.status.json` read 9.8 days
+  old with `runner_update_in_progress: true`, the frozen record of a daemon that once swept it. The installed 0.2.1
+  wrapper used `cwd` verbatim; the current source already resolves through `git rev-parse --show-toplevel`, which
+  answers nothing when git is not on PATH. `sweptRootFor` now mirrors the runner's rule from the filesystem, and the
+  reply opens with `resolved_cwd`, `requested_cwd` and `cwd_resolution`. Measured on a real 0.1.323 daemon with no
+  git on the wrapper's PATH: 0.2.43 timed out and left the in-file (`still UNCLAIMED`); this build answered in 1.6 s
+  from the project spool and wrote nothing into the nested one.
+- **A request nobody serves is taken back.** At a poll timeout or an abort the in-file this process wrote is removed when
+  the daemon is not running, or a live daemon never swept this spool during the wait (heartbeat older than the call,
+  pid gone); `request_withdrawn_before_claim: true`, `resume_task_supported: false`. A live daemon that is only slow
+  keeps the ticket. `pidAlive` asks `ps -o stat=` after `kill -0`, because a zombie daemon answers `kill -0`: with a
+  zombie shared daemon 0.2.43 timed out, this build refuses at once with `daemon-not-running` and `candidate_roots`. A
+  `runner_update_in_progress` flag counts only beside a heartbeat under ten minutes old (a frozen one switched the
+  dead-daemon pre-flight off for good).
+- **`dispatch_orphaned` is retried once for read-only verbs** (`grep`, `codesearch`, `codeinsight`, `git_status`,
+  `git_log`, `git_diff`, `git_show`, `phase-status`, `instruction`, `recall`, `fetch`). The retry takes a new task
+  id and the reply is headed by `retried_after: dispatch_orphaned`; mutating verbs keep the explicit answer, and a
+  retry reaped again returns it. `GM_MCP_ORPHAN_RETRY=0` disables it.
+
 ## 0.2.45 - `gm-mcp dispatch` honours the HTTP singleton opt-outs
 
 The CLI `dispatch` command called `ensureHttpSingleton` unconditionally, so `GM_MCP_NO_HTTP_SINGLETON=1`

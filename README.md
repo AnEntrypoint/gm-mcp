@@ -218,6 +218,26 @@ one whose daemon-guard is restarting the daemon (`restarting: true` in
 deadline inside the window keeps waiting, 15 s at a time, up to the ceiling).
 Opt out with `GM_MCP_DAEMON_PREFLIGHT=0`.
 
+A spool is only swept at its project root. The daemon registers every path as its nearest ancestor holding a `.git`
+(a file, or a directory with `HEAD`; `agentplug_host::project_root`), else the path itself, and sweeps that root's
+`.gm/exec-spool` and no other. A ticket written into `<project>/ui/.gm/exec-spool` is never claimed: it waits out the
+whole poll budget and stays behind. `git rev-parse` gives the same root while it works and nothing when it does not (no
+git on PATH, a timeout), so `sweptRootFor` applies the rule from the filesystem, and a dispatch whose `cwd` sits inside
+a project runs in that project. The reply then opens with `resolved_cwd`, `requested_cwd` and `cwd_resolution`
+(which also reads the nested spool's own `.status.json`: a heartbeat 9.8 days old from a pid that is gone is the mark of
+a spool no daemon sweeps). `GM_MCP_SWEPT_ROOT=0` turns the resolution off.
+
+A request nobody serves is taken back, not left queued. At a poll timeout, or an abort, the in-file this server wrote is
+removed -- by a rename that excludes the daemon's own claim rename, so exactly one of them wins -- when the daemon is not
+running, or when a daemon is running but never swept this spool during the whole wait (the spool's own heartbeat
+predates the call and the pid that wrote it is gone). The reply says `request_withdrawn_before_claim: true` and
+`resume_task_supported: false`: dispatch again. A live daemon that is merely slow keeps the ticket and `resume_task`.
+Two liveness readings that used to hide a dead daemon are fixed: a zombie (a daemon that exited under a guard that never
+reaped it) answers `kill(pid, 0)`, so `pidAlive` also asks `ps -o stat=` (`src/pid-state.js`); and a
+`runner_update_in_progress` flag only counts beside a heartbeat under ten minutes old (a status frozen mid-update read as
+an update in progress forever). The `daemon-not-running` refusal now carries `candidate_roots` (the resolved and the
+requested root with heartbeat age, pid, pid state and the start command).
+
 ## Transport: stdio (default) and streamable HTTP
 
 `gm` is registered in `~/.claude.json` as a user-scope MCP server:
@@ -609,3 +629,15 @@ Pass that `task` back as `resume_task` to re-poll the same dispatch:
 - `resume_task_supported: true` on a `timed_out` response is the falsifiable
   signal that this server build honours the argument; older builds omit the
   field and silently drop it
+### A reaped dispatch is retried once, for read-only verbs
+
+A claim reaped by the daemon's orphan sweep comes back as `error_code: dispatch_orphaned` (a respawn or runner update
+took the claim, `sweeping_pid` names the sweeper). For `grep`, `codesearch`, `codeinsight`, `git_status`, `git_log`,
+`git_diff`, `git_show`, `phase-status`, `instruction`, `recall` and `fetch` this server re-dispatches once under a
+new task id and returns that reply, headed by `retried_after: dispatch_orphaned` and the `orphaned_task`: running a
+read twice is harmless. Every other verb (`git_commit`, `git_push`, `git_reword`, `exec_js`, `prd-*`, `mutable-*`,
+`transition`, `memorize-*`, ...) keeps the explicit orphan answer, because the first attempt may already have applied
+its work. A retry that is orphaned too returns that answer, still marked `retried_after`; a retry the poll ceiling has no
+room for says `orphan_retry_skipped`; a `resume_task` poll has no body to resend and never retries.
+`GM_MCP_ORPHAN_RETRY=0` turns it off.
+
