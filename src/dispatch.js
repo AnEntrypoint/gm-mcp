@@ -2181,26 +2181,40 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 execRemainingMs === null ? null : execRemainingMs > 0 ? `about ${Math.ceil(execRemainingMs / 1000)}s from now` : 'which has already elapsed, so the out-file will report killed:true/exec_timeout',
                 `resume this same task with resume_task and a timeout_seconds that outlasts that budget, or set the budget yourself with a timeoutMs=<ms> first line in the body (up to ${EXEC_HARD_CEILING_MS})`,
             ].filter(Boolean).join('; ')
-            return toYaml({
-                timed_out: true,
-                task: requestNumber,
-                poll_timeout_ms: timeoutMs,
-                requested_poll_timeout_ms: requestedPollTimeoutMs,
-                poll_timeout_capped: capped,
-                poll_timeout_ceiling_ms: pollCeilingMs,
-                poll_timeout_cap_reason: capped
-                    ? `gm stopped waiting at its ${pollCeilingMs}ms poll ceiling, not because the dispatch failed: set GM_MCP_POLL_TIMEOUT_CEILING_MS higher for this server, or resume_task, to keep waiting on the same dispatch`
-                    : 'gm stopped waiting because the caller-supplied budget ran out; the dispatch itself is untouched',
-                ...(execMs === null ? {} : { exec_limit_ms: execMs, child_reaped_at_exec_limit: true, exec_child: execNote }),
-                resume_task_supported: true,
-                resumed_this_call: Boolean(resume_task),
-                in_path: inPath,
-                out_path: outPath,
-                final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
-                dispatch_state: readSpoolDispatchState(spoolDir, verb, requestNumber),
-                dispatch_wait: readDispatchWaitRow(spoolDir, verb, n, outPath),
-                daemon: readDaemonLiveness(spoolDir),
-            })
+            try {
+                return toYaml({
+                    timed_out: true,
+                    task: requestNumber,
+                    poll_timeout_ms: timeoutMs,
+                    requested_poll_timeout_ms: requestedPollTimeoutMs,
+                    poll_timeout_capped: capped,
+                    poll_timeout_ceiling_ms: pollCeilingMs,
+                    poll_timeout_cap_reason: capped
+                        ? `gm stopped waiting at its ${pollCeilingMs}ms poll ceiling, not because the dispatch failed: set GM_MCP_POLL_TIMEOUT_CEILING_MS higher for this server, or resume_task, to keep waiting on the same dispatch`
+                        : 'gm stopped waiting because the caller-supplied budget ran out; the dispatch itself is untouched',
+                    ...(execMs === null ? {} : { exec_limit_ms: execMs, child_reaped_at_exec_limit: true, exec_child: execNote }),
+                    resume_task_supported: true,
+                    resumed_this_call: Boolean(resume_task),
+                    in_path: inPath,
+                    out_path: outPath,
+                    final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
+                    dispatch_state: readSpoolDispatchState(spoolDir, verb, requestNumber),
+                    dispatch_wait: readDispatchWaitRow(spoolDir, verb, requestNumber, outPath),
+                    daemon: readDaemonLiveness(spoolDir),
+                })
+            } catch (e) {
+                return toYaml({
+                    timed_out: true,
+                    task: requestNumber,
+                    poll_timeout_ms: timeoutMs,
+                    in_path: inPath,
+                    out_path: outPath,
+                    resume_task_supported: true,
+                    resumed_this_call: Boolean(resume_task),
+                    not_a_result: true,
+                    diagnostics_failed: `the timeout reply could not build its own diagnostics (${e?.message ?? e}): this dispatch produced NO result, so an absent match set here means the result was never reported, not that the search found nothing -- resume it with resume_task ${requestNumber}`,
+                })
+            }
         }
         try {
             lastWakeSource = await waitForSpoolChange(outDir, outPath, deadline - Date.now(), pollMs, signal)
