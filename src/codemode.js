@@ -15,7 +15,15 @@ function replyText(result) {
     return text
 }
 
+function refuseUnknownKeys(name, tool, args) {
+    const declared = new Set(Object.keys(tool.inputSchema ?? {}))
+    const unknown = Object.keys(args ?? {}).filter((key) => !declared.has(key))
+    if (unknown.length === 0) return
+    throw new Error(`${name} arguments invalid -- unknown key ${unknown.join(', ')}; declared keys: ${[...declared].join(', ')}`)
+}
+
 function validatedArgs(name, tool, args) {
+    refuseUnknownKeys(name, tool, args)
     const parsed = z.object(tool.inputSchema).safeParse(args ?? {})
     if (parsed.success) return parsed.data
     const problems = parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`).join('; ')
