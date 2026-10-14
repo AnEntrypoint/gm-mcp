@@ -1052,8 +1052,11 @@ export function leaseSessionsFor(root) {
     return sessions
 }
 
+const SESSION_ID_BODY_ALIASES = ['SESSION_ID', 'session_id', 'sessionId']
+
 export function explicitBodySessionId(body) {
-    const value = body && typeof body === 'object' && !Array.isArray(body) ? body.SESSION_ID : undefined
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+    const value = SESSION_ID_BODY_ALIASES.map(key => body[key]).find(candidate => typeof candidate === 'string' && candidate.trim())
     return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
