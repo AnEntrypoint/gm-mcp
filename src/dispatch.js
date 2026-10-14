@@ -1278,6 +1278,8 @@ function sleep(ms, signal) {
     })
 }
 
+const SPOOL_WATCHED_FALLBACK_MS = 2000
+
 function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
     return new Promise((resolve, reject) => {
         let outWatch
@@ -1310,7 +1312,9 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
         }
         if (fs.existsSync(outPath)) return finish('already_landed')
         wakeTimer = setTimeout(() => finish('deadline'), Math.max(1, waitMs))
-        fallbackTimer = setTimeout(() => finish('fallback_poll'), Math.min(Math.max(25, fallbackMs), Math.max(1, waitMs)))
+        const watched = outWatch !== undefined
+        const fallbackFloorMs = watched ? SPOOL_WATCHED_FALLBACK_MS : 25
+        fallbackTimer = setTimeout(() => finish('fallback_poll'), Math.min(Math.max(fallbackFloorMs, fallbackMs), Math.max(1, waitMs)))
     })
 }
 
