@@ -21,17 +21,15 @@ export function httpListenOptions() {
 
 const SERVED_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 
-function normalizeProtocolVersion(req) {
+function protocolVersionView(req) {
     const requested = req.headers['mcp-protocol-version']
-    if (typeof requested !== 'string' || SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) return
-    req.headers['mcp-protocol-version'] = SERVED_PROTOCOL_VERSION
-    const rawHeaders = req.rawHeaders
-    if (Array.isArray(rawHeaders)) {
-        for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
-            if (typeof rawHeaders[i] === 'string' && rawHeaders[i].toLowerCase() === 'mcp-protocol-version') rawHeaders[i + 1] = SERVED_PROTOCOL_VERSION
-        }
-    }
+    if (typeof requested !== 'string' || SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) return req
+    const headers = { ...req.headers, 'mcp-protocol-version': SERVED_PROTOCOL_VERSION }
+    const rawHeaders = Array.isArray(req.rawHeaders)
+        ? req.rawHeaders.map((value, i) => (i % 2 === 1 && typeof req.rawHeaders[i - 1] === 'string' && req.rawHeaders[i - 1].toLowerCase() === 'mcp-protocol-version' ? SERVED_PROTOCOL_VERSION : value))
+        : req.rawHeaders
     appendDiagnostic('http-protocol-version-normalized', { requested, served: SERVED_PROTOCOL_VERSION })
+    return Object.create(req, { headers: { value: headers, enumerable: true }, rawHeaders: { value: rawHeaders, enumerable: true } })
 }
 
 function rejectOversizedBody(req, res) {
@@ -75,7 +73,7 @@ async function serveStatelessMcpRequest(req, res) {
         sendJsonRpcError(res, 400, -32700, 'Parse error: request body is not JSON')
         return
     }
-    normalizeProtocolVersion(req)
+    const transportRequest = protocolVersionView(req)
     const mcp = createServer()
     const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
@@ -89,7 +87,7 @@ async function serveStatelessMcpRequest(req, res) {
         void mcp.close().catch(() => {})
     })
     await mcp.connect(transport)
-    await transport.handleRequest(req, res, read.body)
+    await transport.handleRequest(transportRequest, res, read.body)
 }
 
 function sendJson(res, status, payload) {
