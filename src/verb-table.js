@@ -310,6 +310,23 @@ const GIT_PUSH_BODY = {
         allow_foreign_commits: { type: 'boolean', description: 'Pushes commits another session owns.' },
     },
 }
+const CI_LOG_BODY = {
+    required: [],
+    fields: {
+        run_id: { type: 'integer', aliases: ['run'], description: 'GitHub Actions run id to read; ci-status returns one per job. Required unless sha, rev or ref is given.' },
+        job_id: { type: 'integer', description: 'Reads only that job\'s log. Without it the whole run is read.' },
+        sha: { type: 'string', aliases: ['rev', 'ref'], description: 'Reads the newest run for this commit when run_id is absent.' },
+        github_repo: { type: 'string', aliases: ['repo'], description: 'owner/name; defaults to the origin remote of cwd.' },
+        job: { type: 'string', description: 'Keeps only lines whose job name matches.' },
+        step: { type: 'string', description: 'Keeps only lines whose step name matches.' },
+        pattern: { type: 'string', aliases: ['match', 'grep'], description: 'Keeps only lines whose message matches.' },
+        mode: { type: 'string', enum: ['literal', 'regex'], description: 'How pattern, job and step match; literal is the default and any other value is refused.' },
+        regex: { type: 'boolean', description: 'Shorthand for mode:"regex".' },
+        ignore_case: { type: 'boolean', description: 'Folds case in every match.' },
+        max_lines: { type: 'integer', description: 'Line cap, 1 through 500, default 40, so a whole multi-job run is never dumped into context.' },
+        max_chars: { type: 'integer', description: 'Character cap, 1 through 40000, default 8000.' },
+    },
+}
 const RECALL_BODY = {
     required: [],
     fields: {
@@ -575,6 +592,7 @@ const ROWS = [
     { canonical: 'impact' },
     { canonical: 'grep', body: CODESEARCH_BODY },
     { canonical: 'ci_status', hyphen: true },
+    { canonical: 'ci_log', hyphen: true, body: CI_LOG_BODY },
     { canonical: 'prd_status', hyphen: true },
     { canonical: 'prd_block', hyphen: true },
     { canonical: 'pool_brief', hyphen: true },
