@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.51 - ci_log reads a CI step's printed text through the spool
+
+The verb table gains `ci_log` (runner spelling `ci-log`, `hyphen: true`) with a declared body schema, so `gm.list()` and `gm.describe()` name it and its fields and a lane stops falling through to `bash` plus `gh run view --log` plus a temp file to read what a step printed. `response-compact.js` returns `CI_LOG_TEXT_KEYS` for it, so a matched line's `text` reaches the caller whole instead of at `LONG_TEXT_FIELD_TRUNCATE_AT` (400 chars), which is what made the fallback worth writing: the truncation pointer sent the caller to the spool out-file anyway. The wasm caps the reply at `max_lines` and `max_chars` before it is ever serialized, so widening the inline cap cannot widen a dispatch. Each returned row carries a 1-based `n`, which also keeps `dropDuplicateRows` from collapsing the repeated lines a CI log is full of. `BUNDLE_VERSION` moves to 0.2.51.
+
 ## 0.2.43 - exec_js takes a typed timeoutMs field
 
 The exec-family budget can be given as a `timeoutMs` field on the body object (`{code, timeoutMs}`) as well as by the leading `timeoutMs=<ms>` line of the raw body. `runDispatch` folds the field into that line (`foldTypedTimeoutMs`), so the daemon, the poll budget and the ceiling check see one spelling. Sending both spellings is refused. Before this change a typed `timeoutMs: 1000` on a 5 s busy child ran to completion (dispatch 1791954507602-500-58b60f39766a06e9, duration_ms 5046, timed_out false). `BUNDLE_VERSION` moves to 0.2.43.
