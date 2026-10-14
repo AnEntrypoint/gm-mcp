@@ -301,7 +301,6 @@ function largestMatchesKeptWithinBudget(out, holder, budget, toYaml) {
 
 function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
     if (text.length <= maxChars) return text
-    fs.writeFileSync(spillPath, text)
     const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
     const holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
     let head = text
@@ -2131,7 +2130,10 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             }
             const rendered = (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
             const spillNote = verb === 'fs_read' ? fsReadSpillNote(out, rendered) : ''
-            return capReplyText(rendered, replyMaxChars(max_chars), `${outPath}.reply.txt`, out, toYaml, spillNote)
+            const replyCap = replyMaxChars(max_chars)
+            const spillPath = `${outPath}.reply.txt`
+            if (rendered.length > replyCap) fs.writeFileSync(spillPath, rendered)
+            return capReplyText(rendered, replyCap, spillPath, out, toYaml, spillNote)
         } catch (e) {
             const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
