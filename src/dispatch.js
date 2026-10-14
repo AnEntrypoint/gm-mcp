@@ -1279,6 +1279,31 @@ function sleep(ms, signal) {
 }
 
 const SPOOL_WATCHED_FALLBACK_MS = 2000
+const SPOOL_RESPONSE_MAX_AGE_MS = 60 * 60 * 1000
+const SPOOL_PRUNE_EVERY_MS = 10 * 60 * 1000
+const spoolPrunedAt = new Map()
+
+// Response files are read once by the dispatch that asked for them. Anything older than an hour
+// is dead weight; pruning at most every 10 minutes per spool keeps readdir off the hot path.
+function pruneSpoolResponsesOnce(outDir) {
+    const now = Date.now()
+    if (now - (spoolPrunedAt.get(outDir) ?? 0) < SPOOL_PRUNE_EVERY_MS) return
+    spoolPrunedAt.set(outDir, now)
+    let names
+    try {
+        names = fs.readdirSync(outDir)
+    } catch {
+        return
+    }
+    for (const name of names) {
+        const file = path.join(outDir, name)
+        try {
+            if (now - fs.statSync(file).mtimeMs > SPOOL_RESPONSE_MAX_AGE_MS) fs.unlinkSync(file)
+        } catch {
+            // a file another dispatch is removing is already gone
+        }
+    }
+}
 
 function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
     return new Promise((resolve, reject) => {
@@ -2064,6 +2089,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const inDir = path.join(spoolDir, 'in', verb)
     const outDir = path.join(spoolDir, 'out')
     fs.mkdirSync(outDir, { recursive: true })
+    pruneSpoolResponsesOnce(outDir)
     const callStartedAtMs = Date.now()
     let lastWakeSource = 'initial_check'
     const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })
