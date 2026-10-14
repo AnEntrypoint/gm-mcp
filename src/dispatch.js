@@ -1401,6 +1401,16 @@ function timeoutInputDiagnostic(verb, raw_body, timeout_seconds) {
     return undefined
 }
 
+// The typed timeoutMs field of an exec-family body is the same budget as the leading
+// timeoutMs= line of its raw body: it is folded into that line here, so the daemon and
+// timeoutInputDiagnostic see one spelling. Both spellings at once are refused.
+function foldTypedTimeoutMs(timeoutMs, raw_body) {
+    const milliseconds = Number(timeoutMs)
+    if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0) return { error: 'timeoutMs must be a positive integer number of milliseconds' }
+    if (TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return { error: 'timeoutMs is set both as the typed field and as a leading timeoutMs= line of the body; send one' }
+    return { raw_body: `timeoutMs=${milliseconds}\n${raw_body}` }
+}
+
 export function pollTimeoutMs(verb, raw_body, timeout_seconds) {
     const explicitMs = timeoutMilliseconds(timeout_seconds, 0)
     if (explicitMs > 0) return explicitMs
@@ -1995,6 +2005,11 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         }
     }
 
+    if (!resume_task && isPlainText && TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === 'string' && body && typeof body === 'object' && !Array.isArray(body) && body.timeoutMs !== undefined) {
+        const folded = foldTypedTimeoutMs(body.timeoutMs, raw_body)
+        if (folded.error) return `error: ${folded.error}`
+        raw_body = folded.raw_body
+    }
     const timeoutDiagnostic = timeoutInputDiagnostic(verb, raw_body, timeout_seconds)
     if (timeoutDiagnostic) return `error: ${timeoutDiagnostic}`
 
