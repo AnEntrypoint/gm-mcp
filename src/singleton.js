@@ -83,9 +83,9 @@ function readStateFile(filePath, port = null) {
 function writeStateFile(filePath, state) {
     try {
         mkdirSync(path.dirname(filePath), { recursive: true })
-        const temporary = `${filePath}.${process.pid}.tmp`
-        writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
-        renameSync(temporary, filePath)
+        const tempPath = `${filePath}.${process.pid}.tmp`
+        writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+        renameSync(tempPath, filePath)
         return true
     } catch {
         return false
