@@ -91,10 +91,10 @@ function runnerFileName() {
 }
 
 export function runnerAssetName(platform = process.platform, arch = process.arch) {
-    const os = { linux: 'linux', darwin: 'macos', win32: 'windows' }[platform]
+    const releaseOs = { linux: 'linux', darwin: 'macos', win32: 'windows' }[platform]
     const cpu = { x64: 'x64', arm64: 'arm64' }[arch]
-    if (!os || !cpu) return null
-    return os === 'windows' ? `agentplug-runner-windows-${cpu}.exe` : `agentplug-runner-${os}-${cpu}`
+    if (!releaseOs || !cpu) return null
+    return releaseOs === 'windows' ? `agentplug-runner-windows-${cpu}.exe` : `agentplug-runner-${releaseOs}-${cpu}`
 }
 
 export function parseReleaseTag(tag) {
