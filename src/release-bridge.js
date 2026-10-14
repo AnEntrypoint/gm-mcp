@@ -434,23 +434,22 @@ export async function runReleaseBridge() {
 
         const intervalMs = bridgeIntervalMs()
         const lastChecked = Number(state.last_checked_ts) || 0
-        if (Date.now() - lastChecked < intervalMs) {
+        const now = Date.now()
+        if (now - lastChecked < intervalMs) {
             writeAtomicIfChanged(bridgeStatePath(), `${JSON.stringify(next, null, 2)}\n`)
-            return { outcome: 'checked-recently', next_check_ms: intervalMs - (Date.now() - lastChecked) }
+            return { outcome: 'checked-recently', next_check_ms: intervalMs - (now - lastChecked) }
         }
-        persistBridgeState({ ...next, last_checked_ts: Date.now() })
+        persistBridgeState({ ...next, last_checked_ts: now })
 
         const runner = await reconcileRepo(RUNNER_REPO, reconcileRunner)
         const guest = await reconcileRepo(GUEST_REPO, reconcileGuest)
 
-        let signal = null
         const swap = swapSignalFor(runner, guest)
-        if (swap) {
-            signal = swap.signal
-            next = { ...next, pending_signal: signal.outcome === 'deferred' ? { want: swap.want, ts: Date.now(), reason: signal.reason } : null }
-        }
+        const signal = swap ? swap.signal : null
+        const pendingSignal = signal?.outcome === 'deferred' ? { want: swap.want, ts: now, reason: signal.reason } : null
         const summary = { outcome: 'checked', runner, guest, signal }
-        persistBridgeState({ ...next, last_checked_ts: Date.now(), last_runner: runner, last_guest: guest, last_signal: signal })
+        const settled = { ...next, last_checked_ts: now, pending_signal: swap ? pendingSignal : next.pending_signal, last_runner: runner, last_guest: guest, last_signal: signal }
+        persistBridgeState(settled)
         appendDiagnostic('release-bridge', summary)
         return summary
     })
