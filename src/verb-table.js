@@ -151,6 +151,7 @@ const EXEC_JS_BODY = {
     required: ['code'],
     fields: {
         code: { type: 'string', aliases: ['body'], description: 'JavaScript body, run as nodejs. Pass it as the top-level raw_body argument: a JSON object body is refused. A leading "timeoutMs=<ms>" line sets the budget (floor 100, ceiling 900000).' },
+        timeoutMs: { type: 'integer', description: 'Wall-clock budget for the child in milliseconds (floor 100, ceiling 900000, default 300000). Sent as a leading timeoutMs= line of the raw body.' },
         cwd: { type: 'string', description: 'Directory the script runs in.' },
     },
 }

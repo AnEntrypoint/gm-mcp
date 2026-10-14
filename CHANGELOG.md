@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.43 - exec_js takes a typed timeoutMs field
+
+The exec-family budget can be given as a `timeoutMs` field on the body object (`{code, timeoutMs}`) as well as by the leading `timeoutMs=<ms>` line of the raw body. `runDispatch` folds the field into that line (`foldTypedTimeoutMs`), so the daemon, the poll budget and the ceiling check see one spelling. Sending both spellings is refused. Before this change a typed `timeoutMs: 1000` on a 5 s busy child ran to completion (dispatch 1791954507602-500-58b60f39766a06e9, duration_ms 5046, timed_out false). `BUNDLE_VERSION` moves to 0.2.43.
+
 ## 0.2.40 - a stale server says restart required, with the command
 
 A stale process was reporting `bundle_stale` in the reply, but its restart instruction went to stderr,
