@@ -1928,6 +1928,85 @@ function withStaleBundleNotice(verb, text) {
     return line ? `${body}\n${line}\n` : body
 }
 
+function spoolDiagnostics(spoolDir, verb, requestNumber, outPath) {
+    const guarded = (key, read) => {
+        try {
+            return { [key]: read() }
+        } catch {
+            return {}
+        }
+    }
+    return {
+        ...guarded('dispatch_state', () => readSpoolDispatchState(spoolDir, verb, requestNumber)),
+        ...guarded('dispatch_wait', () => readDispatchWaitRow(spoolDir, verb, requestNumber, outPath)),
+        ...guarded('daemon', () => readDaemonLiveness(spoolDir)),
+    }
+}
+
+// The timeout reply is the only record that a dispatch is still outstanding and resumable, so it is
+// built from the fields that cannot fail and every diagnostic is read on its own: a diagnostic that
+// throws drops that diagnostic, never the reply, and never the task that resumes the dispatch.
+export function timeoutReply({ spoolDir, verb, requestNumber, inPath, outPath, timeoutMs, requestedPollTimeoutMs, pollCeilingMs, execMs, resumeTask, callStartedAtMs }) {
+    const truth = {
+        timed_out: true,
+        task: requestNumber,
+        poll_timeout_ms: timeoutMs,
+        in_path: inPath,
+        out_path: outPath,
+        resume_task_supported: true,
+        resumed_this_call: Boolean(resumeTask),
+    }
+    try {
+        const capped = requestedPollTimeoutMs > timeoutMs
+        const execRemainingMs = execMs === null || resumeTask ? null : Math.max(0, execMs - (Date.now() - callStartedAtMs))
+        const execNote = execMs === null ? null : [
+            `this timeout does NOT kill the child: the daemon holds it and reaps it only when it reaches its own ${execMs}ms exec budget, measured from the original dispatch start`,
+            execRemainingMs === null ? null : execRemainingMs > 0 ? `about ${Math.ceil(execRemainingMs / 1000)}s from now` : 'which has already elapsed, so the out-file will report killed:true/exec_timeout',
+            `resume this same task with resume_task and a timeout_seconds that outlasts that budget, or set the budget yourself with a timeoutMs=<ms> first line in the body (up to ${EXEC_HARD_CEILING_MS})`,
+        ].filter(Boolean).join('; ')
+        return {
+            ...truth,
+            requested_poll_timeout_ms: requestedPollTimeoutMs,
+            poll_timeout_capped: capped,
+            poll_timeout_ceiling_ms: pollCeilingMs,
+            poll_timeout_cap_reason: capped
+                ? `gm stopped waiting at its ${pollCeilingMs}ms poll ceiling, not because the dispatch failed: set GM_MCP_POLL_TIMEOUT_CEILING_MS higher for this server, or resume_task, to keep waiting on the same dispatch`
+                : 'gm stopped waiting because the caller-supplied budget ran out; the dispatch itself is untouched',
+            ...(execMs === null ? {} : { exec_limit_ms: execMs, child_reaped_at_exec_limit: true, exec_child: execNote }),
+            final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
+            ...spoolDiagnostics(spoolDir, verb, requestNumber, outPath),
+        }
+    } catch (e) {
+        return {
+            ...truth,
+            not_a_result: true,
+            diagnostics_failed: `the timeout reply could not build its own diagnostics (${e?.message ?? e}): this dispatch produced NO result, so an absent match set here means the result was never reported, not that the search found nothing -- resume it with resume_task ${requestNumber}`,
+        }
+    }
+}
+
+export function replyEnvelopeSelfCheck() {
+    const fields = {
+        spoolDir: path.join(os.tmpdir(), 'gm-mcp-self-check-absent-spool'),
+        verb: 'git_finalize',
+        requestNumber: 4242,
+        inPath: path.join('in', '4242.txt'),
+        outPath: path.join('out', 'git_finalize-4242.json'),
+        timeoutMs: 1000,
+        requestedPollTimeoutMs: 120000,
+        pollCeilingMs: 600000,
+        execMs: null,
+        resumeTask: false,
+        callStartedAtMs: Date.now(),
+    }
+    return {
+        timeout_reply: timeoutReply(fields),
+        timeout_reply_capped_by_ceiling: timeoutReply({ ...fields, timeoutMs: 600000, requestedPollTimeoutMs: 900000 }),
+        timeout_reply_with_exec_child: timeoutReply({ ...fields, execMs: 300000 }),
+        timeout_reply_resumed: timeoutReply({ ...fields, resumeTask: '4242' }),
+    }
+}
+
 export async function gmDispatch(args, signal, responseValueObserver) {
     inflightDispatches += 1
     const startedAtMs = Date.now()
@@ -2155,47 +2234,11 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 const landedLate = readLandedOutFile()
                 if (landedLate !== undefined) return landedLate
             }
-            const capped = requestedPollTimeoutMs > timeoutMs
-            const execRemainingMs = execMs === null || resume_task ? null : Math.max(0, execMs - (Date.now() - callStartedAtMs))
-            const execNote = execMs === null ? null : [
-                `this timeout does NOT kill the child: the daemon holds it and reaps it only when it reaches its own ${execMs}ms exec budget, measured from the original dispatch start`,
-                execRemainingMs === null ? null : execRemainingMs > 0 ? `about ${Math.ceil(execRemainingMs / 1000)}s from now` : 'which has already elapsed, so the out-file will report killed:true/exec_timeout',
-                `resume this same task with resume_task and a timeout_seconds that outlasts that budget, or set the budget yourself with a timeoutMs=<ms> first line in the body (up to ${EXEC_HARD_CEILING_MS})`,
-            ].filter(Boolean).join('; ')
-            try {
-                return toYaml({
-                    timed_out: true,
-                    task: requestNumber,
-                    poll_timeout_ms: timeoutMs,
-                    requested_poll_timeout_ms: requestedPollTimeoutMs,
-                    poll_timeout_capped: capped,
-                    poll_timeout_ceiling_ms: pollCeilingMs,
-                    poll_timeout_cap_reason: capped
-                        ? `gm stopped waiting at its ${pollCeilingMs}ms poll ceiling, not because the dispatch failed: set GM_MCP_POLL_TIMEOUT_CEILING_MS higher for this server, or resume_task, to keep waiting on the same dispatch`
-                        : 'gm stopped waiting because the caller-supplied budget ran out; the dispatch itself is untouched',
-                    ...(execMs === null ? {} : { exec_limit_ms: execMs, child_reaped_at_exec_limit: true, exec_child: execNote }),
-                    resume_task_supported: true,
-                    resumed_this_call: Boolean(resume_task),
-                    in_path: inPath,
-                    out_path: outPath,
-                    final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
-                    dispatch_state: readSpoolDispatchState(spoolDir, verb, requestNumber),
-                    dispatch_wait: readDispatchWaitRow(spoolDir, verb, requestNumber, outPath),
-                    daemon: readDaemonLiveness(spoolDir),
-                })
-            } catch (e) {
-                return toYaml({
-                    timed_out: true,
-                    task: requestNumber,
-                    poll_timeout_ms: timeoutMs,
-                    in_path: inPath,
-                    out_path: outPath,
-                    resume_task_supported: true,
-                    resumed_this_call: Boolean(resume_task),
-                    not_a_result: true,
-                    diagnostics_failed: `the timeout reply could not build its own diagnostics (${e?.message ?? e}): this dispatch produced NO result, so an absent match set here means the result was never reported, not that the search found nothing -- resume it with resume_task ${requestNumber}`,
-                })
-            }
+            return toYaml(timeoutReply({
+                spoolDir, verb, requestNumber, inPath, outPath,
+                timeoutMs, requestedPollTimeoutMs, pollCeilingMs, execMs,
+                resumeTask: resume_task, callStartedAtMs,
+            }))
         }
         try {
             lastWakeSource = await waitForSpoolChange(outDir, outPath, deadline - Date.now(), pollMs, signal)
