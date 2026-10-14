@@ -10,7 +10,11 @@ import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
 import { tableRow } from './verb-table.js'
-import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withDispatchIdFirst, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+
+function renderYaml(value) {
+    return yaml.dump(value, { lineWidth: -1 })
+}
 
 let inflightDispatches = 0
 
@@ -299,10 +303,13 @@ function largestMatchesKeptWithinBudget(out, holder, budget, toYaml) {
     return low
 }
 
+const DISPATCH_ID_LEAD_LINE = /^dispatch_id: [^\n]*\n/
+
 function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
     if (text.length <= maxChars) return text
     fs.writeFileSync(spillPath, text)
-    const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
+    const leadLength = DISPATCH_ID_LEAD_LINE.exec(text)?.[0].length ?? 0
+    const budget = Math.max(leadLength, maxChars - REPLY_NOTICE_RESERVE_CHARS)
     const holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
     let head = text
     let matchesTotal
@@ -322,7 +329,7 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
         notice += `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n`
         notice += `matches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
     }
-    const room = Math.max(0, maxChars - notice.length)
+    const room = Math.max(leadLength, maxChars - notice.length)
     if (head.length > room) {
         const cut = head.slice(0, room)
         const lastBreak = cut.lastIndexOf('\n')
@@ -791,6 +798,14 @@ function parseResultDocument(text) {
     }
 }
 
+function spoolJsonDispatchId(text) {
+    try {
+        return JSON.parse(text)?.dispatch_id
+    } catch {
+        return undefined
+    }
+}
+
 function wholeNumber(value) {
     if (typeof value === 'number') return Number.isInteger(value) ? value : undefined
     if (typeof value === 'string' && /^[0-9]+$/.test(value.trim())) return Number(value.trim())
@@ -800,7 +815,7 @@ function wholeNumber(value) {
 export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_DEFAULT_CHARACTERS, cwd, root, projectPath }) {
     const namedRoot = [cwd, root, projectPath].find(value => typeof value === 'string' && value.trim())
     const rootDir = namedRoot ? path.resolve(namedRoot.trim()) : path.resolve(process.cwd())
-    const toYaml = value => yaml.dump(value, { lineWidth: 100 })
+    const toYaml = renderYaml
     if (typeof result_file !== 'string' || !result_file) return toYaml({ error: 'result_file required' })
     if (field !== undefined && (typeof field !== 'string' || !field)) return toYaml({ error: 'field must be a non-empty string when provided' })
     const pageOffset = wholeNumber(offset)
@@ -814,17 +829,21 @@ export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_
             let totalCharacters
             let nextOffset
             let resolvedField
+            let dispatchId
             if (field) {
-                const selected = resultField(parseResultDocument(readAllBounded(fd, size)), field)
+                const document = parseResultDocument(readAllBounded(fd, size))
+                const selected = resultField(document, field)
+                dispatchId = document?.dispatch_id
                 content = JSON.stringify(selected.value, null, 2)
                 resolvedField = selected.path
                 totalCharacters = content.length
                 nextOffset = pageOffset + pageLimit < totalCharacters ? pageOffset + pageLimit : undefined
             } else {
                 ({ content, totalCharacters, nextOffset } = readUtf8Page(fd, size, pageOffset, pageLimit))
+                if (file.endsWith('.json')) dispatchId = spoolJsonDispatchId(readAllBounded(fd, size))
             }
             const page = field ? content.slice(pageOffset, pageOffset + pageLimit) : content
-            return toYaml({
+            return toYaml(withDispatchIdFirst({
                 result_file: file,
                 ...(resolvedField ? { field: resolvedField } : {}),
                 offset: pageOffset,
@@ -832,7 +851,7 @@ export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_
                 total_characters: totalCharacters,
                 ...(nextOffset === undefined ? { complete: true } : { next_offset: nextOffset }),
                 content: page,
-            })
+            }, dispatchId))
         } finally {
             fs.closeSync(fd)
         }
@@ -1216,6 +1235,7 @@ function ensureSpoolRunnerRunning(root) {
         consecutiveFailedEnsuresByRoot.delete(root)
         return
     }
+    if (readRestartMarker(spoolDirOf(root))) return
     const now = Date.now()
     if (runnerEnsureInFlight(root, now)) return
     if (now - (lastEnsuredAtByRoot.get(root) || 0) < ENSURE_INTERVAL_MS) return
@@ -1456,6 +1476,37 @@ function heartbeatAgeMs(spoolDir) {
     return timestampAgeMs(status?.ts)
 }
 
+const RESTART_MARKER_FRESH_MS = 15_000
+const RESTART_WINDOW_MAX_MS = 120_000
+const RESTART_POLL_EXTENSION_MS = 15_000
+
+export function readRestartMarker(spoolDir) {
+    const now = Date.now()
+    for (const status of [readJsonFile(path.join(spoolDir, '.status.json')), readJsonFile(GLOBAL_DAEMON_STATUS_PATH)]) {
+        if (!status || status.restarting !== true) continue
+        const markerAge = timestampAgeMs(status.restart_ts, now)
+        if (markerAge === null || markerAge < -DAEMON_TIMESTAMP_FUTURE_SKEW_MS || markerAge >= RESTART_MARKER_FRESH_MS) continue
+        const forMs = timestampAgeMs(status.restart_started_ts, now)
+        if (forMs !== null && forMs >= RESTART_WINDOW_MAX_MS) continue
+        return {
+            restarting: true,
+            restart_reason: status.restart_reason ?? null,
+            restart_attempt: status.restart_attempt ?? null,
+            restart_max_attempts: status.restart_max_attempts ?? null,
+            previous_pid: status.previous_pid ?? null,
+            restarting_for_ms: forMs,
+            restart_marker_age_ms: markerAge,
+            restart_marker_fresh_under_ms: RESTART_MARKER_FRESH_MS,
+        }
+    }
+    return null
+}
+
+function restartingNote(restart) {
+    const attempt = restart.restart_attempt !== null && restart.restart_max_attempts !== null ? ` attempt ${restart.restart_attempt}/${restart.restart_max_attempts},` : ''
+    return `daemon is restarting (${restart.restart_reason ?? 'unknown reason'},${attempt} ${restart.restarting_for_ms ?? '?'} ms into the window, marker refreshed ${restart.restart_marker_age_ms} ms ago by the daemon-guard): the dead daemon was reaped and a replacement is coming up, so this is not a dead daemon -- a dispatch written now stays queued and is claimed once the new heartbeat lands; keep polling with resume_task instead of restarting anything`
+}
+
 function daemonRestartCommand(root) {
     return `"${RUNNER_PATH}" spool   (run with cwd ${path.resolve(root)}; the launcher detaches agentplug-runner daemon for this project)`
 }
@@ -1513,7 +1564,9 @@ export function readDaemonLiveness(spoolDir) {
                 : staleProjectHeartbeat
                 ? `daemon is alive: its own heartbeat for this project is ${timestampAgeMs(status.ts, now)} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms), which is expected for an idle project -- a project heartbeat only refreshes while the daemon is sweeping that project -- but pid ${pid} is alive and still owns this machine's daemon, so nothing is down`
                 : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that'
-    const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note }
+    const restart = alive ? null : readRestartMarker(spoolDir)
+    const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note: restart ? restartingNote(restart) : note }
+    if (restart) Object.assign(liveness, restart)
     if (pid !== null) liveness.pid = pid
     if (pidAliveFlag !== null) liveness.pid_alive = pidAliveFlag
     liveness.heartbeat_source = useGlobalHeartbeat ? 'shared-daemon' : 'project'
@@ -1609,6 +1662,7 @@ export async function daemonNotRunning(root, spoolDir, signal) {
     if (age === null && !fs.existsSync(statusPath)) return undefined
     if (daemonBootGraceActive()) return undefined
     if (readJsonFile(statusPath)?.runner_update_in_progress) return undefined
+    if (readRestartMarker(spoolDir)) return undefined
     ensureSpoolRunnerRunning(root)
     startRunnerWatchdog(root)
     const coldStart = globalDaemonPid() === null
@@ -1926,14 +1980,14 @@ function withStaleBundleNotice(verb, text) {
     if (typeof text !== 'string' || text === '') return text
     const drift = bundleDrift()
     if (!drift.stale) return text
-    const block = yaml.dump({
+    const block = renderYaml({
         bundle_stale: true,
         bundle_served_version: drift.running_version,
         bundle_served_sha: drift.running_sha256,
         bundle_installed_version: drift.installed_version,
         bundle_installed_sha: drift.installed_sha256,
         bundle_reloadable: drift.reloadable === true,
-    }, { lineWidth: 100 })
+    })
     const line = bundleStalenessNotice(drift)
     const body = `${text.endsWith('\n') ? text : `${text}\n`}${block}`
     return line ? `${body}\n${line}\n` : body
@@ -1965,7 +2019,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const resolvedRoot = resolveDispatchRoot(cwd)
     if (resolvedRoot.error) {
         appendDiagnostic('dispatch-root-refused', { verb, root: resolvedRoot.refused_root, reason: resolvedRoot.refused_reason })
-        return yaml.dump(resolvedRoot, { lineWidth: 100 })
+        return renderYaml(resolvedRoot)
     }
     if (resolvedRoot.root_source !== 'cwd') {
         appendDiagnostic('dispatch-root-defaulted', { verb, root: resolvedRoot.root, source: resolvedRoot.root_source })
@@ -1984,7 +2038,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     fs.mkdirSync(outDir, { recursive: true })
     const callStartedAtMs = Date.now()
     let lastWakeSource = 'initial_check'
-    const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })
+    const toYaml = renderYaml
 
     const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === 'string'
     if (!resume_task && isPlainText && typeof raw_body !== 'string') {
@@ -2068,7 +2122,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     }
 
     const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1000)
-    const deadline = Date.now() + timeoutMs
+    let deadline = Date.now() + timeoutMs
+    let restartWaitExtendedMs = 0
 
 
     const readLandedOutFile = () => {
@@ -2080,6 +2135,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             landedAtMs = opened.mtimeMs
             const original = JSON.parse(readAllBounded(opened.fd, opened.size))
             responseValueObserver?.(original)
+            const dispatchId = original?.dispatch_id
             const parsed = full_response ? original : unpackExecOutputEnvelope(verb, original)
             applySessionLeaseVerdict(parsed, { body: normalizedBody ?? body, root })
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
@@ -2114,6 +2170,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 }
                 out = out && typeof out === 'object' && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
             }
+            if (!full_response) out = withDispatchIdFirst(out, dispatchId)
             const rendered = (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
             const spillNote = verb === 'fs_read' ? fsReadSpillNote(out, rendered) : ''
             return capReplyText(rendered, replyMaxChars(max_chars), `${outPath}.reply.txt`, out, toYaml, spillNote)
@@ -2148,6 +2205,11 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         const landed = readLandedOutFile()
         if (landed !== undefined) return landed
         if (Date.now() >= deadline) {
+            if (readRestartMarker(spoolDir) && Date.now() - callStartedAtMs + RESTART_POLL_EXTENSION_MS <= pollCeilingMs) {
+                deadline = Date.now() + RESTART_POLL_EXTENSION_MS
+                restartWaitExtendedMs += RESTART_POLL_EXTENSION_MS
+                continue
+            }
             const finalRecheckDeadline = Date.now() + FINAL_OUT_RECHECK_WINDOW_MS
             while (Date.now() < finalRecheckDeadline) {
                 try {
@@ -2181,6 +2243,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 in_path: inPath,
                 out_path: outPath,
                 final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
+                ...(restartWaitExtendedMs > 0 ? { restart_wait_extended_ms: restartWaitExtendedMs } : {}),
                 dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
                 dispatch_wait: readDispatchWaitRow(spoolDir, verb, n, outPath),
                 daemon: readDaemonLiveness(spoolDir),

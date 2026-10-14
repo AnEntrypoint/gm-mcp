@@ -57,7 +57,7 @@ jobs:
           ' npm-test.log
 
       - name: the shipped bundle answers a real MCP session
-        run: node --test test/catalog.test.js test/gm-result.test.js
+        run: node scripts/sandboxed.mjs node --test test/catalog.test.js test/gm-result.test.js
 
       - name: verb registry contract
-        run: node scripts/verbs-witness.mjs
+        run: node scripts/sandboxed.mjs node scripts/verbs-witness.mjs

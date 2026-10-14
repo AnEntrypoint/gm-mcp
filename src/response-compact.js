@@ -543,6 +543,12 @@ export function compactWireResponse(response, outPath, receiptVerb = response?.v
     return out
 }
 
+export function withDispatchIdFirst(out, dispatchId) {
+    if (typeof dispatchId !== 'string' || dispatchId === '' || !out || typeof out !== 'object' || Array.isArray(out)) return out
+    const { dispatch_id, ...rest } = out
+    return { dispatch_id: dispatchId, ...rest }
+}
+
 export const VERBATIM_TEXT_MARKER = '--- data (verbatim, no indentation added) ---'
 
 export function renderVerbatimFileText(out, toYaml) {

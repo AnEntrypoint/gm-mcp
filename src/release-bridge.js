@@ -5,6 +5,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { compareVersions, noSelfUpdateReason } from './self-update.js'
 import { agentplugDir, toolsDir } from './paths.js'
+import { devCopyReason, explicitlyOn } from './install-guard.js'
 import { inflightDispatchCount, pidAlive } from './dispatch.js'
 import { appendDiagnostic } from './server-log.js'
 
@@ -18,6 +19,8 @@ const LOCK_FILE = 'gm-mcp-release-bridge.lock'
 const RUNNER_LOCAL_BUILD_PIN_FILE = 'agentplug-runner.local-build.json'
 const RUNNER_NO_SELF_UPDATE_FILE = 'agentplug-runner.no-self-update'
 const RUNNER_NO_SELF_UPDATE_ENV = 'AGENTPLUG_NO_SELF_UPDATE'
+const BRIDGE_ENV = 'GM_MCP_RELEASE_BRIDGE'
+const BRIDGE_SIGNAL_ENV = 'GM_MCP_RELEASE_BRIDGE_SIGNAL'
 const GUEST_SIDELOAD_FILE = 'gm.local-dev-sideload.json'
 const GUEST_BUILD_FILE = 'gm.build.json'
 const RUNNER_VERSION_FILE = 'agentplug-runner.version'
@@ -239,7 +242,19 @@ export function bridgeNoSelfUpdateReason() {
     return null
 }
 
-async function reconcileRunner(release) {
+// The runner verifies a signature on every runner update it applies itself, and writes a refusal into
+// daemon-status.json ("update rejected: agentplug-runner-macos-arm64 0.1.323 -- no signature available").
+// The bridge holds only the .sha256 sidecar, which proves the bytes match what was published, not who
+// published them, so it never installs a build the runner itself refused.
+function runnerRejection(version) {
+    const error = readJson(path.join(agentplugDir(), 'daemon-status.json'))?.last_runner_update_poll_error
+    if (typeof error !== 'string') return null
+    const escaped = String(version).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const found = new RegExp(`update rejected: \\S+ ${escaped} -- ([^;]+)`).exec(error)
+    return found ? found[1].trim() : null
+}
+
+async function reconcileRunner(release, dryRun = false) {
     const asset = runnerAssetName()
     if (!asset) return { outcome: 'skipped', reason: `no runner asset for ${process.platform}-${process.arch}` }
     const runnerPath = path.join(toolsDir(), runnerFileName())
@@ -249,16 +264,19 @@ async function reconcileRunner(release) {
     if (!installed.release_build) return { outcome: 'skipped', reason: 'local-build' }
     if (compareVersions(release.version, installed.version) <= 0) {
         const liveSha = sha256(readFileSync(runnerPath))
-        if (liveSha === publishedDigest(release, asset) && !runnerSwapRecorded(installed.version, liveSha)) recordRunnerSwap(installed.version, liveSha)
+        if (!dryRun && liveSha === publishedDigest(release, asset) && !runnerSwapRecorded(installed.version, liveSha)) recordRunnerSwap(installed.version, liveSha)
         return { outcome: 'current', version: installed.version }
     }
     if (readJson(path.join(agentplugDir(), 'daemon-status.json'))?.runner_update_in_progress) {
         return { outcome: 'deferred', reason: 'runner-update-in-progress' }
     }
+    const rejected = runnerRejection(release.version)
+    if (rejected) return { outcome: 'refused', reason: 'runner-rejected-this-build', version: release.version, detail: rejected }
     const installedSha = sha256(readFileSync(runnerPath))
     if (readJson(path.join(agentplugDir(), RUNNER_LOCAL_BUILD_PIN_FILE))?.sha256 === installedSha) {
         return { outcome: 'refused', reason: 'local-build-pinned', installed_sha256: installedSha }
     }
+    if (dryRun) return { outcome: 'update-available', from: installed.version, to: release.version }
 
     const { bytes, sha256: newSha } = await fetchVerified(release, asset)
     const candidate = path.join(toolsDir(), `${runnerFileName()}.bridge-${process.pid}-${Date.now()}.new`)
@@ -282,19 +300,20 @@ function guestBuildIsSideload(dir) {
     return existsSync(file) && readJson(file)?.origin !== 'release'
 }
 
-async function reconcileGuest(release) {
+async function reconcileGuest(release, dryRun = false) {
     const dir = path.join(agentplugDir(), GUEST_DIR)
     const wasmPath = path.join(dir, INSTALLED_GUEST_FILE)
     const versionPath = path.join(dir, 'gm.version')
-    clearBomMisclassifiedSideloadMarker(dir)
+    if (!dryRun) clearBomMisclassifiedSideloadMarker(dir)
     if (existsSync(path.join(dir, GUEST_SIDELOAD_FILE)) || guestBuildIsSideload(dir)) return { outcome: 'skipped', reason: 'local-dev-sideload' }
     const recorded = readVersionText(versionPath)
     if (recorded !== null && !SEMVER.test(recorded)) return { outcome: 'skipped', reason: 'local-dev-sideload', recorded }
     if (existsSync(wasmPath) && recorded === null) return { outcome: 'skipped', reason: 'installed-version-unknown' }
     if (recorded !== null && compareVersions(release.version, recorded) <= 0) {
-        reconcileGuestBuildRecord(dir, wasmPath, release)
+        if (!dryRun) reconcileGuestBuildRecord(dir, wasmPath, release)
         return { outcome: 'current', version: recorded }
     }
+    if (dryRun) return { outcome: 'update-available', from: recorded, to: release.version }
 
     const { bytes, sha256: newSha } = await fetchVerified(release, GUEST_ASSET)
     if (!WASM_MAGIC.every((byte, index) => bytes[index] === byte)) throw new Error(`${GUEST_ASSET} is not a wasm module`)
@@ -368,18 +387,51 @@ function acquireLock() {
     return null
 }
 
-export async function runReleaseBridge() {
-    if ((process.env.GM_MCP_RELEASE_BRIDGE || '').trim() === '0') return { outcome: 'disabled' }
+// null when the bridge may change the install; otherwise the refusal. Only the deployed copy may, and
+// only on an explicit opt-in: starting a server must never replace the runner every session depends on.
+export function bridgeRefusal(install = false) {
+    const devCopy = devCopyReason()
+    if (devCopy) return { code: 'not-deployed-copy', reason: `${devCopy}; only the deployed copy may replace the installed runner or guest, so nothing was changed` }
+    if (!install && !explicitlyOn(BRIDGE_ENV)) {
+        return { code: 'not-opted-in', reason: `the release bridge replaces the installed runner and guest plugin; it runs only on an explicit ${BRIDGE_ENV}=1 or "gm-mcp release-bridge --install"` }
+    }
+    return null
+}
+
+async function bridgeDryRun() {
+    let runner
+    try {
+        runner = await reconcileRunner(await fetchLatestRelease(RUNNER_REPO), true)
+    } catch (error) {
+        runner = { outcome: 'failed', error: error?.message ?? String(error) }
+    }
+    let guest
+    try {
+        guest = await reconcileGuest(await fetchLatestRelease(GUEST_REPO), true)
+    } catch (error) {
+        guest = { outcome: 'failed', error: error?.message ?? String(error) }
+    }
+    return { outcome: 'dry-run', writes_nothing: true, runner, guest }
+}
+
+export async function runReleaseBridge({ install = false, signal: signalFlag = false, dryRun = false } = {}) {
+    if ((process.env[BRIDGE_ENV] || '').trim() === '0') return { outcome: 'disabled', code: 'env-off', reason: `${BRIDGE_ENV}=0` }
+    if (!dryRun) {
+        const refusal = bridgeRefusal(install)
+        if (refusal) return { outcome: 'disabled', ...refusal }
+    }
     const suppressed = bridgeNoSelfUpdateReason()
     if (suppressed) return { outcome: 'frozen', reason: suppressed }
+    if (dryRun) return bridgeDryRun()
 
+    const mayStopDaemon = signalFlag || explicitlyOn(BRIDGE_SIGNAL_ENV)
     mkdirSync(agentplugDir(), { recursive: true })
     const lockPath = acquireLock()
     if (!lockPath) return { outcome: 'busy' }
     try {
         const statePath = path.join(agentplugDir(), STATE_FILE)
         const state = readJson(statePath) ?? {}
-        if (state.pending_signal) {
+        if (state.pending_signal && mayStopDaemon) {
             const pending = state.pending_signal
             const signal = signalDaemonForSwap(pending.want)
             if (signal.outcome !== 'deferred') state.pending_signal = null
@@ -413,8 +465,12 @@ export async function runReleaseBridge() {
         if (runner.outcome === 'swapped' || guest.outcome === 'swapped') {
             const runnerSha = runner.outcome === 'swapped' ? runner.sha256 : null
             const want = { exe_sha256: runnerSha, gm_sha256: guest.outcome === 'swapped' ? guest.sha256 : null }
-            signal = signalDaemonForSwap(want)
-            state.pending_signal = signal.outcome === 'deferred' ? { want, ts: Date.now(), reason: signal.reason } : null
+            if (mayStopDaemon) {
+                signal = signalDaemonForSwap(want)
+                state.pending_signal = signal.outcome === 'deferred' ? { want, ts: Date.now(), reason: signal.reason } : null
+            } else {
+                signal = { outcome: 'not-signalled', reason: `stopping the daemon needs its own opt-in (${BRIDGE_SIGNAL_ENV}=1 or --signal); the new build is picked up when the daemon next restarts`, want }
+            }
         }
         const summary = { outcome: 'checked', runner, guest, signal }
         writeAtomic(statePath, `${JSON.stringify({ ...state, last_checked_ts: Date.now(), last_runner: runner, last_guest: guest, last_signal: signal }, null, 2)}\n`)
@@ -425,15 +481,20 @@ export async function runReleaseBridge() {
     }
 }
 
+// Starting a server never touches the install: the bridge runs from here only when the operator turned it
+// on (GM_MCP_RELEASE_BRIDGE=1), and a dev copy that was switched on logs why it still did nothing.
 export function runReleaseBridgeInBackground() {
+    if (!explicitlyOn(BRIDGE_ENV)) return
     runReleaseBridge()
         .then((result) => {
+            if (result.outcome === 'disabled' && result.code) appendDiagnostic('release-bridge-refused', result)
             if (result.outcome === 'checked-recently' || result.outcome === 'disabled' || result.outcome === 'frozen' || result.outcome === 'busy') return
             const swapped = [result.runner, result.guest].filter((step) => step?.outcome === 'swapped')
             for (const step of swapped) {
                 console.error(`gm-mcp: release bridge swapped ${step === result.runner ? 'agentplug-runner' : 'gm guest plugin'} ${step.from ?? 'unknown'} -> ${step.to} (${step.backup ? `previous kept as ${step.backup}` : 'no previous file existed'})`)
             }
             if (result.signal?.outcome === 'signalled') console.error(`gm-mcp: release bridge signalled the shared daemon pid ${result.signal.pid} to pick up the new build; the next dispatch respawns it`)
+            if (result.signal?.outcome === 'not-signalled') console.error(`gm-mcp: release bridge left the shared daemon running (${result.signal.reason})`)
         })
         .catch((error) => {
             appendDiagnostic('release-bridge-failed', { error: error?.message ? String(error.message) : String(error) })

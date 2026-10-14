@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.2.45 - `gm-mcp dispatch` honours the HTTP singleton opt-outs
+
+The CLI `dispatch` command called `ensureHttpSingleton` unconditionally, so `GM_MCP_NO_HTTP_SINGLETON=1`
+(the opt-out a witness sets so it cannot touch the shared server) did not stop a shell dispatch from
+seeding, retiring or replacing the machine's HTTP server. It now seeds only when `httpSingletonEnabled()`
+says so: never for a dev copy, never under an opt-out.
+
+## 0.2.44 - a dev copy never changes what the machine runs; the release bridge is opt-in
+
+A run of the repo's own tests, which spawn `bin/gm-mcp-server.js` as an MCP server with the real HOME in
+the environment, replaced the live `~/.gm-tools/agentplug-runner` (0.1.211 -> 0.1.323) and SIGTERMed the
+live daemon at 23:55:14Z. The daemon-guard of the old runner never reaped the stopped daemon, so gm was
+down for every session for about five minutes. Cause: `runReleaseBridgeInBackground()` ran on every start
+of every copy, and the same process's `self-update-check` had just answered `not-deployed-copy`. The bridge
+also installed that runner on the `.sha256` sidecar alone, although the daemon's own updater had rejected
+the version (`update rejected: agentplug-runner-macos-arm64 0.1.323 -- no signature available`, recorded in
+`daemon-status.json` as `last_runner_update_poll_error`). The same test run's servers also tried to seed the
+shared HTTP server on 8787 (`http-listen-failed EADDRINUSE`): `ensureHttpSingleton` retires a live server
+that reports an older version and starts the caller's bundle in its place.
+
+- `src/install-guard.js` names the deployed copy (`<GM_TOOLS_DIR>/gm-mcp-server.mjs`); any other process is a
+  dev copy (`self-update.js` now takes the same predicate from there).
+- The release bridge is off until asked: `GM_MCP_RELEASE_BRIDGE=1` at start, or `gm-mcp release-bridge
+  --install`; `gm-mcp release-bridge` alone is a read-only dry run. A dev copy answers `outcome: disabled,
+  code: not-deployed-copy` to both. Stopping the daemon after a swap is a second opt-in (`--signal`,
+  `GM_MCP_RELEASE_BRIDGE_SIGNAL=1`); otherwise `signal.outcome` is `not-signalled`. A runner version that
+  `last_runner_update_poll_error` records as rejected is `refused: runner-rejected-this-build`.
+- A dev copy no longer seeds, retires, restarts or supervises the shared HTTP server, and no longer starts dev
+  sync (`GM_MCP_HTTP_SINGLETON=1` / `GM_MCP_DEV_SYNC=1` name one explicitly).
+- `scripts/sandboxed.mjs <command>` runs a command with HOME, GM_TOOLS_DIR and AGENTPLUG_HOME in a fresh temp
+  dir that holds no runner; `npm test` and the CI steps that spawn the bundle run through it.
+
+## 0.2.43 - a spool reply opens with its dispatch_id
+
+`prd-resolve` binds a row to a run through `witness_dispatch_id`, and the operator reported that the
+wrapper strips that id, so the caller digs the out-file by hand. The installed
+`~/.gm-tools/gm-mcp-server.mjs` (0.2.1, sha256 db097c49...) does: its `NOISE_KEYS` still lists
+`dispatch_id`, and 6 of 6 live replies carried no id. The source has kept the id since 2779167, but
+only by key order: an exec or search reply keeps its `data:` block above it (`data.ok` blocks
+flattening), so the 24000-char reply cap or a small `max_chars` cut it off (live on 0.2.42:
+`exec_js` printing 32 KB, `max_chars` 600 and `max_chars` 120 all answered with no id; 5 of 495 real
+replies), and `applyFsReadRangeFallback` and `fsReadUnknownRangeReply` rebuild the reply object
+without it. `withDispatchIdFirst` now runs last in `readLandedOutFile`, from the raw out-file, so every
+default spool reply, ok or failed, opens with `dispatch_id: <id>`; `capReplyText` never cuts that
+line; `gmResult` names it for a spool `.json`; `full_response` keeps the native layout. Measured on 537
+real out-files through the real resume path: replies opening with the id 206 -> 495 (every out-file
+that carries one; the other 42 are `dispatch_orphaned` and `session_id_task_mismatch` notices of
+dispatches that never ran), replies with no id at all 5 -> 0. Live on the rebuilt bundle, `prd-add`,
+`exec_js`, then `prd-resolve {id, witness_evidence, witness_dispatch_id: <id from the reply>}` answered
+`witness_dispatch_id_verified: true` via the ledger, also through the alias `dispatch_id`, a
+`codesearch` id, and a second session. The `gm_codemode` and `initialize` text, the verb table's
+`witness_dispatch_id` field, README.md and AGENTS.md now say so.
+
+Replies also render with `lineWidth: -1` (`renderYaml`). Width 100 folded 289 of 534 real replies
+into `>-` scalars: tool output re-wrapped at column 100 with line breaks turned into blank lines, and
+51 of the 60 truncation pointers (`full text at <path> field '<key>'`) split across lines, so a caller
+could not match the path. Measured on the 537-reply corpus: 1244357 -> 1212699 bytes (-2.5%), no pointer
+split, and the 530 untruncated replies parse to identical values before and after.
+
+## 0.2.42 - a restarting daemon reads as restarting, not dead
+
+A daemon-guard restart window used to read as a dead daemon: `readDaemonLiveness` saw a stale
+heartbeat with a gone pid, `daemonNotRunning` spawned a competing runner, and the poll loop ended
+in `timed_out` with `daemon.alive: false` although the guard was bringing a replacement up. The
+runner now stamps `restarting: true`, `restart_reason`, `restart_attempt`, `restart_max_attempts`,
+`previous_pid`, `restart_started_ts` and `restart_ts` into `.status.json` and `daemon-status.json`
+for the whole window (guard restart, or a runner-handoff by the outgoing daemon). `readRestartMarker`
+reads that marker while `restart_ts` is under 15 s old and the window is under 120 s; the `daemon`
+block then carries `restarting: true` with those fields and a note naming the window; the pre-flight
+and the runner watchdog do not spawn a runner into it; and a poll that reaches its deadline inside
+the window extends by 15 s at a time up to the poll ceiling, reporting `restart_wait_extended_ms`.
+Measured on the scratch project: a dispatch written 3 s after the daemon was killed was claimed by
+the replacement without a timeout.
+
 ## 0.2.40 - a stale server says restart required, with the command
 
 A stale process was reporting `bundle_stale` in the reply, but its restart instruction went to stderr,
