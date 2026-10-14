@@ -102,9 +102,9 @@ The release bridge (`src/release-bridge.js`) upgrades the installed runner and g
 - Stopping the daemon so the new build loads is a second opt-in: `--signal`, or
   `GM_MCP_RELEASE_BRIDGE_SIGNAL=1`. Without it the reply says `signal.outcome: not-signalled` and the build
   loads when the daemon next restarts.
-- It never installs a runner build the runner itself refused. The runner demands a signature on every update
-  it applies, and records a refusal in `daemon-status.json` (`update rejected: agentplug-runner-macos-arm64
-  0.1.323 -- no signature available`); the bridge only has the `.sha256` sidecar, which proves the bytes match
+- It never installs a runner build the runner itself refused. The installed runner's own updater (0.1.211)
+  demanded a signature on top of the checksum and recorded its refusal in `daemon-status.json` (`update rejected:
+  agentplug-runner-macos-arm64 0.1.323 -- no signature available`); the bridge only has the `.sha256` sidecar, which proves the bytes match
   what was published, not who published them. A version listed there is `runner-rejected-this-build`.
 
 To witness any of this without touching the machine, run the command in a throwaway home:
