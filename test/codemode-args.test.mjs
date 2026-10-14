@@ -96,6 +96,41 @@ await testAsync('gm.<verb>({...}) reaches the tool handler as the verb body', as
     assert.equal(seen[0].cwd, 'C:/dev/project')
 })
 
+await testAsync('a second object argument is folded in, so a dropped cwd cannot mis-root a dispatch', async () => {
+    const seen = []
+    const tools = new Map([['git_status', {
+        verb: 'git_status',
+        inputSchema: verbToolInputSchema('git_status'),
+        handler: async (args) => {
+            seen.push(args)
+            return { content: [{ type: 'text', text: 'clean' }] }
+        },
+    }]])
+    await runCodemode(tools, "return await gm.git_status({}, {cwd: 'C:/dev/other', max_chars: 800})")
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].cwd, 'C:/dev/other')
+    assert.equal(seen[0].max_chars, 800)
+    assert.equal(seen[0].body, undefined)
+    const threw = await runCodemode(tools, "return await gm.git_status({}, 'C:/dev/other')")
+    assert.match(threw.content[0].text, /second argument must be an object/)
+})
+
+await testAsync('git_root_override pins cwd for a call that names none', async () => {
+    const seen = []
+    const tools = new Map([['git_status', {
+        verb: 'git_status',
+        inputSchema: verbToolInputSchema('git_status'),
+        handler: async (args) => {
+            seen.push(args)
+            return { content: [{ type: 'text', text: 'clean' }] }
+        },
+    }]])
+    await runCodemode(tools, "return await gm.git_status({git_root_override: 'C:/dev/pinned'})")
+    assert.equal(seen[0].cwd, 'C:/dev/pinned')
+    await runCodemode(tools, "return await gm.git_status({cwd: 'C:/dev/named', git_root_override: 'C:/dev/pinned'})")
+    assert.equal(seen[1].cwd, 'C:/dev/named')
+})
+
 await testAsync('gm.gm({verb, body}) still dispatches unchanged', async () => {
     const seen = []
     const tools = new Map([['gm', {
