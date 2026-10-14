@@ -1462,6 +1462,16 @@ function coldProjectLiveness() {
     }
 }
 
+const LIVENESS_STATUS_FIELDS = [
+    ['shared_process', 'boolean'],
+    ['queue_wait_ms', 'number'],
+    ['queue_depth', 'number'],
+    ['queue_position', 'number'],
+    ['claimed_step_count', 'number'],
+    ['queued_step_count', 'number'],
+    ['gm_processor_capacity', 'number'],
+]
+
 export function readDaemonLiveness(spoolDir) {
     let status
     try {
@@ -1511,13 +1521,9 @@ export function readDaemonLiveness(spoolDir) {
     liveness.shared_daemon_fresh = sharedFresh
     if (status.plugin_compiling) liveness.plugin_compiling = true
     if (status.runtime) liveness.runtime = status.runtime
-    if (typeof status.shared_process === 'boolean') liveness.shared_process = status.shared_process
-    if (typeof status.queue_wait_ms === 'number') liveness.queue_wait_ms = status.queue_wait_ms
-    if (typeof status.queue_depth === 'number') liveness.queue_depth = status.queue_depth
-    if (typeof status.queue_position === 'number') liveness.queue_position = status.queue_position
-    if (typeof status.claimed_step_count === 'number') liveness.claimed_step_count = status.claimed_step_count
-    if (typeof status.queued_step_count === 'number') liveness.queued_step_count = status.queued_step_count
-    if (typeof status.gm_processor_capacity === 'number') liveness.gm_processor_capacity = status.gm_processor_capacity
+    for (const [key, type] of LIVENESS_STATUS_FIELDS) {
+        if (typeof status[key] === type) liveness[key] = status[key]
+    }
     const sharedProjects = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)?.active_projects
     if (typeof sharedProjects === 'number') liveness.daemon_active_projects = sharedProjects
     if (status.runner_update_in_progress) {
