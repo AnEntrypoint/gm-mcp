@@ -62,6 +62,19 @@ export function foldVerbArgs(tool, args) {
     return { ...envelope, body: { ...extra, ...body } }
 }
 
+export function refuseUndeclaredBodyKeys(name, verb, folded) {
+    if (!verb || !folded || typeof folded !== 'object') return
+    const body = folded.body
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return
+    const schema = verbBodySchema(verb)
+    if (!schema.declared) return
+    const known = new Set(Object.keys(schema.fields))
+    for (const spec of Object.values(schema.fields)) for (const alias of spec.aliases ?? []) known.add(alias)
+    const unknown = Object.keys(body).filter((key) => !known.has(key))
+    if (unknown.length === 0) return
+    throw new Error(`${name} body has undeclared key ${unknown.join(', ')} -- declared body fields: ${[...known].join(', ')}`)
+}
+
 const DEFAULT_LIST_DESC_CHARS = 80
 const DEFAULT_CODEMODE_MAX_CHARS = 24000
 
@@ -145,6 +158,7 @@ function bindings(tools, { session_id, cwd }, extra) {
         const tool = tools.get(name)
         const defaults = {}
         const folded = foldVerbArgs(tool, args)
+        refuseUndeclaredBodyKeys(name, tool.verb, folded)
         if ('session_id' in tool.inputSchema && folded.session_id === undefined) defaults.session_id = session_id
         if ('cwd' in tool.inputSchema && folded.cwd === undefined && cwd !== undefined) defaults.cwd = cwd
         return tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then(replyText)

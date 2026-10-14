@@ -24,7 +24,7 @@ const child = spawn(process.execPath, [bundle, '--http', '--port', String(port)]
     cwd: path.join(here, '..'),
     stdio: ['ignore', 'ignore', 'pipe'],
     windowsHide: true,
-    env: { ...process.env, GM_MCP_LOG_PATH: logPath, GM_MCP_HTTP_SUPERVISOR: '0', GM_MCP_HTTP_SINGLETON: '0' },
+    env: { ...process.env, GM_MCP_LOG_PATH: logPath, GM_MCP_HTTP_SUPERVISOR: '0', GM_MCP_NO_HTTP_SINGLETON: '1' },
 })
 child.stderr.on('data', () => {})
 

@@ -112,15 +112,7 @@ function resolvePayloadValue(value) {
     return value
 }
 
-async function dispatchCommand() {
-    await ensureHttpSingleton({ port: defaultHttpPort(), wait: false }).catch(() => {})
-
-    const argv = process.argv.slice(3)
-    if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
-        console.log(DISPATCH_USAGE)
-        return 0
-    }
-
+function parseDispatchArgv(argv) {
     const verb = argv[0]
     const positional = dispatchPositional(argv)
     const rawFlag = dispatchFlag(argv, 'raw')
@@ -138,19 +130,16 @@ async function dispatchCommand() {
         try {
             body = JSON.parse(bodyText)
         } catch (error) {
-            console.error(`gm-mcp dispatch: --body is not valid JSON: ${error.message}`)
-            return 2
+            return { usageError: `gm-mcp dispatch: --body is not valid JSON: ${error.message}` }
         }
         if (body === null || typeof body !== 'object' || Array.isArray(body)) {
-            console.error('gm-mcp dispatch: --body must be a JSON object')
-            return 2
+            return { usageError: 'gm-mcp dispatch: --body must be a JSON object' }
         }
     }
 
     if (argv.includes('--no-ignore')) {
         if (!NO_IGNORE_VERBS.has(verb)) {
-            console.error(`gm-mcp dispatch: --no-ignore applies to the search verbs (${[...NO_IGNORE_VERBS].join(', ')}), not "${verb}"`)
-            return 2
+            return { usageError: `gm-mcp dispatch: --no-ignore applies to the search verbs (${[...NO_IGNORE_VERBS].join(', ')}), not "${verb}"` }
         }
         if (body === undefined) body = {}
         body.no_ignore = true
@@ -161,21 +150,39 @@ async function dispatchCommand() {
         return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
     }
 
-    const args = {
-        verb,
-        body,
-        raw_body: rawBody,
-        session_id: dispatchFlag(argv, 'session-id') || `gm-cli-${process.pid}-${Date.now()}`,
-        cwd: dispatchFlag(argv, 'cwd') || process.cwd(),
-        timeout_seconds: numberOrUndefined(dispatchFlag(argv, 'timeout')),
-        poll_interval_seconds: numberOrUndefined(dispatchFlag(argv, 'poll')),
-        max_chars: numberOrUndefined(dispatchFlag(argv, 'max-chars')),
-        resume_task: dispatchFlag(argv, 'resume'),
-        full_response: argv.includes('--full') ? true : undefined,
-        include_timing: argv.includes('--timing') ? true : undefined,
+    return {
+        args: {
+            verb,
+            body,
+            raw_body: rawBody,
+            session_id: dispatchFlag(argv, 'session-id') || `gm-cli-${process.pid}-${Date.now()}`,
+            cwd: dispatchFlag(argv, 'cwd') || process.cwd(),
+            timeout_seconds: numberOrUndefined(dispatchFlag(argv, 'timeout')),
+            poll_interval_seconds: numberOrUndefined(dispatchFlag(argv, 'poll')),
+            max_chars: numberOrUndefined(dispatchFlag(argv, 'max-chars')),
+            resume_task: dispatchFlag(argv, 'resume'),
+            full_response: argv.includes('--full') ? true : undefined,
+            include_timing: argv.includes('--timing') ? true : undefined,
+        },
+    }
+}
+
+async function dispatchCommand() {
+    await ensureHttpSingleton({ port: defaultHttpPort(), wait: false }).catch(() => {})
+
+    const argv = process.argv.slice(3)
+    if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
+        console.log(DISPATCH_USAGE)
+        return 0
     }
 
-    const text = await gmDispatch(args)
+    const parsed = parseDispatchArgv(argv)
+    if (parsed.usageError) {
+        console.error(parsed.usageError)
+        return 2
+    }
+
+    const text = await gmDispatch(parsed.args)
     process.stdout.write(text.endsWith('\n') ? text : `${text}\n`)
     return text.trimStart().startsWith('error:') ? 1 : 0
 }

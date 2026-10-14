@@ -98,12 +98,12 @@ await testAsync('the HTTP transport answers request after request', async () => 
         assert.equal(healthBody.ok, true)
         assert.equal(healthBody.transport, 'streamable-http')
 
-        let id = 0
+        let nextRequestId = 0
         const rpc = async (method, params) => {
             const response = await fetch(`${base}${MCP_PATH}`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
-                body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }),
+                body: JSON.stringify({ jsonrpc: '2.0', id: ++nextRequestId, method, params }),
             })
             return { status: response.status, body: await response.json() }
         }
