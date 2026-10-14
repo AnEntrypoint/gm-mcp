@@ -573,7 +573,7 @@ const ROWS = [
     { canonical: 'callers' },
     { canonical: 'callees' },
     { canonical: 'impact' },
-    { canonical: 'grep' },
+    { canonical: 'grep', body: CODESEARCH_BODY },
     { canonical: 'ci_status', hyphen: true },
     { canonical: 'prd_status', hyphen: true },
     { canonical: 'prd_block', hyphen: true },

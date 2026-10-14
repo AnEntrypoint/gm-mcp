@@ -54,8 +54,7 @@ export function httpSingletonEnabled() {
         const value = envValue(name)
         if (value !== null && !OFF_VALUES.has(value)) return false
     }
-    const legacy = envValue('GM_MCP_HTTP_SINGLETON')
-    return !(legacy !== null && OFF_VALUES.has(legacy))
+    return true
 }
 
 export function launchedEntryPath() {
@@ -156,7 +155,7 @@ export function spawnServerProcess({ port = defaultHttpPort(), host = DEFAULT_HO
     const child = spawn(process.execPath, [entry, '--http', '--port', String(port), '--host', String(host)], {
         cwd: homedir(),
         ...hiddenDetachedOptions({ stdio }),
-        env: { ...process.env, GM_MCP_TRANSPORT: 'http', GM_MCP_HTTP_SINGLETON: '0' },
+        env: { ...process.env, GM_MCP_TRANSPORT: 'http', GM_MCP_NO_HTTP_SINGLETON: '1' },
     })
     if (fd !== null) closeSync(fd)
     child.on('error', (error) => {

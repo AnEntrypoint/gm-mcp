@@ -1,6 +1,7 @@
 import { agentplugDir, spoolDirOf, toolsDir } from './paths.js'
 import { createHash } from 'node:crypto'
 import { spoolFs as fs, spoolSpawn as spawn } from './spool-port.js'
+import { claimByCreate, claimByLink, readJsonOrNull, readLockHolderPid, readOwnerText, readPidTsLock, readStatusJson, readTextOrNull, reclaimLockByRename, replaceLockText, writeTextAtomically as writeFileAtomically } from './spool-store.js'
 import os from 'node:os'
 import path from 'node:path'
 import * as yaml from 'js-yaml'
@@ -928,11 +929,7 @@ function runnerBinaryMissing() {
 }
 
 function readJsonFile(filePath) {
-    try {
-        return JSON.parse(fs.readFileSync(filePath, 'utf8'))
-    } catch {
-        return null
-    }
+    return readJsonOrNull(filePath)
 }
 
 export function pidAlive(pid) {
@@ -950,7 +947,7 @@ function globalDaemonPid() {
     const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
     if (pidAlive(status?.pid) === true) return status.pid
     try {
-        const ownerText = fs.readFileSync(GLOBAL_DAEMON_OWNER_LOCK_PATH, 'utf8').trim()
+        const ownerText = readOwnerText(GLOBAL_DAEMON_OWNER_LOCK_PATH)
         if (!/^[1-9][0-9]*$/.test(ownerText)) return null
         const owner = Number(ownerText)
         if (pidAlive(owner) === true) return owner
@@ -1013,20 +1010,6 @@ function refreshCallerHeartbeat(root, session_id) {
 
 function leaseKeyFor(root) {
     return createHash('sha256').update(path.resolve(root).toLowerCase()).digest('hex').slice(0, 16)
-}
-
-function writeFileAtomically(file, text) {
-    const tmp = `${file}.tmp`
-    fs.writeFileSync(tmp, text, 'utf8')
-    fs.renameSync(tmp, file)
-}
-
-function readTextOrNull(file) {
-    try {
-        return fs.readFileSync(file, 'utf8')
-    } catch {
-        return null
-    }
 }
 
 function leaseSessionSidecarName(key, pid, session_id) {
@@ -1100,8 +1083,7 @@ const LAUNCHER_LOCK_UNREADABLE_GRACE_MS = 120_000
 
 function readLauncherLock() {
     try {
-        const [pid, ts] = fs.readFileSync(GLOBAL_LAUNCHER_LOCK_PATH, 'utf8').trim().split(/\s+/).map(Number)
-        return { pid, ts }
+        return readPidTsLock(GLOBAL_LAUNCHER_LOCK_PATH)
     } catch {
         return null
     }
@@ -1120,19 +1102,13 @@ export function launcherLockMayBeReclaimed(held, lockPath) {
 function claimGlobalLauncher() {
     fs.mkdirSync(AGENTPLUG_DIR, { recursive: true })
     for (let attempt = 0; attempt < 2; attempt++) {
-        const tempPath = path.join(AGENTPLUG_DIR, `.spool-launch.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`)
+        let claimed
         try {
-            fs.writeFileSync(tempPath, `${process.pid} ${Date.now()}`, { flag: 'wx', mode: 0o600 })
-            fs.linkSync(tempPath, GLOBAL_LAUNCHER_LOCK_PATH)
-            return true
-        } catch (error) {
-            if (error?.code !== 'EEXIST') return false
-        } finally {
-            try {
-                fs.unlinkSync(tempPath)
-            } catch {
-            }
+            claimed = claimByLink(GLOBAL_LAUNCHER_LOCK_PATH, path.join(AGENTPLUG_DIR, '.spool-launch'), `${process.pid} ${Date.now()}`, 0o600)
+        } catch {
+            return false
         }
+        if (claimed) return true
         const held = readLauncherLock()
         if (!launcherLockMayBeReclaimed(held, GLOBAL_LAUNCHER_LOCK_PATH)) return false
         try {
@@ -1146,15 +1122,7 @@ function claimGlobalLauncher() {
 
 function claimRunnerEnsure(root) {
     const lockPath = path.join(spoolDirOf(root), '.runner-ensure.lock')
-    const claim = () => {
-        const fd = fs.openSync(lockPath, 'wx', 0o600)
-        try {
-            fs.writeFileSync(fd, `${process.pid} ${Date.now()}`, 'utf8')
-        } finally {
-            fs.closeSync(fd)
-        }
-        return true
-    }
+    const claim = () => claimByCreate(lockPath, `${process.pid} ${Date.now()}`, 0o600)
     try {
         return claim()
     } catch (error) {
@@ -1163,11 +1131,9 @@ function claimRunnerEnsure(root) {
     try {
         const ageMs = Date.now() - fs.statSync(lockPath).mtimeMs
         if (ageMs <= ENSURE_LEASE_MS) return false
-        const holderPid = Number.parseInt(fs.readFileSync(lockPath, 'utf8').trim().split(/\s+/)[0], 10)
+        const holderPid = readLockHolderPid(lockPath)
         if (ageMs < ENSURE_CHILD_MAX_AGE_MS && pidAlive(holderPid) === true) return false
-        const stalePath = `${lockPath}.${process.pid}.${Date.now()}.stale`
-        fs.renameSync(lockPath, stalePath)
-        fs.unlinkSync(stalePath)
+        reclaimLockByRename(lockPath)
     } catch {
         return false
     }
@@ -1186,20 +1152,17 @@ const ENSURE_BACKOFF_CEILING_MS = 60_000
 export function runnerEnsureInFlight(root, now = Date.now()) {
     const entry = inflightEnsuresByRoot.get(root)
     if (!entry) return false
-    if (entry.exitCode !== null && entry.exitCode !== undefined) {
-        inflightEnsuresByRoot.delete(root)
-        return false
-    }
-    if (pidAlive(entry.pid) === false) {
-        inflightEnsuresByRoot.delete(root)
-        return false
-    }
-        if (now - entry.spawnedAtMs >= ENSURE_CHILD_MAX_AGE_MS) {
-            inflightEnsuresByRoot.delete(root)
-            entry.child?.kill()
-        return false
-    }
+    if (entry.exitCode !== null && entry.exitCode !== undefined) return false
+    if (pidAlive(entry.pid) === false) return false
+    if (now - entry.spawnedAtMs >= ENSURE_CHILD_MAX_AGE_MS) return false
     return true
+}
+
+export function reapRunnerEnsureInFlight(root, now = Date.now()) {
+    const entry = inflightEnsuresByRoot.get(root)
+    if (!entry || runnerEnsureInFlight(root, now)) return
+    inflightEnsuresByRoot.delete(root)
+    if (now - entry.spawnedAtMs >= ENSURE_CHILD_MAX_AGE_MS) entry.child?.kill()
 }
 
 const DAEMON_RESPAWN_DISABLED_PATH = path.join(AGENTPLUG_DIR, 'daemon-respawn-disabled')
@@ -1209,44 +1172,51 @@ function daemonRespawnDisabled() {
     return fs.existsSync(DAEMON_RESPAWN_DISABLED_PATH)
 }
 
-function ensureSpoolRunnerRunning(root) {
-    if (daemonRespawnDisabled()) return
-    if (runnerBinaryMissing()) return
+function ensureSpoolDecision(root, now) {
+    if (daemonRespawnDisabled()) return false
+    if (runnerBinaryMissing()) return false
     if (liveDaemonSweepsProject(spoolDirOf(root))) {
         consecutiveFailedEnsuresByRoot.delete(root)
-        return
+        return false
     }
-    const now = Date.now()
-    if (runnerEnsureInFlight(root, now)) return
-    if (now - (lastEnsuredAtByRoot.get(root) || 0) < ENSURE_INTERVAL_MS) return
+    reapRunnerEnsureInFlight(root, now)
+    if (runnerEnsureInFlight(root, now)) return false
+    if (now - (lastEnsuredAtByRoot.get(root) || 0) < ENSURE_INTERVAL_MS) return false
     if (daemonBootGraceActive()) {
         lastEnsuredAtByRoot.set(root, now)
-        return
+        return false
     }
     const failures = consecutiveFailedEnsuresByRoot.get(root) || 0
     lastEnsuredAtByRoot.set(root, now + Math.min(ENSURE_BACKOFF_CEILING_MS, ENSURE_INTERVAL_MS * (2 ** failures)) - ENSURE_INTERVAL_MS)
-    if (!claimRunnerEnsure(root)) return
-    if (!claimGlobalLauncher()) return
+    if (!claimRunnerEnsure(root)) return false
+    if (!claimGlobalLauncher()) return false
     consecutiveFailedEnsuresByRoot.set(root, failures + 1)
-    let child
+    return true
+}
+
+function spawnRunnerDetached(root, now) {
     try {
-        child = spawn(RUNNER_PATH, ['spool'], {
+        const child = spawn(RUNNER_PATH, ['spool'], {
             cwd: root,
             env: { ...process.env, GM_TOOLS_DIR: RUNNER_DIR, AGENTPLUG_HOME: AGENTPLUG_DIR, CLAUDE_PROJECT_DIR: root, AGENTPLUG_LEASE_PID: String(process.pid) },
             ...hiddenDetachedOptions(),
         })
+        try {
+            replaceLockText(GLOBAL_LAUNCHER_LOCK_PATH, `${child.pid} ${now}`)
+        } catch {
+        }
+        return child
     } catch {
         try {
             fs.unlinkSync(GLOBAL_LAUNCHER_LOCK_PATH)
         } catch {
         }
-        return
+        return null
     }
-    try {
-        fs.writeFileSync(GLOBAL_LAUNCHER_LOCK_PATH, `${child.pid} ${now}`, 'utf8')
-    } catch {
-    }
-        const entry = { pid: child.pid, child, spawnedAtMs: now, exitCode: null }
+}
+
+function trackRunnerEnsureChild(root, child, now) {
+    const entry = { pid: child.pid, child, spawnedAtMs: now, exitCode: null }
     const settle = (code) => {
         entry.exitCode = code ?? 0
         if (inflightEnsuresByRoot.get(root) === entry) inflightEnsuresByRoot.delete(root)
@@ -1256,10 +1226,17 @@ function ensureSpoolRunnerRunning(root) {
     recordRunnerEnsureInflight(root, entry)
     if (child.pid) recordChild({ root, pid: child.pid, kind: 'spool-runner', verb: 'spool', note: 'daemon sweeper for this project' })
     try {
-        fs.writeFileSync(path.join(spoolDirOf(root), '.runner-ensure.lock'), `${child.pid} ${now}`, 'utf8')
+        replaceLockText(path.join(spoolDirOf(root), '.runner-ensure.lock'), `${child.pid} ${now}`)
     } catch {
     }
     child.unref()
+}
+
+function ensureSpoolRunnerRunning(root) {
+    const now = Date.now()
+    if (!ensureSpoolDecision(root, now)) return
+    const child = spawnRunnerDetached(root, now)
+    if (child) trackRunnerEnsureChild(root, child, now)
 }
 
 export function recordRunnerEnsureInflight(root, entry) {
@@ -1282,11 +1259,11 @@ function startRunnerWatchdog(root) {
 function sleep(ms, signal) {
     return new Promise((resolve, reject) => {
         const onAbort = () => {
-            clearTimeout(t)
+            clearTimeout(timer)
             signal?.removeEventListener('abort', onAbort)
             reject(new Error('aborted'))
         }
-        const t = setTimeout(() => {
+        const timer = setTimeout(() => {
             signal?.removeEventListener('abort', onAbort)
             resolve()
         }, ms)
@@ -1485,11 +1462,12 @@ function coldProjectLiveness() {
 export function readDaemonLiveness(spoolDir) {
     let status
     try {
-        status = JSON.parse(fs.readFileSync(path.join(spoolDir, '.status.json'), 'utf8'))
+        status = readStatusJson(spoolDir)
     } catch {
         return coldProjectLiveness()
     }
-        const now = Date.now()
+    if (!status || typeof status !== 'object') return coldProjectLiveness()
+    const now = Date.now()
     const globalStatus = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
     const pid = typeof status.pid === 'number' ? status.pid : Number(status.pid) || null
     const pidAliveFlag = pidAlive(pid)
@@ -1967,8 +1945,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     if (typeof session_id === 'string') session_id = session_id.trim()
     session_id = explicitBodySessionId(body) || session_id
     if (!session_id) return 'error: session_id required'
-    const n = resume_task || nextN(session_id)
-    const unsafeName = unsafeSpoolName('verb', verb) || unsafeSpoolName('session_id', session_id) || unsafeSpoolName('task', n)
+    const sequence = resume_task || nextN(session_id)
+    const requestNumber = sequence
+    const unsafeName = unsafeSpoolName('verb', verb) || unsafeSpoolName('session_id', session_id) || unsafeSpoolName('task', sequence)
     if (unsafeName) return `error: ${unsafeName} -- nothing was written to the spool, so no dispatch was queued`
     const resolvedRoot = resolveDispatchRoot(cwd)
     if (resolvedRoot.error) {
@@ -2032,14 +2011,14 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     }
 
     let ownerTransport
-    const inPath = path.join(inDir, `${n}.txt`)
-    const outPath = path.join(outDir, `${verb}-${n}.json`)
+    const inPath = path.join(inDir, `${requestNumber}.txt`)
+    const outPath = path.join(outDir, `${verb}-${requestNumber}.json`)
 
     if (resume_task && !fs.existsSync(outPath) && !fs.existsSync(inPath) && !fs.existsSync(`${inPath}.inflight`)) {
         return toYaml({
-            error: `resume_task "${n}" names no dispatch in this project's spool -- nothing was dispatched`,
+            error: `resume_task "${requestNumber}" names no dispatch in this project's spool -- nothing was dispatched`,
             resumed: {
-                task: n,
+                task: requestNumber,
                 sent_no_body: true,
                 wrote_no_new_dispatch: true,
                 checked_out_file: outPath,
@@ -2066,9 +2045,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             ownerTransport = await plainTextOwnerTransport(root, session_id, signal)
             if (signal?.aborted) return toYaml({ error: 'aborted', owner_transport: ownerTransport, wrote_no_new_dispatch: true })
             const plaintext = withTimeoutMsPrefix(verb, raw_body, timeout_seconds)
-            publishSpoolRequest(inDir, inPath, n, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
+            publishSpoolRequest(inDir, inPath, requestNumber, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
         } else if (rawBodyText !== undefined) {
-            publishSpoolRequest(inDir, inPath, n, rawBodyText)
+            publishSpoolRequest(inDir, inPath, requestNumber, rawBodyText)
         } else {
             const fullBody = { ...normalizedBody, session_id }
             fullBody._agentplug_lane_wait_ms = timeoutMs
@@ -2076,7 +2055,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 const leases = leaseSessionsFor(root)
                 if (leases) fullBody._lease_sessions = leases.filter(lease => lease.live).map(({ session_id: leaseSession, pid }) => ({ session_id: leaseSession, pid }))
             }
-            publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody))
+            publishSpoolRequest(inDir, inPath, requestNumber, JSON.stringify(fullBody))
         }
     }
 
@@ -2111,7 +2090,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
             out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, out))
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
-            if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
+            if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs))
             else out = withDispatchWait(out, Date.now() - callStartedAtMs)
             if (out && typeof out === 'object' && out.instruction_unchanged === true && bodyCarriesInstructionHash(normalizedBody)) {
                 out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
@@ -2134,8 +2113,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (rendered.length > replyCap) fs.writeFileSync(spillPath, rendered)
             return capReplyText(rendered, replyCap, spillPath, out, toYaml, spillNote)
         } catch (e) {
-            const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
-            return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
+            const failed = { error: `response file was not valid JSON: ${e.message}`, task: requestNumber, out_path: outPath }
+            return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs)) : failed)
         } finally {
             if (opened) fs.closeSync(opened.fd)
         }
@@ -2152,7 +2131,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     }
     const abortedReply = () => toYaml({
         error: 'aborted',
-        task: n,
+        task: requestNumber,
         in_path: inPath,
         out_path: outPath,
         request_withdrawn_before_claim: withdrawUnclaimedRequest(),
@@ -2183,7 +2162,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             ].filter(Boolean).join('; ')
             return toYaml({
                 timed_out: true,
-                task: n,
+                task: requestNumber,
                 poll_timeout_ms: timeoutMs,
                 requested_poll_timeout_ms: requestedPollTimeoutMs,
                 poll_timeout_capped: capped,
@@ -2197,8 +2176,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 in_path: inPath,
                 out_path: outPath,
                 final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
-                dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
-                dispatch_wait: readDispatchWaitRow(spoolDir, verb, n, outPath),
+                dispatch_state: readSpoolDispatchState(spoolDir, verb, requestNumber),
+                dispatch_wait: readDispatchWaitRow(spoolDir, verb, requestNumber, outPath),
                 daemon: readDaemonLiveness(spoolDir),
             })
         }

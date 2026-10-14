@@ -13,9 +13,9 @@ transport.onerror = (e) => log('TRANSPORT ERROR:', e && (e.stack || e.message ||
 transport.onclose = () => log('TRANSPORT CLOSED')
 
 log('connecting', url)
-const t0 = Date.now()
+const startedAt = Date.now()
 await client.connect(transport)
-log('connected in', Date.now() - t0, 'ms; serverInfo=', JSON.stringify(client.getServerVersion()))
+log('connected in', Date.now() - startedAt, 'ms; serverInfo=', JSON.stringify(client.getServerVersion()))
 log('sessionId =', transport.sessionId)
 log('protocolVersion =', client.getServerCapabilities() ? '(caps ok)' : '(no caps)')
 
@@ -25,8 +25,8 @@ log('tools/list ->', tools.tools.length, 'tools:', tools.tools.map((t) => t.name
 const callArgs = { verb: 'health', cwd: 'C:/dev/gm' }
 const toolName = tools.tools.some((t) => t.name === 'gm') ? 'gm' : tools.tools[0].name
 log('tools/call', toolName, JSON.stringify(callArgs).slice(0, 120))
-const r1 = await client.callTool({ name: toolName, arguments: callArgs })
-log('call 1 ok; text len =', JSON.stringify(r1).length)
+const firstResult = await client.callTool({ name: toolName, arguments: callArgs })
+log('call 1 ok; text len =', JSON.stringify(firstResult).length)
 
 if (idleSeconds > 0) {
     log('idling', idleSeconds, 's ...')
@@ -34,8 +34,8 @@ if (idleSeconds > 0) {
     log('idle over; transport.sessionId still', transport.sessionId)
 }
 
-const r2 = await client.callTool({ name: toolName, arguments: callArgs })
-log('call 2 ok; text len =', JSON.stringify(r2).length)
+const secondResult = await client.callTool({ name: toolName, arguments: callArgs })
+log('call 2 ok; text len =', JSON.stringify(secondResult).length)
 log('OK: initialize + tools/list + tools/call round trip complete')
 await client.close()
 process.exit(0)
