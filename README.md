@@ -9,7 +9,7 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
 - Writes `.gm/exec-spool/in/<verb>/<N>.txt`
 - Polls `.gm/exec-spool/out/<verb>-<N>.json` until it appears (or a timeout elapses)
 - Returns the response as flat YAML text, auto-cleaned for readability:
-  - opaque internal ids (`dispatch_id`, `request_fingerprint`) stripped
+  - opaque internal id `request_fingerprint` stripped; `dispatch_id` kept as the reply's actionable evidence (`prd-list`, `prd-resolve`'s `witness_dispatch_id` and `rs-plugkit` `prd.rs` read it from the witness body, and `complete.md` serves that contract to workers)
   - the redundant `response`/`data` nesting levels flattened to the top (unless a field name would collide)
   - long text fields (e.g. `instruction`'s full phase prose) truncated with a pointer naming the on-disk file to read for the full text -- the plain-text-body verbs get a far larger budget so their `stdout` comes back inline (see "Long text inline limits")
   - hit-array ranking internals (`cos`/`recency` in `recall_hits`/`bm25_hits`/`vector_hits`/`commits`) dropped, `score` retained as ranked evidence
