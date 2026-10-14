@@ -403,8 +403,19 @@ const WIRE_FIELD_COMPACTORS = new Map([
     ['dream_rsi_replay', compactDreamRsiReplay],
 ])
 
+function sameJsonValue(a, b) {
+    if (a === b) return true
+    if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
+    if (Array.isArray(a) !== Array.isArray(b)) return false
+    if (Array.isArray(a)) return a.length === b.length && a.every((v, i) => sameJsonValue(v, b[i]))
+    const keysA = Object.keys(a)
+    const keysB = Object.keys(b)
+    return keysA.length === keysB.length
+        && keysA.every(k => Object.prototype.hasOwnProperty.call(b, k) && sameJsonValue(a[k], b[k]))
+}
+
 function unchangedByCompaction(before, after) {
-    return JSON.stringify(before) === JSON.stringify(after)
+    return sameJsonValue(before, after)
 }
 
 const WIRE_GIT_COMMIT_VERBS = new Set(['git_commit', 'git_finalize'])

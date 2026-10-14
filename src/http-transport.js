@@ -5,20 +5,13 @@ import { createServer } from './mcp-server.js'
 import { keepServingOnAsyncFailure, logSignalExits } from './transport-guard.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
+import { flagValue } from './argv.js'
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024
 export const DEFAULT_HOST = '127.0.0.1'
 export const DEFAULT_PORT = 8787
 export const MCP_PATH = '/mcp'
 export const HEALTH_PATH = '/health'
-
-export function flagValue(name) {
-    const args = process.argv.slice(2)
-    const index = args.indexOf(`--${name}`)
-    if (index === -1) return undefined
-    const next = args[index + 1]
-    return next && !next.startsWith('--') ? next : undefined
-}
 
 export function httpListenOptions() {
     const port = Number(flagValue('port') ?? process.env.GM_MCP_HTTP_PORT ?? DEFAULT_PORT)

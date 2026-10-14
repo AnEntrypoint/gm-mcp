@@ -312,7 +312,7 @@ export async function handOverToRefreshedBundle({ host = DEFAULT_HOST, port = DE
             detached: true,
             stdio,
             windowsHide: true,
-            env: { ...process.env, GM_MCP_TRANSPORT: 'http', GM_MCP_HTTP_SINGLETON: '0', [HANDOVER_ENV]: '1' },
+            env: { ...process.env, GM_MCP_TRANSPORT: 'http', GM_MCP_NO_HTTP_SINGLETON: '1', [HANDOVER_ENV]: '1' },
         })
     } catch (error) {
         if (fd !== null) closeSync(fd)

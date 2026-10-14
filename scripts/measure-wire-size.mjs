@@ -35,16 +35,16 @@ const rows = files.map(file => {
     return { file: path.basename(file), full: bytes(full), compacted: bytes(compacted), unchanged: full === compacted }
 })
 
-const width = Math.max(...rows.map(r => r.file.length))
+const width = Math.max(...rows.map(row => row.file.length))
 console.log(`${'out-file'.padEnd(width)}  ${'full'.padStart(8)}  ${'compacted'.padStart(9)}  ${'saved'.padStart(14)}`)
-for (const r of rows) {
-    const saved = r.full - r.compacted
-    const pct = r.full ? ` (${(100 * saved / r.full).toFixed(1)}%)` : ''
-    console.log(`${r.file.padEnd(width)}  ${String(r.full).padStart(8)}  ${String(r.compacted).padStart(9)}  ${(String(saved) + pct).padStart(14)}`)
+for (const row of rows) {
+    const saved = row.full - row.compacted
+    const pct = row.full ? ` (${(100 * saved / row.full).toFixed(1)}%)` : ''
+    console.log(`${row.file.padEnd(width)}  ${String(row.full).padStart(8)}  ${String(row.compacted).padStart(9)}  ${(String(saved) + pct).padStart(14)}`)
 }
 
-const sumFull = rows.reduce((a, r) => a + r.full, 0)
-const sumCompact = rows.reduce((a, r) => a + r.compacted, 0)
+const sumFull = rows.reduce((a, row) => a + row.full, 0)
+const sumCompact = rows.reduce((a, row) => a + row.compacted, 0)
 const savedTotal = sumFull - sumCompact
 console.log(`${'TOTAL'.padEnd(width)}  ${String(sumFull).padStart(8)}  ${String(sumCompact).padStart(9)}  ${(String(savedTotal) + ` (${(100 * savedTotal / sumFull).toFixed(1)}%)`).padStart(14)}`)
-console.log(`\n${rows.filter(r => r.unchanged).length}/${rows.length} payloads had nothing worth compacting and were returned byte-identical`)
+console.log(`\n${rows.filter(row => row.unchanged).length}/${rows.length} payloads had nothing worth compacting and were returned byte-identical`)
