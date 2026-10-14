@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.52 - release bridge settles its state once per run
+
+src/release-bridge.js stamps one timestamp per run and builds the pending signal into a single settled state value before the one write that closes the run. The on-disk keys and the checked-recently return are unchanged; a dry run with the interval set large returns checked-recently and keeps last_checked_ts and marker. `BUNDLE_VERSION` moves to 0.2.52.
+
 ## 0.2.51 - ci_log reads a CI step's printed text through the spool
 
 The verb table gains `ci_log` (runner spelling `ci-log`, `hyphen: true`) with a declared body schema, so `gm.list()` and `gm.describe()` name it and its fields and a lane stops falling through to `bash` plus `gh run view --log` plus a temp file to read what a step printed. `response-compact.js` returns `CI_LOG_TEXT_KEYS` for it, so a matched line's `text` reaches the caller whole instead of at `LONG_TEXT_FIELD_TRUNCATE_AT` (400 chars), which is what made the fallback worth writing: the truncation pointer sent the caller to the spool out-file anyway. The wasm caps the reply at `max_lines` and `max_chars` before it is ever serialized, so widening the inline cap cannot widen a dispatch. Each returned row carries a 1-based `n`, which also keeps `dropDuplicateRows` from collapsing the repeated lines a CI log is full of. `BUNDLE_VERSION` moves to 0.2.51.
