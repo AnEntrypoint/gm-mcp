@@ -218,6 +218,22 @@ const POOL_OBSERVE_BODY = {
         refusal: { type: 'string', description: 'A spawn refusal text, so the pool can record the ceiling.' },
     },
 }
+const CODEINSIGHT_ACTIONS = ['overview', 'status', 'sync', 'outline', 'find', 'callers', 'callees', 'impact', 'hotspots', 'orphans', 'imports', 'importers', 'cycles', 'coupling', 'complexity', 'duplicates', 'tests']
+const CODEINSIGHT_BODY = {
+    required: [],
+    fields: {
+        verb: { type: 'string', aliases: ['action', 'mode'], enum: CODEINSIGHT_ACTIONS, description: 'Which answer to build. Omitting verb/action/mode is the index overview, so a caller that meant "callers" and dropped the selector reads the whole-index stats instead of an error. callers/callees/impact/tests need `symbol`; outline/imports/importers need `path`; find needs `symbol`.' },
+        symbol: { type: 'string', aliases: ['name'], description: 'Symbol callers/callees/impact/tests/find resolve. Call edges are keyed by unqualified name, so a qualified "pkg.Name" with no edge of its own is answered from its last dotted segment and the reply names both spellings.' },
+        path: { type: 'string', aliases: ['file', 'path_prefix'], description: 'File for outline/imports/importers, or a path scope for find/orphans/coupling. callers/callees/impact/tests refuse it: edges are keyed by unqualified names, so use codesearch for path-scoped call sites.' },
+        root: { type: 'string', aliases: ['projectPath', 'cwd'], description: 'Answers for another project root.' },
+        limit: { type: 'integer', aliases: ['k'], description: 'Row cap; default 25, maximum 200.' },
+        kind: { type: 'string', description: 'find only: symbol kind filter.' },
+        max_depth: { type: 'integer', description: 'impact only: call hops to walk; default 3, clamped to 1-10.' },
+        direction: { type: 'string', enum: ['callers', 'upstream', 'callees', 'downstream'], description: 'impact only: "callees"/"downstream" walks what the symbol depends on; anything else walks its callers. The gm.impact verb itself defaults to callees.' },
+        through_ambiguous: { type: 'boolean', description: 'impact only: keep walking through ambiguous names instead of stopping at them.' },
+        language: { type: 'string', aliases: ['lang'], description: 'orphans only: language filter.' },
+    },
+}
 const CODESEARCH_BODY = {
     required: ['query'],
     fields: {
@@ -233,7 +249,7 @@ const CODESEARCH_BODY = {
         glob: { type: 'string', aliases: ['path_glob'], description: 'Path glob; a "!" prefix negates.' },
         exclude: { type: 'string', aliases: ['exclude_glob', 'exclude_globs'], description: 'Exclusion glob.' },
         combine: { type: 'string', aliases: ['term_combination'], enum: ['phrase', 'and', 'or'], description: 'Anything else is refused.' },
-        output: { type: 'string', enum: ['matches', 'full', 'compact', 'files', 'count'], description: 'Output shape.' },
+        output: { type: 'string', enum: ['matches', 'full', 'compact', 'content', 'files', 'count'], description: 'Output shape. "compact" is path:line: trimmed text and "content" is the same shape under grep\'s name for it; "full" is an alias of "matches".' },
         case_insensitive: { type: 'boolean', description: 'Folds case.' },
         whole_word: { type: 'boolean', description: 'Whole-word match; refused in filename mode.' },
         comments_only: { type: 'boolean', aliases: ['comments'], description: 'Scans comments only; refused in filename mode.' },
@@ -508,7 +524,7 @@ const ROWS = [
     { canonical: 'memorize_prune', hyphen: true },
     { canonical: 'recall', body: RECALL_BODY },
     { canonical: 'codeinsight_index' },
-    { canonical: 'codeinsight' },
+    { canonical: 'codeinsight', body: CODEINSIGHT_BODY },
     { canonical: 'codesearch', body: CODESEARCH_BODY },
     { canonical: 'forget' },
     { canonical: 'discipline' },
@@ -587,9 +603,9 @@ const ROWS = [
     { canonical: 'chrome' },
     { canonical: 'scan_deps' },
     { canonical: 'code_index' },
-    { canonical: 'callers' },
-    { canonical: 'callees' },
-    { canonical: 'impact' },
+    { canonical: 'callers', body: CODEINSIGHT_BODY },
+    { canonical: 'callees', body: CODEINSIGHT_BODY },
+    { canonical: 'impact', body: CODEINSIGHT_BODY },
     { canonical: 'grep', body: CODESEARCH_BODY },
     { canonical: 'ci_status', hyphen: true },
     { canonical: 'ci_log', hyphen: true, body: CI_LOG_BODY },

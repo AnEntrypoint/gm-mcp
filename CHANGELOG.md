@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.54 - codeinsight declares the body it accepts, and callers/callees/impact stop being undeclared
+
+`codeinsight` had no `body` row in the verb table, so `gm.describe("codeinsight")` answered `body_schema.declared: false` and a caller had no way to learn the selector it must send. The table gains `CODEINSIGHT_BODY`: `verb` (aliases `action`, `mode`) enumerating the seventeen actions the Rust handler accepts, plus `symbol`, `path`, `root`, `limit`, `kind`, `max_depth`, `direction`, `through_ambiguous` and `language` with the action each one belongs to. `callers`, `callees` and `impact` take the same schema, because they are the same `code_symbols::handle` body under a verb that preselects the action, so a lane no longer has to guess `{"symbol": ...}` for them either. `codesearch`'s declared `output` enum gains `content`, which the wasm now parses as `compact`. `BUNDLE_VERSION` moves to 0.2.54.
+
 ## 0.2.52 - release bridge settles its state once per run
 
 src/release-bridge.js stamps one timestamp per run and builds the pending signal into a single settled state value before the one write that closes the run. The on-disk keys and the checked-recently return are unchanged; a dry run with the interval set large returns checked-recently and keeps last_checked_ts and marker. `BUNDLE_VERSION` moves to 0.2.52.
