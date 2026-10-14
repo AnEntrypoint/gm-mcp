@@ -596,10 +596,8 @@ export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = su
     const entry = launchedEntryPath()
     const { stdio, fd } = childStdio()
     const child = spawn(process.execPath, [entry, 'http-supervise', '--port', String(port), '--interval', String(Math.round(intervalMs / 1000))], {
+        ...hiddenDetachedOptions({ stdio }),
         cwd: homedir(),
-        detached: true,
-        stdio,
-        windowsHide: true,
         env: { ...process.env, GM_MCP_HTTP_SUPERVISOR: '0' },
     })
     if (fd !== null) closeSync(fd)
