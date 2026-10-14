@@ -32,10 +32,10 @@ async function waitForHealth(timeoutMs = 20_000) {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
         const healthy = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) })
-            .then(async (r) => r.ok && (await r.json()).ok === true)
+            .then(async (response) => response.ok && (await response.json()).ok === true)
             .catch(() => false)
         if (healthy) return true
-        await new Promise((r) => setTimeout(r, 250))
+        await new Promise((resolve) => setTimeout(resolve, 250))
     }
     return false
 }

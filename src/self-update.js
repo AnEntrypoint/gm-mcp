@@ -88,11 +88,11 @@ export function compareVersions(left, right) {
             const parsed = Number.parseInt(part, 10)
             return Number.isFinite(parsed) ? parsed : 0
         })
-    const a = parts(left)
-    const b = parts(right)
-    for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
-        const leftPart = a[i] ?? 0
-        const rightPart = b[i] ?? 0
+    const leftParts = parts(left)
+    const rightParts = parts(right)
+    for (let i = 0; i < Math.max(leftParts.length, rightParts.length); i += 1) {
+        const leftPart = leftParts[i] ?? 0
+        const rightPart = rightParts[i] ?? 0
         if (leftPart > rightPart) return 1
         if (leftPart < rightPart) return -1
     }
