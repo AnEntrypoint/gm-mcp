@@ -1282,11 +1282,11 @@ function startRunnerWatchdog(root) {
 function sleep(ms, signal) {
     return new Promise((resolve, reject) => {
         const onAbort = () => {
-            clearTimeout(t)
+            clearTimeout(timer)
             signal?.removeEventListener('abort', onAbort)
             reject(new Error('aborted'))
         }
-        const t = setTimeout(() => {
+        const timer = setTimeout(() => {
             signal?.removeEventListener('abort', onAbort)
             resolve()
         }, ms)
@@ -1967,8 +1967,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     if (typeof session_id === 'string') session_id = session_id.trim()
     session_id = explicitBodySessionId(body) || session_id
     if (!session_id) return 'error: session_id required'
-    const n = resume_task || nextN(session_id)
-    const unsafeName = unsafeSpoolName('verb', verb) || unsafeSpoolName('session_id', session_id) || unsafeSpoolName('task', n)
+    const requestNumber = resume_task || nextN(session_id)
+    const unsafeName = unsafeSpoolName('verb', verb) || unsafeSpoolName('session_id', session_id) || unsafeSpoolName('task', requestNumber)
     if (unsafeName) return `error: ${unsafeName} -- nothing was written to the spool, so no dispatch was queued`
     const resolvedRoot = resolveDispatchRoot(cwd)
     if (resolvedRoot.error) {
@@ -2032,14 +2032,14 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     }
 
     let ownerTransport
-    const inPath = path.join(inDir, `${n}.txt`)
-    const outPath = path.join(outDir, `${verb}-${n}.json`)
+    const inPath = path.join(inDir, `${requestNumber}.txt`)
+    const outPath = path.join(outDir, `${verb}-${requestNumber}.json`)
 
     if (resume_task && !fs.existsSync(outPath) && !fs.existsSync(inPath) && !fs.existsSync(`${inPath}.inflight`)) {
         return toYaml({
-            error: `resume_task "${n}" names no dispatch in this project's spool -- nothing was dispatched`,
+            error: `resume_task "${requestNumber}" names no dispatch in this project's spool -- nothing was dispatched`,
             resumed: {
-                task: n,
+                task: requestNumber,
                 sent_no_body: true,
                 wrote_no_new_dispatch: true,
                 checked_out_file: outPath,
@@ -2066,9 +2066,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             ownerTransport = await plainTextOwnerTransport(root, session_id, signal)
             if (signal?.aborted) return toYaml({ error: 'aborted', owner_transport: ownerTransport, wrote_no_new_dispatch: true })
             const plaintext = withTimeoutMsPrefix(verb, raw_body, timeout_seconds)
-            publishSpoolRequest(inDir, inPath, n, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
+            publishSpoolRequest(inDir, inPath, requestNumber, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
         } else if (rawBodyText !== undefined) {
-            publishSpoolRequest(inDir, inPath, n, rawBodyText)
+            publishSpoolRequest(inDir, inPath, requestNumber, rawBodyText)
         } else {
             const fullBody = { ...normalizedBody, session_id }
             fullBody._agentplug_lane_wait_ms = timeoutMs
@@ -2076,7 +2076,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 const leases = leaseSessionsFor(root)
                 if (leases) fullBody._lease_sessions = leases.filter(lease => lease.live).map(({ session_id: leaseSession, pid }) => ({ session_id: leaseSession, pid }))
             }
-            publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody))
+            publishSpoolRequest(inDir, inPath, requestNumber, JSON.stringify(fullBody))
         }
     }
 
@@ -2111,7 +2111,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
             out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, out))
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
-            if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(n, landedAtMs, callStartedAtMs))
+            if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs))
             else out = withDispatchWait(out, Date.now() - callStartedAtMs)
             if (out && typeof out === 'object' && out.instruction_unchanged === true && bodyCarriesInstructionHash(normalizedBody)) {
                 out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
@@ -2134,8 +2134,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (rendered.length > replyCap) fs.writeFileSync(spillPath, rendered)
             return capReplyText(rendered, replyCap, spillPath, out, toYaml, spillNote)
         } catch (e) {
-            const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
-            return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
+            const failed = { error: `response file was not valid JSON: ${e.message}`, task: requestNumber, out_path: outPath }
+            return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs)) : failed)
         } finally {
             if (opened) fs.closeSync(opened.fd)
         }
@@ -2152,7 +2152,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     }
     const abortedReply = () => toYaml({
         error: 'aborted',
-        task: n,
+        task: requestNumber,
         in_path: inPath,
         out_path: outPath,
         request_withdrawn_before_claim: withdrawUnclaimedRequest(),
@@ -2183,7 +2183,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             ].filter(Boolean).join('; ')
             return toYaml({
                 timed_out: true,
-                task: n,
+                task: requestNumber,
                 poll_timeout_ms: timeoutMs,
                 requested_poll_timeout_ms: requestedPollTimeoutMs,
                 poll_timeout_capped: capped,
@@ -2197,7 +2197,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 in_path: inPath,
                 out_path: outPath,
                 final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
-                dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
+                dispatch_state: readSpoolDispatchState(spoolDir, verb, requestNumber),
                 dispatch_wait: readDispatchWaitRow(spoolDir, verb, n, outPath),
                 daemon: readDaemonLiveness(spoolDir),
             })
