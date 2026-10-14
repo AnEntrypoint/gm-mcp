@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.2.54 - codeinsight declares the body it accepts, and callers/callees/impact stop being undeclared
+## 0.2.55 - codeinsight declares the body it accepts, and callers/callees/impact stop being undeclared
 
-`codeinsight` had no `body` row in the verb table, so `gm.describe("codeinsight")` answered `body_schema.declared: false` and a caller had no way to learn the selector it must send. The table gains `CODEINSIGHT_BODY`: `verb` (aliases `action`, `mode`) enumerating the seventeen actions the Rust handler accepts, plus `symbol`, `path`, `root`, `limit`, `kind`, `max_depth`, `direction`, `through_ambiguous` and `language` with the action each one belongs to. `callers`, `callees` and `impact` take the same schema, because they are the same `code_symbols::handle` body under a verb that preselects the action, so a lane no longer has to guess `{"symbol": ...}` for them either. `codesearch`'s declared `output` enum gains `content`, which the wasm now parses as `compact`. `BUNDLE_VERSION` moves to 0.2.54.
+`codeinsight` had no `body` row in the verb table, so `gm.describe("codeinsight")` answered `body_schema.declared: false` and a caller had no way to learn the selector it must send. The table gains `CODEINSIGHT_BODY`: `verb` (aliases `action`, `mode`) enumerating the seventeen actions the Rust handler accepts, plus `symbol`, `path`, `root`, `limit`, `kind`, `max_depth`, `direction`, `through_ambiguous` and `language` with the action each one belongs to. `callers`, `callees` and `impact` take the same schema, because they are the same `code_symbols::handle` body under a verb that preselects the action, so a lane no longer has to guess `{"symbol": ...}` for them either. `codesearch`'s declared `output` enum gains `content`, which the wasm now parses as `compact`. `BUNDLE_VERSION` moves to 0.2.55.
 
 ## 0.2.52 - release bridge settles its state once per run
 
