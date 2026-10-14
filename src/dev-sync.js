@@ -5,6 +5,7 @@ import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runGit } from './git-adapter.js'
+import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 
 const SYNC_INTERVAL_MS = 10 * 60_000
@@ -125,9 +126,7 @@ export function maybeStartDevSync(root) {
     }
     const child = spawn(process.execPath, [serverEntry(), 'dev-sync', '--root', root], {
         cwd: homedir(),
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
+        ...hiddenDetachedOptions(),
     })
     child.on('error', (error) => appendDiagnostic('dev-sync-spawn-error', { root, error: describeError(error) }))
     child.unref()

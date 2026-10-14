@@ -9,6 +9,7 @@ import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
+import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { tableRow } from './verb-table.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 
@@ -1232,9 +1233,7 @@ function ensureSpoolRunnerRunning(root) {
         child = spawn(RUNNER_PATH, ['spool'], {
             cwd: root,
             env: { ...process.env, GM_TOOLS_DIR: RUNNER_DIR, AGENTPLUG_HOME: AGENTPLUG_DIR, CLAUDE_PROJECT_DIR: root, AGENTPLUG_LEASE_PID: String(process.pid) },
-            detached: true,
-            stdio: 'ignore',
-            windowsHide: true,
+            ...hiddenDetachedOptions(),
         })
     } catch {
         try {
