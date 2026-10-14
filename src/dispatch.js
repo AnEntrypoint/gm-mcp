@@ -392,7 +392,7 @@ function publishSpoolRequest(inDir, inPath, task, body) {
     const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.tmp`)
     try {
         fs.writeFileSync(tempPath, body, 'utf8')
-        fs.renameSync(tempPath, inPath)
+        fs.linkSync(tempPath, inPath)
     } finally {
         if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
     }
