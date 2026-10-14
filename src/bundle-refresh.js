@@ -8,6 +8,7 @@ import { DEFAULT_HOST, DEFAULT_PORT } from './http-transport.js'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { launchedEntryPath, recordSingletonState, waitForHealth } from './singleton.js'
 import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
+import { hiddenDetachedOptions } from './hidden-spawn.js'
 
 const HANDOVER_READY_TIMEOUT_MS = 30_000
 export const HANDOVER_LISTEN_RETRY_MS = 60_000
@@ -308,10 +309,8 @@ export async function handOverToRefreshedBundle({ host = DEFAULT_HOST, port = DE
     let child = null
     try {
         child = spawn(process.execPath, [entry, '--http', '--port', String(port), '--host', String(host)], {
+            ...hiddenDetachedOptions({ stdio }),
             cwd: homedir(),
-            detached: true,
-            stdio,
-            windowsHide: true,
             env: { ...process.env, GM_MCP_TRANSPORT: 'http', GM_MCP_NO_HTTP_SINGLETON: '1', [HANDOVER_ENV]: '1' },
         })
     } catch (error) {

@@ -20,6 +20,10 @@ export function inflightDispatchCount() {
     return inflightDispatches
 }
 
+export function dispatchVerdict() {
+    return { busy: inflightDispatches > 0, count: inflightDispatches }
+}
+
 function projectRootFor(dir) {
     const resolved = path.resolve(dir)
     return gitToplevel(resolved) || resolved
