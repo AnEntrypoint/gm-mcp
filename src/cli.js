@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { main, flagValue } from './index.js'
-import { gmDispatch } from './dispatch.js'
+import { gmDispatch, replyEnvelopeSelfCheck } from './dispatch.js'
 import { runDevSync } from './dev-sync.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
@@ -209,6 +209,11 @@ const COMMANDS = {
         console.log(JSON.stringify(report, null, 2))
         return 0
     },
+    'self-check': () => {
+        const envelopes = replyEnvelopeSelfCheck()
+        console.log(JSON.stringify(envelopes, null, 2))
+        return Object.values(envelopes).some((reply) => reply.diagnostics_failed !== undefined) ? 1 : 0
+    },
     'ensure-http': async () => {
         const port = defaultHttpPort()
         await sweepHttpInstances()
@@ -297,6 +302,7 @@ usage:
   gm-mcp-server.js dispatch <verb> [--body <json>] [--raw <text>] [--cwd <dir>] [--no-ignore] [--help]
                                    run a gm dispatch from the shell and print its reply,
                                    with no MCP client involved
+  gm-mcp-server.js self-check        build every reply a dispatch can end on and print them; exits non-zero when one fell back
   gm-mcp-server.js reap [--apply] [--root <dir>]... [--json]
                                    report leaked processes and leases; without --apply it only
                                    prints what it WOULD retire, and it never signals a pid it
