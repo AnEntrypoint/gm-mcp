@@ -70,12 +70,12 @@ function clearBomMisclassifiedSideloadMarker(dir) {
     appendDiagnostic('guest-sideload-marker-cleared', { file: markerPath, installed_marker: marker.installed_marker })
 }
 function writeAtomic(file, text) {
-    const temp = `${file}.${process.pid}.${Date.now()}.tmp`
+    const tempPath = `${file}.${process.pid}.${Date.now()}.tmp`
     try {
-        writeFileSync(temp, text, { flag: 'wx' })
-        renameSync(temp, file)
+        writeFileSync(tempPath, text, { flag: 'wx' })
+        renameSync(tempPath, file)
     } catch (error) {
-        rmSync(temp, { force: true })
+        rmSync(tempPath, { force: true })
         throw error
     }
 }
@@ -206,7 +206,7 @@ export async function probeRunner(file) {
     }
 }
 
-function swapIn(target, candidate, backupLabel) {
+function swapIn(target, tempPath, backupLabel) {
     try {
         let backup = null
         if (existsSync(target)) {
@@ -215,14 +215,14 @@ function swapIn(target, candidate, backupLabel) {
             renameSync(target, backup)
         }
         try {
-            renameSync(candidate, target)
+            renameSync(tempPath, target)
         } catch (error) {
             if (backup) renameSync(backup, target)
             throw error
         }
         return backup
     } catch (error) {
-        rmSync(candidate, { force: true })
+        rmSync(tempPath, { force: true })
         throw error
     }
 }
@@ -261,18 +261,18 @@ async function reconcileRunner(release) {
     }
 
     const { bytes, sha256: newSha } = await fetchVerified(release, asset)
-    const candidate = path.join(toolsDir(), `${runnerFileName()}.bridge-${process.pid}-${Date.now()}.new`)
-    writeFileSync(candidate, bytes, { flag: 'wx', mode: 0o755 })
+    const tempPath = path.join(toolsDir(), `${runnerFileName()}.bridge-${process.pid}-${Date.now()}.new`)
+    writeFileSync(tempPath, bytes, { flag: 'wx', mode: 0o755 })
     try {
-        const staged = await probeRunner(candidate)
+        const staged = await probeRunner(tempPath)
         if (!staged || staged.version !== release.version || !staged.release_build) {
             throw new Error(`staged runner reports ${JSON.stringify(staged)}, expected release build ${release.version}`)
         }
     } catch (error) {
-        rmSync(candidate, { force: true })
+        rmSync(tempPath, { force: true })
         throw error
     }
-    const backup = swapIn(runnerPath, candidate, `bak-${installed.version}`)
+    const backup = swapIn(runnerPath, tempPath, `bak-${installed.version}`)
     recordRunnerSwap(release.version, newSha)
     return { outcome: 'swapped', from: installed.version, to: release.version, sha256: newSha, previous_sha256: installedSha, backup }
 }
@@ -299,9 +299,9 @@ async function reconcileGuest(release) {
     const { bytes, sha256: newSha } = await fetchVerified(release, GUEST_ASSET)
     if (!WASM_MAGIC.every((byte, index) => bytes[index] === byte)) throw new Error(`${GUEST_ASSET} is not a wasm module`)
     mkdirSync(dir, { recursive: true })
-    const candidate = `${wasmPath}.bridge-${process.pid}-${Date.now()}.tmp`
-    writeFileSync(candidate, bytes, { flag: 'wx' })
-    const backup = swapIn(wasmPath, candidate, `bak-${recorded ?? 'unversioned'}`)
+    const tempPath = `${wasmPath}.bridge-${process.pid}-${Date.now()}.tmp`
+    writeFileSync(tempPath, bytes, { flag: 'wx' })
+    const backup = swapIn(wasmPath, tempPath, `bak-${recorded ?? 'unversioned'}`)
     writeAtomic(versionPath, release.version)
     recordGuestBuild(dir, release, newSha, bytes.length)
     return { outcome: 'swapped', from: recorded, to: release.version, sha256: newSha, backup }
