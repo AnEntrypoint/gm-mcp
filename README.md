@@ -51,7 +51,7 @@ connects, at most once per hour. On a sha256 mismatch it validates the fresh
 bundle (size, shebang, `node --check`), keeps the old one as
 `gm-mcp-server.mjs.prev`, atomically swaps the new one in, and prints one
 stderr line (`deployed bundle was stale -- refreshed <old> -> <new> ...`); the
-refreshed tool schema is served from the next connect. A failed check keeps the
+refreshed tool schema is served from the next connect, or sooner when the transport hands over in-process (see gm-mcp/AGENTS.md "Bundle drift and handover"). A failed check keeps the
 deployed copy and prints one line. Env: `GM_MCP_SELF_UPDATE=0` disables,
 `GM_MCP_BUNDLE_URL` (http(s) or `file:`) overrides the source,
 `GM_MCP_SELF_UPDATE_INTERVAL_MS` overrides the throttle. A bundle from before
