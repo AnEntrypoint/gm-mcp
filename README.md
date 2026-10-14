@@ -9,7 +9,7 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
 - Writes `.gm/exec-spool/in/<verb>/<N>.txt`
 - Polls `.gm/exec-spool/out/<verb>-<N>.json` until it appears (or a timeout elapses)
 - Returns the response as flat YAML text, auto-cleaned for readability:
-  - opaque internal ids (`dispatch_id`, `request_fingerprint`) stripped
+  - `request_fingerprint` stripped; `dispatch_id` kept and printed as the first line of every spool reply (see "Dispatch id")
   - the redundant `response`/`data` nesting levels flattened to the top (unless a field name would collide)
   - long text fields (e.g. `instruction`'s full phase prose) truncated with a pointer naming the on-disk file to read for the full text -- the plain-text-body verbs get a far larger budget so their `stdout` comes back inline (see "Long text inline limits")
   - hit-array ranking internals (`cos`/`recency` in `recall_hits`/`bm25_hits`/`vector_hits`/`commits`) dropped, `score` retained as ranked evidence
@@ -80,6 +80,39 @@ Every refusal goes to stderr with its reason (`refusing deployed bundle
 self-update (<code>) -- <reason>`), so it lands in the daemon log instead of
 being swallowed by the background check. The `.prev` backup and the `node
 --check` validation of a candidate are unchanged.
+
+### Release bridge, dev copies and sandboxes
+
+Only the deployed copy (`<GM_TOOLS_DIR>/gm-mcp-server.mjs`, default `~/.gm-tools`) may change what the
+machine runs. Any other copy -- a repo checkout, a scratch build, a test run -- is a dev copy (a server's
+`self-update-check` line says `not-deployed-copy`). It can dispatch, but it never replaces the installed
+`agentplug-runner` or `gm` guest, never signals the daemon, and never seeds, retires or supervises the
+shared HTTP server: each of those lands on every session of the machine, not on the run that caused it.
+`GM_MCP_HTTP_SINGLETON=1` names a dev copy as the server to manage, and `GM_MCP_DEV_SYNC=1` lets one run dev
+sync.
+
+The release bridge (`src/release-bridge.js`) upgrades the installed runner and guest from the latest
+`AnEntrypoint/agentplug-bin` and `plugkit-bin` releases. It is off until asked:
+
+- `GM_MCP_RELEASE_BRIDGE=1` runs it at server start (at most every 10 minutes). Unset, empty or `0`: it does
+  nothing, with no network call and no file written.
+- `gm-mcp release-bridge` prints what it would change and writes nothing; `gm-mcp release-bridge --install`
+  replaces the runner and guest now. A dev copy answers `outcome: disabled, code: not-deployed-copy` to both
+  the env var and `--install`.
+- Stopping the daemon so the new build loads is a second opt-in: `--signal`, or
+  `GM_MCP_RELEASE_BRIDGE_SIGNAL=1`. Without it the reply says `signal.outcome: not-signalled` and the build
+  loads when the daemon next restarts.
+- It never installs a runner build the runner itself refused. The installed runner's own updater (0.1.211)
+  demanded a signature on top of the checksum and recorded its refusal in `daemon-status.json` (`update rejected:
+  agentplug-runner-macos-arm64 0.1.323 -- no signature available`); the bridge only has the `.sha256` sidecar, which proves the bytes match
+  what was published, not who published them. A version listed there is `runner-rejected-this-build`.
+
+To witness any of this without touching the machine, run the command in a throwaway home:
+`node scripts/sandboxed.mjs node bin/gm-mcp-server.js dispatch health` points `HOME`, `GM_TOOLS_DIR` and
+`AGENTPLUG_HOME` at a temp dir that holds no runner and switches the install-touching background features off;
+`npm test` runs every test file that way. To exercise the bridge itself, copy the bundle to
+`<sandbox>/.gm-tools/gm-mcp-server.mjs` and a runner beside it, and run that copy with the sandbox env: it is
+the deployed copy of that sandbox.
 
 ### Picking up a newer bundle without a reconnect
 
@@ -178,8 +211,32 @@ for the heartbeat to come back, and only then answers
 restart command -- and writes no ticket, so nothing is left queued behind a
 daemon that will never claim it. A project with no `.status.json` at all is
 the registration path rather than a dead daemon and still dispatches, as does
-one mid-handoff (`daemonBootGraceActive`, `runner_update_in_progress`). Opt
-out with `GM_MCP_DAEMON_PREFLIGHT=0`.
+one mid-handoff (`daemonBootGraceActive`, `runner_update_in_progress`) and
+one whose daemon-guard is restarting the daemon (`restarting: true` in
+`.status.json`, refreshed every guard poll; the `daemon` block reports
+`restarting`, `restart_reason` and `restart_attempt`, and a poll that hits its
+deadline inside the window keeps waiting, 15 s at a time, up to the ceiling).
+Opt out with `GM_MCP_DAEMON_PREFLIGHT=0`.
+
+A spool is only swept at its project root. The daemon registers every path as its nearest ancestor holding a `.git`
+(a file, or a directory with `HEAD`; `agentplug_host::project_root`), else the path itself, and sweeps that root's
+`.gm/exec-spool` and no other. A ticket written into `<project>/ui/.gm/exec-spool` is never claimed: it waits out the
+whole poll budget and stays behind. `git rev-parse` gives the same root while it works and nothing when it does not (no
+git on PATH, a timeout), so `sweptRootFor` applies the rule from the filesystem, and a dispatch whose `cwd` sits inside
+a project runs in that project. The reply then opens with `resolved_cwd`, `requested_cwd` and `cwd_resolution`
+(which also reads the nested spool's own `.status.json`: a heartbeat 9.8 days old from a pid that is gone is the mark of
+a spool no daemon sweeps). `GM_MCP_SWEPT_ROOT=0` turns the resolution off.
+
+A request nobody serves is taken back, not left queued. At a poll timeout, or an abort, the in-file this server wrote is
+removed -- by a rename that excludes the daemon's own claim rename, so exactly one of them wins -- when the daemon is not
+running, or when a daemon is running but never swept this spool during the whole wait (the spool's own heartbeat
+predates the call and the pid that wrote it is gone). The reply says `request_withdrawn_before_claim: true` and
+`resume_task_supported: false`: dispatch again. A live daemon that is merely slow keeps the ticket and `resume_task`.
+Two liveness readings that used to hide a dead daemon are fixed: a zombie (a daemon that exited under a guard that never
+reaped it) answers `kill(pid, 0)`, so `pidAlive` also asks `ps -o stat=` (`src/pid-state.js`); and a
+`runner_update_in_progress` flag only counts beside a heartbeat under ten minutes old (a status frozen mid-update read as
+an update in progress forever). The `daemon-not-running` refusal now carries `candidate_roots` (the resolved and the
+requested root with heartbeat age, pid, pid state and the start command).
 
 ## Transport: stdio (default) and streamable HTTP
 
@@ -397,6 +454,21 @@ All count rows, totals and scan metadata remain unchanged. The original out-file
 and `full_response: true` retain the repeated array; incomplete, failed and
 nonmatching replies keep it.
 
+### Dispatch id
+
+Every reply that comes from a spool dispatch, ok or failed, opens with `dispatch_id: <id>`. It is
+taken from the raw out-file after every other rewrite, because an exec or search reply keeps its
+`data:` block above the id, a rebuilt `fs_read` range reply drops it, and the 24000-char reply cap or
+`max_chars` cut it off (5 of 495 real replies lost it that way). The id is the run's key in
+`.gm/exec-spool/.dispatch-ledger.json`, so `gm.prd_resolve({id, witness_evidence, witness_dispatch_id:
+"<id>"})` (alias `dispatch_id`) binds a PRD row to that run with no out-file reading. `gm_result` on a
+spool `.json` names it too; `full_response: true` keeps the native layout. A daemon notice for a
+dispatch that never ran (`dispatch_orphaned`, `session_id_task_mismatch`) has no id and gets none.
+
+Replies render as YAML with no line folding (`lineWidth: -1`). Width 100 turned 289 of 534 real replies
+into `>-` scalars: tool output re-wrapped at column 100 with line breaks turned into blank lines, 51 of
+60 truncation pointers split across lines, and 2.5% more bytes.
+
 ### Long text inline limits
 
 Two env vars set how much of a long text field comes back inline before it is
@@ -557,3 +629,15 @@ Pass that `task` back as `resume_task` to re-poll the same dispatch:
 - `resume_task_supported: true` on a `timed_out` response is the falsifiable
   signal that this server build honours the argument; older builds omit the
   field and silently drop it
+### A reaped dispatch is retried once, for read-only verbs
+
+A claim reaped by the daemon's orphan sweep comes back as `error_code: dispatch_orphaned` (a respawn or runner update
+took the claim, `sweeping_pid` names the sweeper). For `grep`, `codesearch`, `codeinsight`, `git_status`, `git_log`,
+`git_diff`, `git_show`, `phase-status`, `instruction`, `recall` and `fetch` this server re-dispatches once under a
+new task id and returns that reply, headed by `retried_after: dispatch_orphaned` and the `orphaned_task`: running a
+read twice is harmless. Every other verb (`git_commit`, `git_push`, `git_reword`, `exec_js`, `prd-*`, `mutable-*`,
+`transition`, `memorize-*`, ...) keeps the explicit orphan answer, because the first attempt may already have applied
+its work. A retry that is orphaned too returns that answer, still marked `retried_after`; a retry the poll ceiling has no
+room for says `orphan_retry_skipped`; a `resume_task` poll has no body to resend and never retries.
+`GM_MCP_ORPHAN_RETRY=0` turns it off.
+

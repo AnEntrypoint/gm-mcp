@@ -5,6 +5,7 @@ import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runGit } from './git-adapter.js'
+import { devCopyReason, explicitlyOn } from './install-guard.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 
 const SYNC_INTERVAL_MS = 10 * 60_000
@@ -109,6 +110,7 @@ function serverEntry() {
 
 export function maybeStartDevSync(root) {
     if ((process.env.GM_MCP_DEV_SYNC || '').trim() === '0') return false
+    if (devCopyReason() !== null && !explicitlyOn('GM_MCP_DEV_SYNC')) return false
     if (isTemporaryProjectRoot(root) || !existsSync(path.join(root, '.git'))) return false
     const now = Date.now()
     const stampText = readStampText()

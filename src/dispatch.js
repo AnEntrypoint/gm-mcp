@@ -1,6 +1,7 @@
 import { agentplugDir, spoolDirOf, toolsDir } from './paths.js'
 import { createHash } from 'node:crypto'
 import { spoolFs as fs, spoolSpawn as spawn } from './spool-port.js'
+import { pidState } from './pid-state.js'
 import os from 'node:os'
 import path from 'node:path'
 import * as yaml from 'js-yaml'
@@ -10,7 +11,11 @@ import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
 import { tableRow } from './verb-table.js'
-import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withDispatchIdFirst, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+
+function renderYaml(value) {
+    return yaml.dump(value, { lineWidth: -1 })
+}
 
 let inflightDispatches = 0
 
@@ -25,7 +30,77 @@ function projectRootFor(dir) {
 
 const DEFAULT_CWD_ENV_VARS = ['GM_MCP_DEFAULT_CWD', 'CLAUDE_PROJECT_DIR']
 
+// The daemon maps every registered path through agentplug_host::project_root (crates/agentplug-host/src/
+// project_root.rs): canonicalize, then the nearest ancestor holding a .git file or a .git/HEAD, else the path
+// itself. It sweeps that root's .gm/exec-spool and no other, so a request written into a spool anywhere else is
+// never claimed: it waits out the whole poll budget and leaves its in-file behind. `git rev-parse` agrees
+// with that rule when it works and says nothing when it fails (no git on PATH, a timeout, safe.directory),
+// so the rule is mirrored here from the filesystem.
+function hasGitMarker(dir) {
+    const marker = path.join(dir, '.git')
+    try {
+        if (fs.statSync(marker).isFile()) return true
+    } catch {
+        return false
+    }
+    return fs.existsSync(path.join(marker, 'HEAD'))
+}
+
+export function sweptRootFor(dir) {
+    let canonical
+    try {
+        canonical = fs.realpathSync(path.resolve(dir))
+    } catch {
+        canonical = path.resolve(dir)
+    }
+    for (let at = canonical; ; at = path.dirname(at)) {
+        if (hasGitMarker(at)) return at
+        if (path.dirname(at) === at) return canonical
+    }
+}
+
+const foldCase = (p) => (process.platform === 'linux' ? p : p.toLowerCase())
+
+function nestedSpoolEvidence(requestedRoot) {
+    const status = readJsonFile(path.join(spoolDirOf(requestedRoot), '.status.json'))
+    if (!status) return null
+    const pid = Number(status.pid) || null
+    return { heartbeat_age_ms: timestampAgeMs(status.ts), pid, pid_state: pid === null ? null : pidState(pid) }
+}
+
+function sweptRootResolution(root) {
+    let canonical
+    try {
+        canonical = fs.realpathSync(root)
+    } catch {
+        canonical = path.resolve(root)
+    }
+    const swept = sweptRootFor(root)
+    if (foldCase(swept) === foldCase(canonical)) return null
+    return { root: swept, requested_root: root, nested_spool: nestedSpoolEvidence(root) }
+}
+
+function cwdResolutionFields(resolved) {
+    if (!resolved.requested_root) return {}
+    const evidence = resolved.nested_spool
+    const stale = evidence
+        ? ` That spool's own .status.json is ${evidence.heartbeat_age_ms} ms old (recorded pid ${evidence.pid}, ${evidence.pid_state}): the mark of a spool no daemon sweeps.`
+        : ''
+    return {
+        resolved_cwd: resolved.root,
+        requested_cwd: resolved.requested_root,
+        cwd_resolution: `${resolved.requested_root} sits inside the project ${resolved.root}: the daemon registers every path as its nearest ancestor holding a .git, so it sweeps ${resolved.root}/.gm/exec-spool and never ${resolved.requested_root}/.gm/exec-spool, where a request would wait unclaimed. This dispatch ran in ${resolved.root}.${stale}`,
+    }
+}
+
 function resolveDispatchRoot(cwd) {
+    const requested = resolveRequestedRoot(cwd)
+    if (requested.error || process.env.GM_MCP_SWEPT_ROOT === '0') return requested
+    const swept = sweptRootResolution(requested.root)
+    return swept ? { ...requested, ...swept } : requested
+}
+
+function resolveRequestedRoot(cwd) {
     if (typeof cwd === 'string' && cwd.trim()) return { root: projectRootFor(cwd.trim()), root_source: 'cwd' }
     for (const name of DEFAULT_CWD_ENV_VARS) {
         const value = process.env[name]
@@ -299,10 +374,13 @@ function largestMatchesKeptWithinBudget(out, holder, budget, toYaml) {
     return low
 }
 
+const DISPATCH_ID_LEAD_LINE = /^dispatch_id: [^\n]*\n/
+
 function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
     if (text.length <= maxChars) return text
     fs.writeFileSync(spillPath, text)
-    const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
+    const leadLength = DISPATCH_ID_LEAD_LINE.exec(text)?.[0].length ?? 0
+    const budget = Math.max(leadLength, maxChars - REPLY_NOTICE_RESERVE_CHARS)
     const holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
     let head = text
     let matchesTotal
@@ -322,7 +400,7 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
         notice += `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n`
         notice += `matches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
     }
-    const room = Math.max(0, maxChars - notice.length)
+    const room = Math.max(leadLength, maxChars - notice.length)
     if (head.length > room) {
         const cut = head.slice(0, room)
         const lastBreak = cut.lastIndexOf('\n')
@@ -383,6 +461,64 @@ export function unsafeSpoolName(role, value) {
     const found = UNEXPANDED_INTERPOLATION.exec(value)
     if (!found) return null
     return `${role} ${JSON.stringify(value)} still carries the unexpanded interpolation ${JSON.stringify(found[0])} -- the spool ABI is in/<verb>/<session_id>-<N>.txt, so this would land as a literal path component that no daemon ever claims; pass the expanded value`
+}
+
+// In-files this process wrote and has not seen claimed or withdrawn. A withdrawal removes only these, so a
+// resume_task typo or another session's ticket is never touched.
+const publishedInPaths = new Set()
+const PUBLISHED_IN_PATHS_MAX = 256
+
+function rememberPublishedRequest(inPath) {
+    if (publishedInPaths.size >= PUBLISHED_IN_PATHS_MAX) {
+        for (const known of publishedInPaths) if (!fs.existsSync(known)) publishedInPaths.delete(known)
+        if (publishedInPaths.size >= PUBLISHED_IN_PATHS_MAX) publishedInPaths.delete(publishedInPaths.values().next().value)
+    }
+    publishedInPaths.add(inPath)
+}
+
+// Takes the in-file back unless the daemon claimed it first. The claim is a rename to <in-file>.inflight, so
+// the move aside here and the claim exclude each other: exactly one of them finds the file.
+export function withdrawPublishedRequest(inPath) {
+    if (!publishedInPaths.has(inPath)) return false
+    if (fs.existsSync(`${inPath}.inflight`)) return false
+    const aside = path.join(path.dirname(inPath), `.${path.basename(inPath, '.txt')}.${process.pid}.${Date.now()}.withdrawn`)
+    try {
+        fs.renameSync(inPath, aside)
+    } catch {
+        return false
+    }
+    try {
+        fs.unlinkSync(aside)
+    } catch {
+    }
+    publishedInPaths.delete(inPath)
+    return true
+}
+
+const ORPHAN_RETRY_READ_ONLY_VERBS = new Set(['grep', 'codesearch', 'codeinsight', 'git_status', 'git_log', 'git_diff', 'git_show', 'phase_status', 'instruction', 'recall', 'fetch'])
+const ORPHAN_RETRY_MIN_BUDGET_MS = 5000
+
+export function orphanRetryVerb(verb) {
+    return ORPHAN_RETRY_READ_ONLY_VERBS.has(String(verb).replace(/-/g, '_'))
+}
+
+export function isOrphanedNotice(reply) {
+    return Boolean(reply) && typeof reply === 'object' && (reply.error_code === 'dispatch_orphaned' || reply.data?.error_code === 'dispatch_orphaned')
+}
+
+function withLeadFields(out, fields) {
+    if (!out || typeof out !== 'object' || Array.isArray(out) || Object.keys(fields).length === 0) return out
+    return { ...fields, ...out }
+}
+
+function candidateRoots(root, requestedRoot) {
+    const rows = []
+    for (const [role, dir] of [['resolved', root], ...(requestedRoot ? [['requested', requestedRoot]] : [])]) {
+        const status = readJsonFile(path.join(spoolDirOf(dir), '.status.json'))
+        const pid = status ? Number(status.pid) || null : null
+        rows.push({ role, root: dir, has_status: Boolean(status), heartbeat_age_ms: timestampAgeMs(status?.ts), pid, pid_state: pid === null ? null : pidState(pid), start_runner: daemonRestartCommand(dir) })
+    }
+    return rows
 }
 
 function publishSpoolRequest(inDir, inPath, task, body) {
@@ -791,6 +927,14 @@ function parseResultDocument(text) {
     }
 }
 
+function spoolJsonDispatchId(text) {
+    try {
+        return JSON.parse(text)?.dispatch_id
+    } catch {
+        return undefined
+    }
+}
+
 function wholeNumber(value) {
     if (typeof value === 'number') return Number.isInteger(value) ? value : undefined
     if (typeof value === 'string' && /^[0-9]+$/.test(value.trim())) return Number(value.trim())
@@ -800,7 +944,7 @@ function wholeNumber(value) {
 export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_DEFAULT_CHARACTERS, cwd, root, projectPath }) {
     const namedRoot = [cwd, root, projectPath].find(value => typeof value === 'string' && value.trim())
     const rootDir = namedRoot ? path.resolve(namedRoot.trim()) : path.resolve(process.cwd())
-    const toYaml = value => yaml.dump(value, { lineWidth: 100 })
+    const toYaml = renderYaml
     if (typeof result_file !== 'string' || !result_file) return toYaml({ error: 'result_file required' })
     if (field !== undefined && (typeof field !== 'string' || !field)) return toYaml({ error: 'field must be a non-empty string when provided' })
     const pageOffset = wholeNumber(offset)
@@ -814,17 +958,21 @@ export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_
             let totalCharacters
             let nextOffset
             let resolvedField
+            let dispatchId
             if (field) {
-                const selected = resultField(parseResultDocument(readAllBounded(fd, size)), field)
+                const document = parseResultDocument(readAllBounded(fd, size))
+                const selected = resultField(document, field)
+                dispatchId = document?.dispatch_id
                 content = JSON.stringify(selected.value, null, 2)
                 resolvedField = selected.path
                 totalCharacters = content.length
                 nextOffset = pageOffset + pageLimit < totalCharacters ? pageOffset + pageLimit : undefined
             } else {
                 ({ content, totalCharacters, nextOffset } = readUtf8Page(fd, size, pageOffset, pageLimit))
+                if (file.endsWith('.json')) dispatchId = spoolJsonDispatchId(readAllBounded(fd, size))
             }
             const page = field ? content.slice(pageOffset, pageOffset + pageLimit) : content
-            return toYaml({
+            return toYaml(withDispatchIdFirst({
                 result_file: file,
                 ...(resolvedField ? { field: resolvedField } : {}),
                 offset: pageOffset,
@@ -832,7 +980,7 @@ export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_
                 total_characters: totalCharacters,
                 ...(nextOffset === undefined ? { complete: true } : { next_offset: nextOffset }),
                 content: page,
-            })
+            }, dispatchId))
         } finally {
             fs.closeSync(fd)
         }
@@ -936,14 +1084,9 @@ function readJsonFile(filePath) {
 }
 
 export function pidAlive(pid) {
-    const value = Number(pid)
-    if (!Number.isInteger(value) || value <= 0) return null
-    try {
-        process.kill(value, 0)
-        return true
-    } catch (error) {
-        return error?.code === 'EPERM' ? true : false
-    }
+    const state = pidState(pid)
+    if (state === 'invalid') return null
+    return state === 'running'
 }
 
 function globalDaemonPid() {
@@ -1216,6 +1359,7 @@ function ensureSpoolRunnerRunning(root) {
         consecutiveFailedEnsuresByRoot.delete(root)
         return
     }
+    if (readRestartMarker(spoolDirOf(root))) return
     const now = Date.now()
     if (runnerEnsureInFlight(root, now)) return
     if (now - (lastEnsuredAtByRoot.get(root) || 0) < ENSURE_INTERVAL_MS) return
@@ -1447,6 +1591,17 @@ function isFreshDaemonTimestamp(timestamp, now = Date.now()) {
     return age !== null && age >= -DAEMON_TIMESTAMP_FUTURE_SKEW_MS && age < DAEMON_HEARTBEAT_STALE_MS
 }
 
+// runner_update_in_progress is written while the daemon sweeps, so it only means something beside a recent
+// heartbeat: a status file frozen mid-update (a stale nested spool read 9.8 days old, flag still true) would
+// otherwise switch the dead-daemon pre-flight off for that spool for good.
+const RUNNER_UPDATE_FRESH_MS = 600_000
+
+function runnerUpdateInProgress(status, now = Date.now()) {
+    if (status?.runner_update_in_progress !== true) return false
+    const age = timestampAgeMs(status.ts, now)
+    return age !== null && age < RUNNER_UPDATE_FRESH_MS
+}
+
 function projectRootOfSpool(spoolDir) {
     return path.resolve(spoolDir, '..', '..')
 }
@@ -1454,6 +1609,37 @@ function projectRootOfSpool(spoolDir) {
 function heartbeatAgeMs(spoolDir) {
     const status = readJsonFile(path.join(spoolDir, '.status.json'))
     return timestampAgeMs(status?.ts)
+}
+
+const RESTART_MARKER_FRESH_MS = 15_000
+const RESTART_WINDOW_MAX_MS = 120_000
+const RESTART_POLL_EXTENSION_MS = 15_000
+
+export function readRestartMarker(spoolDir) {
+    const now = Date.now()
+    for (const status of [readJsonFile(path.join(spoolDir, '.status.json')), readJsonFile(GLOBAL_DAEMON_STATUS_PATH)]) {
+        if (!status || status.restarting !== true) continue
+        const markerAge = timestampAgeMs(status.restart_ts, now)
+        if (markerAge === null || markerAge < -DAEMON_TIMESTAMP_FUTURE_SKEW_MS || markerAge >= RESTART_MARKER_FRESH_MS) continue
+        const forMs = timestampAgeMs(status.restart_started_ts, now)
+        if (forMs !== null && forMs >= RESTART_WINDOW_MAX_MS) continue
+        return {
+            restarting: true,
+            restart_reason: status.restart_reason ?? null,
+            restart_attempt: status.restart_attempt ?? null,
+            restart_max_attempts: status.restart_max_attempts ?? null,
+            previous_pid: status.previous_pid ?? null,
+            restarting_for_ms: forMs,
+            restart_marker_age_ms: markerAge,
+            restart_marker_fresh_under_ms: RESTART_MARKER_FRESH_MS,
+        }
+    }
+    return null
+}
+
+function restartingNote(restart) {
+    const attempt = restart.restart_attempt !== null && restart.restart_max_attempts !== null ? ` attempt ${restart.restart_attempt}/${restart.restart_max_attempts},` : ''
+    return `daemon is restarting (${restart.restart_reason ?? 'unknown reason'},${attempt} ${restart.restarting_for_ms ?? '?'} ms into the window, marker refreshed ${restart.restart_marker_age_ms} ms ago by the daemon-guard): the dead daemon was reaped and a replacement is coming up, so this is not a dead daemon -- a dispatch written now stays queued and is claimed once the new heartbeat lands; keep polling with resume_task instead of restarting anything`
 }
 
 function daemonRestartCommand(root) {
@@ -1504,7 +1690,7 @@ export function readDaemonLiveness(spoolDir) {
         ? runnerBinaryMissing()
             ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed`
             : pidAliveFlag === false
-                ? `the daemon process that last swept this project (pid ${pid}) is gone -- the daemon recycles itself on idle/memory pressure and on a runner version handoff, and is restarted on demand; this call already asked for a replacement, so a dispatch submitted now waits for its cold start (wasm compile, tens of seconds) instead of for a queue`
+                ? `the daemon process that last swept this project (pid ${pid}) ${pidState(pid) === 'zombie' ? 'has exited but was never reaped (a zombie still answers kill -0, so it was once read as alive)' : 'is gone'} -- the daemon recycles itself on idle/memory pressure and on a runner version handoff, and is restarted on demand; this call already asked for a replacement, so a dispatch submitted now waits for its cold start (wasm compile, tens of seconds) instead of for a queue`
                 : `daemon heartbeat is ${heartbeatAgeMs} ms stale (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) -- it is down, hung, or has not registered this project; its own log is ${GLOBAL_DAEMON_LOG_PATH} (this project's spool log is ${path.join(spoolDir, '.watcher.log')}) and it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}; this is not necessarily this dispatch's fault`
         : busy
             ? 'daemon is alive and still actively working on this project'
@@ -1513,7 +1699,9 @@ export function readDaemonLiveness(spoolDir) {
                 : staleProjectHeartbeat
                 ? `daemon is alive: its own heartbeat for this project is ${timestampAgeMs(status.ts, now)} ms old (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms), which is expected for an idle project -- a project heartbeat only refreshes while the daemon is sweeping that project -- but pid ${pid} is alive and still owns this machine's daemon, so nothing is down`
                 : 'daemon is alive; busy_until is project-scoped and currently unset, which says nothing about this particular dispatch -- read dispatch_state for that'
-    const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note }
+    const restart = alive ? null : readRestartMarker(spoolDir)
+    const liveness = { alive, heartbeat_age_ms: heartbeatAgeMs, busy, busy_for_ms: busy ? busyForMs : null, note: restart ? restartingNote(restart) : note }
+    if (restart) Object.assign(liveness, restart)
     if (pid !== null) liveness.pid = pid
     if (pidAliveFlag !== null) liveness.pid_alive = pidAliveFlag
     liveness.heartbeat_source = useGlobalHeartbeat ? 'shared-daemon' : 'project'
@@ -1531,9 +1719,11 @@ export function readDaemonLiveness(spoolDir) {
     if (typeof status.gm_processor_capacity === 'number') liveness.gm_processor_capacity = status.gm_processor_capacity
     const sharedProjects = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)?.active_projects
     if (typeof sharedProjects === 'number') liveness.daemon_active_projects = sharedProjects
-    if (status.runner_update_in_progress) {
+    if (runnerUpdateInProgress(status, now)) {
         liveness.runner_update_in_progress = true
         liveness.runner_update_waiting_ms = status.runner_update_waiting_ms ?? null
+    } else if (status.runner_update_in_progress === true) {
+        liveness.runner_update_flag_stale = true
     }
     const stuck = stuckQueueReport(spoolDir)
     if (stuck) Object.assign(liveness, stuck)
@@ -1608,7 +1798,8 @@ export async function daemonNotRunning(root, spoolDir, signal) {
     const age = heartbeatAgeMs(spoolDir)
     if (age === null && !fs.existsSync(statusPath)) return undefined
     if (daemonBootGraceActive()) return undefined
-    if (readJsonFile(statusPath)?.runner_update_in_progress) return undefined
+    if (runnerUpdateInProgress(readJsonFile(statusPath))) return undefined
+    if (readRestartMarker(spoolDir)) return undefined
     ensureSpoolRunnerRunning(root)
     startRunnerWatchdog(root)
     const coldStart = globalDaemonPid() === null
@@ -1926,14 +2117,14 @@ function withStaleBundleNotice(verb, text) {
     if (typeof text !== 'string' || text === '') return text
     const drift = bundleDrift()
     if (!drift.stale) return text
-    const block = yaml.dump({
+    const block = renderYaml({
         bundle_stale: true,
         bundle_served_version: drift.running_version,
         bundle_served_sha: drift.running_sha256,
         bundle_installed_version: drift.installed_version,
         bundle_installed_sha: drift.installed_sha256,
         bundle_reloadable: drift.reloadable === true,
-    }, { lineWidth: 100 })
+    })
     const line = bundleStalenessNotice(drift)
     const body = `${text.endsWith('\n') ? text : `${text}\n`}${block}`
     return line ? `${body}\n${line}\n` : body
@@ -1959,18 +2150,19 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     if (typeof session_id === 'string') session_id = session_id.trim()
     session_id = explicitBodySessionId(body) || session_id
     if (!session_id) return 'error: session_id required'
-    const n = resume_task || nextN(session_id)
+    let n = resume_task || nextN(session_id)
     const unsafeName = unsafeSpoolName('verb', verb) || unsafeSpoolName('session_id', session_id) || unsafeSpoolName('task', n)
     if (unsafeName) return `error: ${unsafeName} -- nothing was written to the spool, so no dispatch was queued`
     const resolvedRoot = resolveDispatchRoot(cwd)
     if (resolvedRoot.error) {
         appendDiagnostic('dispatch-root-refused', { verb, root: resolvedRoot.refused_root, reason: resolvedRoot.refused_reason })
-        return yaml.dump(resolvedRoot, { lineWidth: 100 })
+        return renderYaml(resolvedRoot)
     }
     if (resolvedRoot.root_source !== 'cwd') {
         appendDiagnostic('dispatch-root-defaulted', { verb, root: resolvedRoot.root, source: resolvedRoot.root_source })
     }
     const root = resolvedRoot.root
+    const cwdFields = cwdResolutionFields(resolvedRoot)
     ensureAgentLease(root, session_id)
     refreshCallerHeartbeat(root, session_id)
     try {
@@ -1984,7 +2176,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     fs.mkdirSync(outDir, { recursive: true })
     const callStartedAtMs = Date.now()
     let lastWakeSource = 'initial_check'
-    const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })
+    const toYaml = renderYaml
 
     const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === 'string'
     if (!resume_task && isPlainText && typeof raw_body !== 'string') {
@@ -2019,11 +2211,12 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     }
 
     let ownerTransport
-    const inPath = path.join(inDir, `${n}.txt`)
-    const outPath = path.join(outDir, `${verb}-${n}.json`)
+    let inPath = path.join(inDir, `${n}.txt`)
+    let outPath = path.join(outDir, `${verb}-${n}.json`)
 
     if (resume_task && !fs.existsSync(outPath) && !fs.existsSync(inPath) && !fs.existsSync(`${inPath}.inflight`)) {
         return toYaml({
+            ...cwdFields,
             error: `resume_task "${n}" names no dispatch in this project's spool -- nothing was dispatched`,
             resumed: {
                 task: n,
@@ -2042,16 +2235,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const timeoutMs = Math.min(requestedPollTimeoutMs, pollCeilingMs)
     const execMs = EXEC_FAMILY_VERBS.includes(verb) ? execLimitMs(verb, raw_body, timeout_seconds) : null
 
-    if (!resume_task) {
-        const unavailable = runnerUnavailable(root, spoolDir)
-        if (unavailable) return toYaml(unavailable)
-        const notRunning = await daemonNotRunning(root, spoolDir, signal)
-        if (notRunning) return toYaml(notRunning)
-        ensureSpoolRunnerRunning(root)
-        startRunnerWatchdog(root)
+    const publishRequest = () => {
         if (isPlainText) {
-            ownerTransport = await plainTextOwnerTransport(root, session_id, signal)
-            if (signal?.aborted) return toYaml({ error: 'aborted', owner_transport: ownerTransport, wrote_no_new_dispatch: true })
             const plaintext = withTimeoutMsPrefix(verb, raw_body, timeout_seconds)
             publishSpoolRequest(inDir, inPath, n, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
         } else if (rawBodyText !== undefined) {
@@ -2065,10 +2250,29 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             }
             publishSpoolRequest(inDir, inPath, n, JSON.stringify(fullBody))
         }
+        rememberPublishedRequest(inPath)
+    }
+
+    if (!resume_task) {
+        const unavailable = runnerUnavailable(root, spoolDir)
+        if (unavailable) return toYaml({ ...cwdFields, ...unavailable })
+        const notRunning = await daemonNotRunning(root, spoolDir, signal)
+        if (notRunning) return toYaml({ ...cwdFields, ...notRunning, candidate_roots: candidateRoots(root, resolvedRoot.requested_root) })
+        ensureSpoolRunnerRunning(root)
+        startRunnerWatchdog(root)
+        if (isPlainText) {
+            ownerTransport = await plainTextOwnerTransport(root, session_id, signal)
+            if (signal?.aborted) return toYaml({ error: 'aborted', owner_transport: ownerTransport, wrote_no_new_dispatch: true, ...cwdFields })
+        }
+        publishRequest()
     }
 
     const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1000)
-    const deadline = Date.now() + timeoutMs
+    let deadline = Date.now() + timeoutMs
+    let restartWaitExtendedMs = 0
+    let lastOrphan = null
+    let orphanRetried = false
+    let retryFields = {}
 
 
     const readLandedOutFile = () => {
@@ -2079,7 +2283,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             opened = openSpoolRegularFile(root, outPath)
             landedAtMs = opened.mtimeMs
             const original = JSON.parse(readAllBounded(opened.fd, opened.size))
+            lastOrphan = isOrphanedNotice(original) ? { task: n, sweeping_pid: original.sweeping_pid ?? null, claim_age_ms: original.claim_age_ms ?? null } : null
             responseValueObserver?.(original)
+            const dispatchId = original?.dispatch_id
             const parsed = full_response ? original : unpackExecOutputEnvelope(verb, original)
             applySessionLeaseVerdict(parsed, { body: normalizedBody ?? body, root })
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
@@ -2114,82 +2320,144 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 }
                 out = out && typeof out === 'object' && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
             }
+            out = withLeadFields(out, { ...retryFields, ...cwdFields })
+            if (!full_response) out = withDispatchIdFirst(out, dispatchId)
             const rendered = (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
             const spillNote = verb === 'fs_read' ? fsReadSpillNote(out, rendered) : ''
             return capReplyText(rendered, replyMaxChars(max_chars), `${outPath}.reply.txt`, out, toYaml, spillNote)
         } catch (e) {
-            const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath }
+            const failed = { error: `response file was not valid JSON: ${e.message}`, task: n, out_path: outPath, ...cwdFields }
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(n, landedAtMs, callStartedAtMs)) : failed)
         } finally {
             if (opened) fs.closeSync(opened.fd)
         }
     }
 
-    const withdrawUnclaimedRequest = () => {
-        if (resume_task) return false
-        try {
-            fs.unlinkSync(inPath)
-            return true
-        } catch {
-            return false
-        }
-    }
     const abortedReply = () => toYaml({
         error: 'aborted',
         task: n,
         in_path: inPath,
         out_path: outPath,
-        request_withdrawn_before_claim: withdrawUnclaimedRequest(),
+        request_withdrawn_before_claim: withdrawPublishedRequest(inPath),
+        ...retryFields,
+        ...cwdFields,
     })
 
-    while (true) {
-        if (signal?.aborted) return abortedReply()
-        ensureSpoolRunnerRunning(root)
+    // A read-only verb whose claim was reaped (dispatch_orphaned) is re-dispatched once under a new task id:
+    // running it twice is harmless, and the reply says so (retried_after). A verb that mutates keeps the
+    // explicit orphan answer, because the first attempt may already have applied some or all of its work.
+    const orphanRetryApplicable = () => lastOrphan !== null && !orphanRetried && !resume_task && orphanRetryVerb(verb) && process.env.GM_MCP_ORPHAN_RETRY !== '0'
+
+    const startOrphanRetry = async () => {
+        const orphan = lastOrphan
+        orphanRetried = true
+        const budgetMs = Math.min(timeoutMs, pollCeilingMs - (Date.now() - callStartedAtMs))
+        if (budgetMs < ORPHAN_RETRY_MIN_BUDGET_MS) {
+            retryFields = { orphan_retry_skipped: `only ${Math.max(0, Math.round(budgetMs))} ms of the ${pollCeilingMs} ms poll ceiling were left` }
+            return false
+        }
+        if (await daemonNotRunning(root, spoolDir, signal)) {
+            retryFields = { orphan_retry_skipped: 'the daemon was not running when the retry was due' }
+            return false
+        }
+        n = nextN(session_id)
+        inPath = path.join(inDir, `${n}.txt`)
+        outPath = path.join(outDir, `${verb}-${n}.json`)
+        publishRequest()
+        retryFields = { retried_after: 'dispatch_orphaned', orphaned_task: orphan.task }
+        lastOrphan = null
+        deadline = Date.now() + budgetMs
+        return true
+    }
+
+    const RESTARTED = Symbol('restarted')
+
+    const takeLanded = async () => {
         const landed = readLandedOutFile()
-        if (landed !== undefined) return landed
-        if (Date.now() >= deadline) {
-            const finalRecheckDeadline = Date.now() + FINAL_OUT_RECHECK_WINDOW_MS
-            while (Date.now() < finalRecheckDeadline) {
-                try {
-                    await sleep(FINAL_OUT_RECHECK_INTERVAL_MS, signal)
-                } catch {
-                    break
+        if (landed === undefined) return undefined
+        if (!orphanRetryApplicable()) return landed
+        if (await startOrphanRetry()) return RESTARTED
+        return readLandedOutFile() ?? landed
+    }
+
+    try {
+        poll: while (true) {
+            if (signal?.aborted) return abortedReply()
+            ensureSpoolRunnerRunning(root)
+            const landed = await takeLanded()
+            if (landed === RESTARTED) continue
+            if (landed !== undefined) return landed
+            if (Date.now() >= deadline) {
+                if (readRestartMarker(spoolDir) && Date.now() - callStartedAtMs + RESTART_POLL_EXTENSION_MS <= pollCeilingMs) {
+                    deadline = Date.now() + RESTART_POLL_EXTENSION_MS
+                    restartWaitExtendedMs += RESTART_POLL_EXTENSION_MS
+                    continue
                 }
-                const landedLate = readLandedOutFile()
-                if (landedLate !== undefined) return landedLate
+                const finalRecheckDeadline = Date.now() + FINAL_OUT_RECHECK_WINDOW_MS
+                while (Date.now() < finalRecheckDeadline) {
+                    try {
+                        await sleep(FINAL_OUT_RECHECK_INTERVAL_MS, signal)
+                    } catch {
+                        break
+                    }
+                    const landedLate = await takeLanded()
+                    if (landedLate === RESTARTED) continue poll
+                    if (landedLate !== undefined) return landedLate
+                }
+                const capped = requestedPollTimeoutMs > timeoutMs
+                const execRemainingMs = execMs === null || resume_task ? null : Math.max(0, execMs - (Date.now() - callStartedAtMs))
+                const execNote = execMs === null ? null : [
+                    `this timeout does NOT kill the child: the daemon holds it and reaps it only when it reaches its own ${execMs}ms exec budget, measured from the original dispatch start`,
+                    execRemainingMs === null ? null : execRemainingMs > 0 ? `about ${Math.ceil(execRemainingMs / 1000)}s from now` : 'which has already elapsed, so the out-file will report killed:true/exec_timeout',
+                    `resume this same task with resume_task and a timeout_seconds that outlasts that budget, or set the budget yourself with a timeoutMs=<ms> first line in the body (up to ${EXEC_HARD_CEILING_MS})`,
+                ].filter(Boolean).join('; ')
+                const daemonAtTimeout = readDaemonLiveness(spoolDir)
+                const transitional = daemonAtTimeout.restarting === true || daemonAtTimeout.runner_update_in_progress === true
+                const daemonDead = daemonAtTimeout.alive === false
+                const spoolNeverSwept = daemonAtTimeout.pid_alive === false && typeof daemonAtTimeout.project_heartbeat_age_ms === 'number' && daemonAtTimeout.project_heartbeat_age_ms >= Date.now() - callStartedAtMs
+                const withdrawn = !transitional && (daemonDead || spoolNeverSwept) && withdrawPublishedRequest(inPath)
+                return toYaml({
+                    timed_out: true,
+                    task: n,
+                    ...retryFields,
+                    ...cwdFields,
+                    poll_timeout_ms: timeoutMs,
+                    requested_poll_timeout_ms: requestedPollTimeoutMs,
+                    poll_timeout_capped: capped,
+                    poll_timeout_ceiling_ms: pollCeilingMs,
+                    poll_timeout_cap_reason: capped
+                        ? `gm stopped waiting at its ${pollCeilingMs}ms poll ceiling, not because the dispatch failed: set GM_MCP_POLL_TIMEOUT_CEILING_MS higher for this server, or resume_task, to keep waiting on the same dispatch`
+                        : 'gm stopped waiting because the caller-supplied budget ran out; the dispatch itself is untouched',
+                    ...(execMs === null ? {} : { exec_limit_ms: execMs, child_reaped_at_exec_limit: true, exec_child: execNote }),
+                    ...(withdrawn
+                        ? {
+                            request_withdrawn_before_claim: true,
+                            resume_task_supported: false,
+                            withdrawn_because: daemonDead
+                                ? 'no daemon is running for this spool, so nothing would ever claim the request; it was taken back instead of left queued. Dispatch again once the daemon answers (see daemon.note)'
+                                : 'a daemon is running but never swept this spool during the whole wait (this spool\'s own heartbeat predates this call and the pid that wrote it is gone), so the request was taken back instead of left queued. Dispatch again; a cold project can take 85-110 s to be picked up',
+                        }
+                        : { resume_task_supported: true }),
+                    resumed_this_call: Boolean(resume_task),
+                    in_path: inPath,
+                    out_path: outPath,
+                    final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
+                    ...(restartWaitExtendedMs > 0 ? { restart_wait_extended_ms: restartWaitExtendedMs } : {}),
+                    dispatch_state: withdrawn
+                        ? { state: 'withdrawn_by_this_call', note: 'the unclaimed request was removed from the spool by this call because nothing was serving this spool; no input file is left' }
+                        : readSpoolDispatchState(spoolDir, verb, n),
+                    dispatch_wait: readDispatchWaitRow(spoolDir, verb, n, outPath),
+                    daemon: daemonAtTimeout,
+                })
             }
-            const capped = requestedPollTimeoutMs > timeoutMs
-            const execRemainingMs = execMs === null || resume_task ? null : Math.max(0, execMs - (Date.now() - callStartedAtMs))
-            const execNote = execMs === null ? null : [
-                `this timeout does NOT kill the child: the daemon holds it and reaps it only when it reaches its own ${execMs}ms exec budget, measured from the original dispatch start`,
-                execRemainingMs === null ? null : execRemainingMs > 0 ? `about ${Math.ceil(execRemainingMs / 1000)}s from now` : 'which has already elapsed, so the out-file will report killed:true/exec_timeout',
-                `resume this same task with resume_task and a timeout_seconds that outlasts that budget, or set the budget yourself with a timeoutMs=<ms> first line in the body (up to ${EXEC_HARD_CEILING_MS})`,
-            ].filter(Boolean).join('; ')
-            return toYaml({
-                timed_out: true,
-                task: n,
-                poll_timeout_ms: timeoutMs,
-                requested_poll_timeout_ms: requestedPollTimeoutMs,
-                poll_timeout_capped: capped,
-                poll_timeout_ceiling_ms: pollCeilingMs,
-                poll_timeout_cap_reason: capped
-                    ? `gm stopped waiting at its ${pollCeilingMs}ms poll ceiling, not because the dispatch failed: set GM_MCP_POLL_TIMEOUT_CEILING_MS higher for this server, or resume_task, to keep waiting on the same dispatch`
-                    : 'gm stopped waiting because the caller-supplied budget ran out; the dispatch itself is untouched',
-                ...(execMs === null ? {} : { exec_limit_ms: execMs, child_reaped_at_exec_limit: true, exec_child: execNote }),
-                resume_task_supported: true,
-                resumed_this_call: Boolean(resume_task),
-                in_path: inPath,
-                out_path: outPath,
-                final_out_recheck_window_ms: FINAL_OUT_RECHECK_WINDOW_MS,
-                dispatch_state: readSpoolDispatchState(spoolDir, verb, n),
-                dispatch_wait: readDispatchWaitRow(spoolDir, verb, n, outPath),
-                daemon: readDaemonLiveness(spoolDir),
-            })
+            try {
+                lastWakeSource = await waitForSpoolChange(outDir, outPath, deadline - Date.now(), pollMs, signal)
+            } catch {
+                return abortedReply()
+            }
         }
-        try {
-            lastWakeSource = await waitForSpoolChange(outDir, outPath, deadline - Date.now(), pollMs, signal)
-        } catch {
-            return abortedReply()
-        }
+    } catch (error) {
+        withdrawPublishedRequest(inPath)
+        throw error
     }
 }
