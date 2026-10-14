@@ -53,12 +53,26 @@ function resolveDispatchRoot(cwd) {
     }
 }
 
-function inlineMaxForVerb({ verb, isPlainText, fullResponse, maxChars }) {
+const FETCH_PAGE_KEYS = ['offset', 'length', 'len', 'start_line', 'startLine', 'end_line', 'endLine', 'lines', 'line_count', 'lineCount']
+
+// A fetch that asked for one bounded page wants to read that page, so the document field is inlined
+// to the file-read budget instead of the 400-character one every other long text field gets: at 400
+// characters a page would come back as a pointer to the spill file, and a document could not be read
+// through the port at all, which is what paging exists to fix. Only a call carrying a page key pays
+// it, so an ordinary fetch keeps its 6000-character default and its small inline window.
+function fetchPageRequested(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return false
+    if (typeof body.url !== 'string' || body.url === '') return false
+    return FETCH_PAGE_KEYS.some((key) => body[key] !== undefined && body[key] !== null && body[key] !== '')
+}
+
+function inlineMaxForVerb({ verb, isPlainText, fullResponse, maxChars, body }) {
     const requested = Number(maxChars)
     if (Number.isFinite(requested) && requested > 0) return Math.min(Math.floor(requested), LONG_TEXT_INLINE_MAX_CEILING)
     if (fullResponse) return LONG_TEXT_INLINE_MAX_CEILING
     if (isPlainText) return PLAIN_TEXT_OUTPUT_INLINE_MAX
     if (verb === 'fs_read') return FILE_READ_INLINE_MAX
+    if (verb === 'fetch' && fetchPageRequested(body)) return FILE_READ_INLINE_MAX
     return undefined
 }
 
@@ -2199,7 +2213,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
             const ranged = full_response ? parsed : applyFsReadRangeFallback(verb, normalizedBody, parsed)
             const named = withSearchIncompleteness(ranged)
-            const cleaned = full_response ? named : cleanResponse(named, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
+            const cleaned = full_response ? named : cleanResponse(named, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars, body: normalizedBody }))
             let out = cleaned
             if (!full_response && cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
                 const { data, ...rest } = cleaned
