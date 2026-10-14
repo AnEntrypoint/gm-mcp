@@ -100,3 +100,13 @@ Repo-source facts that structure and naming cannot carry. The exec-family `timeo
 - **Witness and probe scripts.** `scripts/pool-observe-served-witness.mjs` checks the served client's pool-observe output against the candidate contract in rs-plugkit `crates/plugkit-core/src/orchestrator/pool_rank.rs`. `test/mcp-http-probe.mjs [port] [idleSeconds]` and `test/http-session-resume.mjs [port] [idleSeconds]` are manual probes, not part of `npm test`; the second defaults to port 8791, leaving the live singleton on 8787 alone.
 - **Reaper test.** `test/leak-reaper.test.mjs` spawns real orphans; run it alone with `node test/leak-reaper.test.mjs`. A worker reported 5 failing assertions on unmodified code here (not re-run).
 - **Stale probe expectations.** `test/http-session-resume.mjs` expects a 200 GET heartbeat carrying `retry:` and an `http-empty-body-ignored` event. Current `src/` answers GET with 405 and emits no such event, so those checks do not match this build (not run).
+
+## Architecture decisions
+
+### ADR-GMMCP-SELFUPDATE-1: the self-update guard compares build identity
+
+- **Status.** Accepted by the user (session gm-backlog-w2-05, option a). Implementation is pending: `src/self-update.js` still applies the version comparison in the "No downgrade" bullet above until the implementing row lands.
+- **Context.** `scripts/check-version-bump.mjs` requires a `BUNDLE_VERSION` bump on every `src/` change, and the no-downgrade test is strictly forward on that string. A candidate built at an equal version is therefore refused, even when its bytes differ.
+- **Decision.** The guard compares build identity, the candidate's build stamp and bytes against the installed bundle, and not the version string alone. A same-version candidate with a different build identity is eligible. This is the repo rule for self-update guards (root `AGENTS.md`, Implementation rules).
+- **Consequences.** An equal-version release stops being refused by the version test. The build stamp field is chosen by the implementing row, not here. The windowsHide regression (see "A bare swap silently undoes a lost fix") is not a version question: the build-identity guard alone would accept a swap that drops a fix, so the freeze and the local-build pin remain the controls against it.
+
