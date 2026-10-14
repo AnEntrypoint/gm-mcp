@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.45 - `gm-mcp dispatch` honours the HTTP singleton opt-outs
+
+The CLI `dispatch` command called `ensureHttpSingleton` unconditionally, so `GM_MCP_NO_HTTP_SINGLETON=1`
+(the opt-out a witness sets so it cannot touch the shared server) did not stop a shell dispatch from
+seeding, retiring or replacing the machine's HTTP server. It now seeds only when `httpSingletonEnabled()`
+says so: never for a dev copy, never under an opt-out.
+
 ## 0.2.44 - a dev copy never changes what the machine runs; the release bridge is opt-in
 
 A run of the repo's own tests, which spawn `bin/gm-mcp-server.js` as an MCP server with the real HOME in

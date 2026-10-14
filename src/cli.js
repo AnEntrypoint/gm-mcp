@@ -6,7 +6,7 @@ import { runDevSync } from './dev-sync.js'
 import { runReleaseBridge } from './release-bridge.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
-import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
+import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, httpSingletonEnabled, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
 import { reapReport, formatFindings } from './leak-reaper.js'
 import { attributePid, globalLedgerPath } from './child-ledger.js'
 
@@ -114,7 +114,7 @@ function resolvePayloadValue(value) {
 }
 
 async function dispatchCommand() {
-    await ensureHttpSingleton({ port: defaultHttpPort(), wait: false }).catch(() => {})
+    if (httpSingletonEnabled()) await ensureHttpSingleton({ port: defaultHttpPort(), wait: false }).catch(() => {})
 
     const argv = process.argv.slice(3)
     if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
