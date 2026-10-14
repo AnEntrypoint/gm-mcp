@@ -5,7 +5,7 @@ const port = Number(process.argv[2] || 8787)
 const idleSeconds = Number(process.argv[3] || 0)
 const url = `http://127.0.0.1:${port}/mcp`
 
-function log(...a) { console.log(`[${new Date().toISOString()}]`, ...a) }
+function log(...parts) { console.log(`[${new Date().toISOString()}]`, ...parts) }
 
 const client = new Client({ name: 'gm-http-probe', version: '1.0.0' }, { capabilities: {} })
 const transport = new StreamableHTTPClientTransport(new URL(url))
