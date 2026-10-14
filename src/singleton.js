@@ -9,6 +9,7 @@ import { portListenerState } from './ports.js'
 import { recordChild } from './child-ledger.js'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { keepServingOnAsyncFailure, logSignalExits } from './transport-guard.js'
+import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { DEFAULT_HOST, DEFAULT_PORT, HEALTH_PATH, MCP_PATH } from './http-transport.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { compareVersions } from './self-update.js'
@@ -154,9 +155,7 @@ export function spawnServerProcess({ port = defaultHttpPort(), host = DEFAULT_HO
     const { stdio, fd } = childStdio()
     const child = spawn(process.execPath, [entry, '--http', '--port', String(port), '--host', String(host)], {
         cwd: homedir(),
-        detached: true,
-        stdio,
-        windowsHide: true,
+        ...hiddenDetachedOptions({ stdio }),
         env: { ...process.env, GM_MCP_TRANSPORT: 'http', GM_MCP_HTTP_SINGLETON: '0' },
     })
     if (fd !== null) closeSync(fd)
