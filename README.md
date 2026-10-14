@@ -81,6 +81,39 @@ self-update (<code>) -- <reason>`), so it lands in the daemon log instead of
 being swallowed by the background check. The `.prev` backup and the `node
 --check` validation of a candidate are unchanged.
 
+### Release bridge, dev copies and sandboxes
+
+Only the deployed copy (`<GM_TOOLS_DIR>/gm-mcp-server.mjs`, default `~/.gm-tools`) may change what the
+machine runs. Any other copy -- a repo checkout, a scratch build, a test run -- is a dev copy (a server's
+`self-update-check` line says `not-deployed-copy`). It can dispatch, but it never replaces the installed
+`agentplug-runner` or `gm` guest, never signals the daemon, and never seeds, retires or supervises the
+shared HTTP server: each of those lands on every session of the machine, not on the run that caused it.
+`GM_MCP_HTTP_SINGLETON=1` names a dev copy as the server to manage, and `GM_MCP_DEV_SYNC=1` lets one run dev
+sync.
+
+The release bridge (`src/release-bridge.js`) upgrades the installed runner and guest from the latest
+`AnEntrypoint/agentplug-bin` and `plugkit-bin` releases. It is off until asked:
+
+- `GM_MCP_RELEASE_BRIDGE=1` runs it at server start (at most every 10 minutes). Unset, empty or `0`: it does
+  nothing, with no network call and no file written.
+- `gm-mcp release-bridge` prints what it would change and writes nothing; `gm-mcp release-bridge --install`
+  replaces the runner and guest now. A dev copy answers `outcome: disabled, code: not-deployed-copy` to both
+  the env var and `--install`.
+- Stopping the daemon so the new build loads is a second opt-in: `--signal`, or
+  `GM_MCP_RELEASE_BRIDGE_SIGNAL=1`. Without it the reply says `signal.outcome: not-signalled` and the build
+  loads when the daemon next restarts.
+- It never installs a runner build the runner itself refused. The runner demands a signature on every update
+  it applies, and records a refusal in `daemon-status.json` (`update rejected: agentplug-runner-macos-arm64
+  0.1.323 -- no signature available`); the bridge only has the `.sha256` sidecar, which proves the bytes match
+  what was published, not who published them. A version listed there is `runner-rejected-this-build`.
+
+To witness any of this without touching the machine, run the command in a throwaway home:
+`node scripts/sandboxed.mjs node bin/gm-mcp-server.js dispatch health` points `HOME`, `GM_TOOLS_DIR` and
+`AGENTPLUG_HOME` at a temp dir that holds no runner and switches the install-touching background features off;
+`npm test` runs every test file that way. To exercise the bridge itself, copy the bundle to
+`<sandbox>/.gm-tools/gm-mcp-server.mjs` and a runner beside it, and run that copy with the sandbox env: it is
+the deployed copy of that sandbox.
+
 ### Picking up a newer bundle without a reconnect
 
 The self-update above compares the deployed file against a URL, so it answers

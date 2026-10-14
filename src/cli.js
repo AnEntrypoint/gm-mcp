@@ -3,6 +3,7 @@ import path from 'node:path'
 import { main, flagValue } from './index.js'
 import { gmDispatch } from './dispatch.js'
 import { runDevSync } from './dev-sync.js'
+import { runReleaseBridge } from './release-bridge.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
 import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
@@ -197,6 +198,12 @@ const COMMANDS = {
         console.log(JSON.stringify(selfUpdateStatus(), null, 2))
         return 0
     },
+    'release-bridge': async () => {
+        const install = process.argv.includes('--install')
+        const result = await runReleaseBridge({ install, signal: process.argv.includes('--signal'), dryRun: !install })
+        console.log(JSON.stringify(result, null, 2))
+        return result.outcome === 'disabled' || result.outcome === 'frozen' || result.outcome === 'busy' ? 1 : 0
+    },
     'dev-sync': async () => {
         const report = runDevSync(flagValue('root') || process.cwd())
         console.log(JSON.stringify(report, null, 2))
@@ -302,6 +309,12 @@ usage:
   gm-mcp-server.js pin-local-build [path]   pin the deployed bundle (default ~/.gm-tools/gm-mcp-server.mjs) so a self-update cannot overwrite it
   gm-mcp-server.js unpin-local-build        clear that pin
   gm-mcp-server.js self-update-status       print no-self-update state, local-build pin and deployed bundle sha256
+  gm-mcp-server.js release-bridge [--install [--signal]]
+                                   compare the installed runner and gm guest with the latest releases
+                                   and print the result without writing anything; --install replaces
+                                   them (deployed copy only), --signal also stops the daemon so the
+                                   new build loads now. A server never does either on its own: it
+                                   runs the bridge at start only with GM_MCP_RELEASE_BRIDGE=1
 
 register the durable transport instead of stdio with:
   claude mcp remove gm -s user && claude mcp add --transport http gm ${'http://127.0.0.1:'}${defaultHttpPort()}${'/mcp'} -s user

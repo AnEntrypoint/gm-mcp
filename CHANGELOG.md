@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.44 - a dev copy never changes what the machine runs; the release bridge is opt-in
+
+A run of the repo's own tests, which spawn `bin/gm-mcp-server.js` as an MCP server with the real HOME in
+the environment, replaced the live `~/.gm-tools/agentplug-runner` (0.1.211 -> 0.1.323) and SIGTERMed the
+live daemon at 23:55:14Z. The daemon-guard of the old runner never reaped the stopped daemon, so gm was
+down for every session for about five minutes. Cause: `runReleaseBridgeInBackground()` ran on every start
+of every copy, and the same process's `self-update-check` had just answered `not-deployed-copy`. The bridge
+also installed that runner on the `.sha256` sidecar alone, although the daemon's own updater had rejected
+the version (`update rejected: agentplug-runner-macos-arm64 0.1.323 -- no signature available`, recorded in
+`daemon-status.json` as `last_runner_update_poll_error`). The same test run's servers also tried to seed the
+shared HTTP server on 8787 (`http-listen-failed EADDRINUSE`): `ensureHttpSingleton` retires a live server
+that reports an older version and starts the caller's bundle in its place.
+
+- `src/install-guard.js` names the deployed copy (`<GM_TOOLS_DIR>/gm-mcp-server.mjs`); any other process is a
+  dev copy (`self-update.js` now takes the same predicate from there).
+- The release bridge is off until asked: `GM_MCP_RELEASE_BRIDGE=1` at start, or `gm-mcp release-bridge
+  --install`; `gm-mcp release-bridge` alone is a read-only dry run. A dev copy answers `outcome: disabled,
+  code: not-deployed-copy` to both. Stopping the daemon after a swap is a second opt-in (`--signal`,
+  `GM_MCP_RELEASE_BRIDGE_SIGNAL=1`); otherwise `signal.outcome` is `not-signalled`. A runner version that
+  `last_runner_update_poll_error` records as rejected is `refused: runner-rejected-this-build`.
+- A dev copy no longer seeds, retires, restarts or supervises the shared HTTP server, and no longer starts dev
+  sync (`GM_MCP_HTTP_SINGLETON=1` / `GM_MCP_DEV_SYNC=1` name one explicitly).
+- `scripts/sandboxed.mjs <command>` runs a command with HOME, GM_TOOLS_DIR and AGENTPLUG_HOME in a fresh temp
+  dir that holds no runner; `npm test` and the CI steps that spawn the bundle run through it.
+
 ## 0.2.43 - a spool reply opens with its dispatch_id
 
 `prd-resolve` binds a row to a run through `witness_dispatch_id`, and the operator reported that the

@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from './process-port.js'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BUNDLE_VERSION } from './bundle-version.js'
-import { agentplugDir, toolsDir } from './paths.js'
+import { agentplugDir } from './paths.js'
+import { DEPLOYED_BUNDLE_FILE_NAME, deployedBundlePath, isRunningFromDeployedBundle } from './install-guard.js'
 import { appendDiagnostic } from './server-log.js'
 import { inflightDispatchCount } from './dispatch.js'
 
-const DEPLOYED_BUNDLE_FILE_NAME = 'gm-mcp-server.mjs'
 const DEFAULT_BUNDLE_URL = 'https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js'
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000
 const FETCH_TIMEOUT_MS = 20_000
@@ -24,9 +24,7 @@ const BUNDLE_VERSION_ASSIGNMENT = /BUNDLE_VERSION\s*=\s*["']([^"']+)["']/
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const shortHash = (hex) => hex.slice(0, 12)
 
-function defaultDeployedPath() {
-    return path.join(toolsDir(), DEPLOYED_BUNDLE_FILE_NAME)
-}
+const defaultDeployedPath = deployedBundlePath
 
 export function noSelfUpdateFilePath() {
     return path.join(agentplugDir(), NO_SELF_UPDATE_FILE)
@@ -147,16 +145,6 @@ export function selfUpdateStatus() {
         local_build_pin_path: localBuildPinPath(),
         local_build_pin: pin,
     }
-}
-
-function canonicalPath(file) {
-    const resolved = realpathSync(file)
-    return process.platform === 'win32' ? resolved.toLowerCase() : resolved
-}
-
-function isRunningFromDeployedBundle(deployedPath) {
-    if (!existsSync(deployedPath)) return false
-    return canonicalPath(fileURLToPath(import.meta.url)) === canonicalPath(deployedPath)
 }
 
 function checkIntervalMs() {

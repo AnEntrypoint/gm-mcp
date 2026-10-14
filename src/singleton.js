@@ -11,6 +11,7 @@ import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { keepServingOnAsyncFailure, logSignalExits } from './transport-guard.js'
 import { DEFAULT_HOST, DEFAULT_PORT, HEALTH_PATH, MCP_PATH } from './http-transport.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
+import { devCopyReason, explicitlyOn } from './install-guard.js'
 import { compareVersions } from './self-update.js'
 
 const STATE_FILE_NAME = 'gm-mcp-http.json'
@@ -48,13 +49,22 @@ function envValue(name) {
     return raw === '' ? null : raw
 }
 
+// A dev copy (see install-guard.js) never seeds, retires, restarts or supervises the machine's shared
+// server unless the operator names that server explicitly with GM_MCP_HTTP_SINGLETON=1: a seed from a
+// scratch build retires a live server that merely reports an older version and starts the scratch build
+// in its place, for every session on the machine.
+function mayManageSingleton() {
+    return devCopyReason() === null || explicitlyOn('GM_MCP_HTTP_SINGLETON')
+}
+
 export function httpSingletonEnabled() {
     for (const name of ['GM_MCP_NO_HTTP_SINGLETON', 'GM_MCP_HTTP_SINGLETON_OFF']) {
         const value = envValue(name)
         if (value !== null && !OFF_VALUES.has(value)) return false
     }
     const legacy = envValue('GM_MCP_HTTP_SINGLETON')
-    return !(legacy !== null && OFF_VALUES.has(legacy))
+    if (legacy !== null && OFF_VALUES.has(legacy)) return false
+    return mayManageSingleton()
 }
 
 export function launchedEntryPath() {
@@ -363,6 +373,10 @@ export function parentPidOf(pid) {
 async function retireHttpInstance({ port, pid, reason, version = null }) {
     const target = Number(pid)
     if (!Number.isInteger(target) || target <= 0 || target === process.pid) return false
+    if (!mayManageSingleton()) {
+        appendDiagnostic('http-instance-retire-refused-dev-copy', { port, pid: target, reason, running_version: version, installed_version: BUNDLE_VERSION, dev_copy: devCopyReason() })
+        return false
+    }
     appendDiagnostic('http-instance-retire', { port, pid: target, reason, running_version: version, installed_version: BUNDLE_VERSION })
     try {
         process.kill(target)
@@ -411,6 +425,7 @@ export async function reapDeadHttpInstances() {
 
 export async function replaceBehindHttpInstances({ now = Date.now() } = {}) {
     const replaced = []
+    if (!mayManageSingleton()) return replaced
     for (const port of registeredHttpPorts()) {
         const instance = readStateFile(instanceFilePath(port), port)
         const supervisor = readStateFile(supervisorStateFilePath(port), port)
@@ -515,8 +530,13 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
 
     const live = await probeHealth(port)
     if (live && !versionBehind(live.version)) {
-        writeSingletonState({ port, pid: live.pid ?? null, url: httpMcpUrl(port), ts: Date.now(), reused: true })
+        if (mayManageSingleton()) writeSingletonState({ port, pid: live.pid ?? null, url: httpMcpUrl(port), ts: Date.now(), reused: true })
         return { url: httpMcpUrl(port), port, pid: live.pid ?? null, reused: true, version: live.version ?? null }
+    }
+
+    if (!mayManageSingleton()) {
+        appendDiagnostic('http-singleton-refused-dev-copy', { port, live_pid: live?.pid ?? null, live_version: live?.version ?? null, dev_copy: devCopyReason() })
+        return { url: null, port, pid: null, reused: false, error: `not-deployed-copy: ${devCopyReason()}; a dev copy never starts or replaces the shared HTTP server (GM_MCP_HTTP_SINGLETON=1 names this copy explicitly)` }
     }
 
     if (live) {
@@ -592,6 +612,7 @@ function supervisorRunning(state, now = Date.now()) {
 
 export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs(), force = false } = {}) {
     if (!force && !supervisorEnabled()) return { port, pid: null, started: false, reason: 'disabled' }
+    if (!mayManageSingleton()) return { port, pid: null, started: false, reason: 'not-deployed-copy' }
     const recorded = readSupervisorState(port)
     if (supervisorRunning(recorded)) return { port, pid: recorded.pid, started: false, reason: 'already-running' }
 
