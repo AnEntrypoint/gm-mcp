@@ -48,6 +48,7 @@ Repo-source facts that structure and naming cannot carry. The exec-family `timeo
 - **Signal and exit records.** `logSignalExits` records SIGINT, SIGTERM, SIGHUP and SIGBREAK, then exits 0, so the exit status hides the signal; the `exit` record carries it. That record in `src/transport-guard.js` also carries `uptime_ms`, which survives the repeat filter (it ignores `pid`), so two servers exiting with the same code in one window each leave a line. A killed singleton leaves no `exit` record, because `logSignalExits` only sees signals a handler runs for.
 - **Stdout guard.** `isJsonRpcFrame` checks that the first byte is `{` before parsing, since every stdout write passes through it and a response can be about 1 MB. Anything else is diverted to stderr as `stdout-write-diverted`.
 - **Diagnostics.** `appendDiagnostic` writes each record to stderr and, unless repeat suppression holds it, to `logFilePath()` (`gm-mcp-server.log`, rotated to one `.1` past 2 MB by `src/server-log.js`). An identical event and fields within 60 s are counted, not written (ignoring `ms`, `inflight`, `dispatches_inflight` and `pid`); the next write of that key is preceded by `repeat-suppressed`. The host discards stderr, so the file is the durable record.
+- **Runtime-only logs.** `gm-mcp-server.log` and `dev-sync.log` (`src/dev-sync.js` `logPath()`, one JSON line per sync run, under `agentplugDir()`) live outside the repository. No module or verb reads either back, so they are output, not state; deleting them changes no dispatch.
 
 ## HTTP transport and singleton
 
