@@ -385,14 +385,24 @@ const FETCH_TYPES = {
     prompt: z.string(),
     max_chars: numberLike,
     answer_max_chars: numberLike,
+    offset: numberLike,
+    length: numberLike,
+    len: numberLike,
+    start_line: numberLike,
+    startLine: numberLike,
+    end_line: numberLike,
+    endLine: numberLike,
+    lines: numberLike,
+    line_count: numberLike,
+    lineCount: numberLike,
     raw: booleanLike,
     method: z.string(),
     headers: z.record(z.string(), z.string()),
     timeoutMs: numberLike,
 }
-const FETCH_KEYS = ['url', 'query', 'q', 'search', 'backend', 'engine', 'count', 'limit', 'max_results', 'k', 'n', 'kind', 'wiki', 'user', 'repo', 'stars', 'allowed_domains', 'blocked_domains', 'prompt', 'max_chars', 'answer_max_chars', 'raw', 'method', 'headers', 'timeoutMs']
+const FETCH_KEYS = ['url', 'query', 'q', 'search', 'backend', 'engine', 'count', 'limit', 'max_results', 'k', 'n', 'kind', 'wiki', 'user', 'repo', 'stars', 'allowed_domains', 'blocked_domains', 'prompt', 'max_chars', 'answer_max_chars', 'offset', 'length', 'len', 'start_line', 'startLine', 'end_line', 'endLine', 'lines', 'line_count', 'lineCount', 'raw', 'method', 'headers', 'timeoutMs']
 const FETCH_FIELDS = aliasFields('fetch', FETCH_TYPES, FETCH_KEYS)
-const FETCH_DESCRIPTION = ` ${FETCH_KEYS.join(', ')} are accepted at the top level and folded into body, so {"url":"<url>"} and body:{"url":"<url>"} are the same call; a key named in both takes its value from body. The reply is the READABLE page, not the transport payload: HTML is converted to markdown before it is returned (head, script, style, svg, nav, header, footer, aside, form and iframe blocks are dropped; article or main wins over the rest of the document), and a body that is not HTML is returned as it arrived. query (aliases q, search) with no url turns the call into a web search on the same port, walking the same backends websearch walks -- the structured JSON backends github, hn and wikipedia first, then the keyless html engines -- and backend (alias engine) picks the order; kind, wiki, user, repo and stars tune the github and wikipedia backends, count (aliases limit, max_results, k, n) caps the hits and allowed_domains/blocked_domains filter every backend. prompt answers that prompt against the converted page and returns the matching passages instead of the page: gm holds no outbound model credential, so answer_mode is always "extractive". max_chars caps the characters returned (default 6000), so one fetch cannot dump a whole page into context; answer_max_chars caps a prompt answer (default 4000). raw:true (aliases full_response, fullResponse) is the escape hatch that returns the original body with no conversion and no prompt answering.`
+const FETCH_DESCRIPTION = ` ${FETCH_KEYS.join(', ')} are accepted at the top level and folded into body, so {"url":"<url>"} and body:{"url":"<url>"} are the same call; a key named in both takes its value from body. The reply is the READABLE page, not the transport payload: HTML is converted to markdown before it is returned (head, script, style, svg, nav, header, footer, aside, form and iframe blocks are dropped; article or main wins over the rest of the document), and a body that is not HTML is returned as it arrived. query (aliases q, search) with no url turns the call into a web search on the same port, walking the same backends websearch walks -- the structured JSON backends github, hn and wikipedia first, then the keyless html engines -- and backend (alias engine) picks the order; kind, wiki, user, repo and stars tune the github and wikipedia backends, count (aliases limit, max_results, k, n) caps the hits and allowed_domains/blocked_domains filter every backend. prompt answers that prompt against the converted page and returns the matching passages instead of the page: gm holds no outbound model credential, so answer_mode is always "extractive". max_chars caps the characters returned (default 6000), so one fetch cannot dump a whole page into context; answer_max_chars caps a prompt answer (default 4000). offset/length (characters, offset 0-based) or start_line/end_line (1-based, inclusive) or start_line plus lines read one bounded page of that document instead of its head, with offset/length/total_chars/has_more/next_offset or start_line/end_line/total_lines/has_more/next_start_line on the reply, so a document longer than the cap is readable end to end; a page defaults to 24000 characters and never mixes character keys with line keys. A prompt reply carries answer_status: matched, no_match (the page has text and none of it scored), or empty_source (no text was retrieved or converted, which is a failure and comes back ok:false with error_code fetch_empty_source). raw:true (aliases full_response, fullResponse) is the escape hatch that returns the original body with no conversion and no prompt answering.`
 const FETCH_BODY = {
     required: [],
     fields: {
@@ -410,6 +420,11 @@ const FETCH_BODY = {
         prompt: { type: 'string', description: 'When present the reply answers this against the converted page and returns the matching passages, not the page. Answering is extractive: the passages are verbatim from the page.' },
         max_chars: { type: 'number', description: 'Cap on characters returned. Default 6000, ceiling 4000000.' },
         answer_max_chars: { type: 'number', description: 'Cap on the characters of a prompt answer. Default 4000.' },
+        offset: { type: 'number', description: '0-based character offset of a bounded page; with no length it reads to the end of the document. Never combine with start_line/end_line.' },
+        length: { type: 'number', description: 'Characters to return from offset (alias len). A paged read defaults to 24000 characters, not 6000, and an explicit max_chars still caps it.' },
+        start_line: { type: 'number', description: 'First line of a bounded page, 1-based (alias startLine).' },
+        end_line: { type: 'number', description: 'Last line of a bounded page, 1-based and inclusive (alias endLine).' },
+        lines: { type: 'number', description: 'Line count to read from start_line; aliases line_count and lineCount.' },
         raw: { type: 'boolean', description: 'Return the original response body with no markdown conversion and no prompt answering. Aliases full_response and fullResponse.' },
         method: { type: 'string', description: 'HTTP method; GET when absent.' },
         headers: { type: 'object', description: 'Request headers.' },
