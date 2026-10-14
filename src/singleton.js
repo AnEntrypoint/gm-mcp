@@ -71,7 +71,7 @@ function readStateFile(filePath, port = null) {
         if (error?.code !== 'ENOENT') appendDiagnostic('singleton-state-corrupt', { file: filePath, error: describeError(error) })
         return null
     }
-    if (!state || typeof state !== 'object') {
+    if (!state || typeof state !== 'object' || Array.isArray(state)) {
         appendDiagnostic('singleton-state-corrupt', { file: filePath, error: 'not a JSON object' })
         return null
     }
