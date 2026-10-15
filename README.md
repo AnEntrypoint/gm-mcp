@@ -45,14 +45,20 @@ trips Claude Code's 30s connect timeout under load.
 
 ### Self-updating deployed copy
 
-A bundle running from `~/.gm-tools/gm-mcp-server.mjs` (or `$GM_TOOLS_DIR`) checks
-itself against `bin/gm-mcp-server.js` on `main` in the background after it
-connects, at most once per hour. On a sha256 mismatch it validates the fresh
+Any running copy checks the deployed `~/.gm-tools/gm-mcp-server.mjs` (or
+`$GM_TOOLS_DIR`) against `bin/gm-mcp-server.js` on `main` in the background
+after it connects, at most once per hour — not only a process started from that
+file, so a server launched from a repo build keeps the deployment current
+instead of leaving it behind upstream. A process that refreshed a deployment it
+is not does not hand its own transport over to it; only the deployed copy's own
+process reloads into what it installed. On a sha256 mismatch it validates the fresh
 bundle (size, shebang, `node --check`), keeps the old one as
 `gm-mcp-server.mjs.prev`, atomically swaps the new one in, and prints one
 stderr line (`deployed bundle was stale -- refreshed <old> -> <new> ...`); the
 refreshed tool schema is served from the next connect, or sooner when the transport hands over in-process (see gm-mcp/AGENTS.md "Bundle drift and handover"). A failed check keeps the
 deployed copy and prints one line. Env: `GM_MCP_SELF_UPDATE=0` disables,
+`GM_MCP_SELF_UPDATE_DEPLOYED_ONLY` set to anything but `0`/`false`/`no`/`off`
+limits refreshing to the deployed copy's own process,
 `GM_MCP_BUNDLE_URL` (http(s) or `file:`) overrides the source,
 `GM_MCP_SELF_UPDATE_INTERVAL_MS` overrides the throttle. A bundle from before
 this feature cannot update itself: run `npx github:AnEntrypoint/gm --mcp-only`
@@ -414,6 +420,7 @@ pointer. They are read once at server start, so a host must restart its
 | `GM_MCP_STDOUT_INLINE_MAX` | the whole response of a plain-text-body verb (`exec_js` and every language stem it backs) | `32768` | `1048576` |
 | `GM_MCP_FILE_READ_INLINE_MAX` | the file body `fs_read` returns | `65536` | `1048576` |
 | `GM_MCP_NO_SELF_UPDATE` | any value but `0`/`false`/`no`/`off` freezes the deployed bundle against every self-update | unset | -- |
+| `GM_MCP_SELF_UPDATE_DEPLOYED_ONLY` | any value but `0`/`false`/`no`/`off` limits self-update to a process running from the deployed bundle | unset | -- |
 
 The `fs_read` budget exists because that response *is* the file the caller
 asked for: at the 400-char prose cap every whole-file read came back as a
