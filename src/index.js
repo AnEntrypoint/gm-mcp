@@ -2,7 +2,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createServer } from './mcp-server.js'
 import { installStdioGuards } from './transport-guard.js'
 import { startHttpServer, httpListenOptions, setHealthExtras } from './http-transport.js'
-import { defaultHttpPort, ensureHttpSingletonInBackground, ensureHttpSupervisor, httpSingletonEnabled, recordHttpInstance } from './singleton.js'
+import { defaultHttpPort, ensureHttpSingleton, ensureHttpSingletonInBackground, ensureHttpSupervisor, httpSingletonEnabled, recordHttpInstance } from './singleton.js'
+import { serveStdioRelay } from './stdio-relay.js'
 import { adoptHandedOverHandle, handOverStdioToRefreshedBundle, handOverToRefreshedBundle, handoverRequested, HANDOVER_LISTEN_RETRY_MS } from './bundle-refresh.js'
 import { bundleHealthBlock, bundleStalenessAnnouncement, startBundleDriftWatch } from './bundle-drift.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
@@ -36,6 +37,18 @@ function seedHttpSingletonInBackground({ skipPort = null } = {}) {
     }
 }
 
+// A stdio process relays to the shared HTTP singleton when one answers or can be spawned.
+// Null (no relay) only when the singleton is opted out or cannot start; the local server
+// then runs with its own watchers, the documented degraded mode.
+async function stdioRelayTarget() {
+    if (!httpSingletonEnabled()) return null
+    const started = await ensureHttpSingleton({ port: defaultHttpPort(), wait: true, sweep: false }).catch((error) => {
+        appendDiagnostic('stdio-relay-singleton-failed', { error: describeError(error) })
+        return null
+    })
+    return started?.url ?? null
+}
+
 function watchForStaleBundle({ handOver = null, transportKind = 'stdio' } = {}) {
     return startBundleDriftWatch((state) => {
         const line = bundleStalenessAnnouncement(state)
@@ -62,6 +75,8 @@ export async function main() {
     }
 
     installStdioGuards()
+    const relayUrl = await stdioRelayTarget()
+    if (relayUrl) return serveStdioRelay({ url: relayUrl })
     const server = createServer()
     const transport = new StdioServerTransport()
 
