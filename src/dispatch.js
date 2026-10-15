@@ -1,3 +1,4 @@
+import { isPlainObject } from './plain-object.js';
 import { agentplugDir, spoolDirOf, toolsDir } from './paths.js'
 import { createHash } from 'node:crypto'
 import { spoolFs as fs, spoolSpawn as spawn } from './spool-port.js'
@@ -86,7 +87,7 @@ const FS_READ_RANGE_LOOKING_PATTERNS = [
 ]
 
 function fsReadUnknownRangeKeys(body) {
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return []
+    if (!isPlainObject(body)) return []
     return Object.keys(body)
         .filter((key) => !FS_READ_ACCEPTED_KEYS.includes(key) && !FS_READ_KNOWN_NON_RANGE_KEYS.has(key))
         .filter((key) => FS_READ_RANGE_LOOKING_PATTERNS.some((pattern) => pattern.test(key.toLowerCase().replace(/[^a-z0-9]/g, ''))))
@@ -111,7 +112,7 @@ function fsReadLineNumber(value) {
 }
 
 function fsReadRequestedRange(body) {
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+    if (!isPlainObject(body)) return null
     const has = (key) => body[key] !== undefined && body[key] !== null && body[key] !== ''
     const pair = FS_READ_RANGE_PAIRS.find(([first, second]) => has(first) || has(second))
     if (!pair) {
@@ -146,7 +147,7 @@ function fsReadRequestedRange(body) {
 
 export function fsReadRangeCanonicalBody(verb, body) {
     if (verb !== 'fs_read') return body
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return body
+    if (!isPlainObject(body)) return body
     const requested = fsReadRequestedRange(body)
     if (!requested) return body
     const { start, end, count } = requested
@@ -166,14 +167,14 @@ export function fsReadRangeCanonicalBody(verb, body) {
 
 function fsReadReplyFields(out) {
     const nested = out.data
-    if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return out
+    if (!isPlainObject(nested)) return out
     const { data, ...rest } = out
     return Object.keys(nested).some((key) => key in rest) ? rest : { ...rest, ...nested }
 }
 
 function fsReadTruncation(verb, body, out) {
     if (verb !== 'fs_read') return out
-    if (!out || typeof out !== 'object' || Array.isArray(out) || out.ok === false) return out
+    if (!isPlainObject(out) || out.ok === false) return out
     const fields = fsReadReplyFields(out)
     const requested = fsReadRequestedRange(body)
     let requestedLast
@@ -198,7 +199,7 @@ export function applyFsReadRangeFallback(verb, body, out) {
 
 function applyFsReadRangeFallbackRaw(verb, body, out) {
     if (verb !== 'fs_read') return out
-    if (!out || typeof out !== 'object' || Array.isArray(out)) return out
+    if (!isPlainObject(out)) return out
     const fields = fsReadReplyFields(out)
     const guestRanged = Number.isFinite(Number(fields.start_line)) || Number.isFinite(Number(fields.returned_lines)) || typeof fields.content === 'string'
     if (guestRanged) return out
@@ -248,7 +249,7 @@ function applyFsReadRangeFallbackRaw(verb, body, out) {
 }
 
 export function fsReadSpillNote(out, text) {
-    if (!out || typeof out !== 'object' || Array.isArray(out)) return ''
+    if (!isPlainObject(out)) return ''
     const total = Number(out.total_lines)
     const start = Number(out.start_line)
     const end = Number(out.end_line)
@@ -337,7 +338,7 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
 }
 
 function shapeGitStatusReply(verb, body, out) {
-    if (verb !== 'git_status' || !out || typeof out !== 'object' || Array.isArray(out)) return out
+    if (verb !== 'git_status' || !isPlainObject(out)) return out
     if (!Array.isArray(out.first_paths)) return out
     const limit = Number(body?.limit)
     const hasLimit = body?.limit !== undefined && Number.isFinite(limit) && limit >= 0
@@ -578,7 +579,7 @@ export function normalizedObjectBody(verb, body) {
                 : 'quote each newline as \\n inside the JSON string (or pass the lines as an array), or pass body as an object instead of a JSON string'
             return { error: `${verb} body${field ? `.${field}` : ''} is not valid JSON: ${decoded.error.message}. Repair it: ${repairHint}.` }
         }
-        if (!decoded.value || typeof decoded.value !== 'object' || Array.isArray(decoded.value)) {
+        if (!isPlainObject(decoded.value)) {
             return { error: `${verb} body string must decode to a JSON object; received ${Array.isArray(decoded.value) ? 'an array' : typeof decoded.value}.` }
         }
         return { value: decoded.value }
@@ -609,15 +610,15 @@ const CODESEARCH_DEFAULT_K_MODES = new Set(['literal', 'regex', 'filename'])
 const CODESEARCH_K_ALIASES = ['k', ...tableRow('codesearch').body.fields.k.aliases]
 
 export function withCodesearchDefaultK(verb, body) {
-    if (verb !== 'codesearch' || !body || typeof body !== 'object' || Array.isArray(body)) return { body, defaulted: false }
+    if (verb !== 'codesearch' || !isPlainObject(body)) return { body, defaulted: false }
     if (!CODESEARCH_DEFAULT_K_MODES.has(body.mode)) return { body, defaulted: false }
     if (CODESEARCH_K_ALIASES.some((key) => body[key] !== undefined)) return { body, defaulted: false }
     return { body: { ...body, k: CODESEARCH_DEFAULT_K }, defaulted: true }
 }
 
 export function withCodesearchDefaultKHint(defaulted, verb, out) {
-    if (!defaulted || verb !== 'codesearch' || !out || typeof out !== 'object' || Array.isArray(out)) return out
-    const nested = out.data && typeof out.data === 'object' && !Array.isArray(out.data) && Array.isArray(out.data.matches)
+    if (!defaulted || verb !== 'codesearch' || !isPlainObject(out)) return out
+    const nested = isPlainObject(out.data) && Array.isArray(out.data.matches)
     const source = nested ? out.data : out
     if (!Array.isArray(source.matches)) return out
     const shown = source.matches.length
@@ -633,7 +634,7 @@ export function withCodesearchDefaultKHint(defaulted, verb, out) {
 }
 
 function withQuietAdmission(out) {
-    if (!out || typeof out !== 'object' || Array.isArray(out)) return out
+    if (!isPlainObject(out)) return out
     const waited = Number(out.admission_waited_ms)
     const quiet = (out.admission_decision === undefined || out.admission_decision === 'admitted') && !(waited > 0)
     if (!quiet) return out
@@ -791,7 +792,7 @@ function parseResultDocument(text) {
         } catch {
             throw jsonError
         }
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw jsonError
+        if (!isPlainObject(parsed)) throw jsonError
         return parsed
     }
 }
@@ -850,7 +851,7 @@ const PLAIN_TEXT_BODY_FIELDS = ['raw_body', 'code', 'script', 'command', 'source
 
 function plainTextFromBody(body) {
     if (typeof body === 'string') return body
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined
+    if (!isPlainObject(body)) return undefined
     const present = PLAIN_TEXT_BODY_FIELDS.filter(field => typeof body[field] === 'string')
     if (present.length === 0) return undefined
     const chosen = present[0]
@@ -1059,14 +1060,14 @@ export function leaseSessionsFor(root) {
 const SESSION_ID_BODY_ALIASES = ['SESSION_ID', 'session_id', 'sessionId']
 
 export function explicitBodySessionId(body) {
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+    if (!isPlainObject(body)) return null
     const value = SESSION_ID_BODY_ALIASES.map(key => body[key]).find(candidate => typeof candidate === 'string' && candidate.trim())
     return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
 export function applySessionLeaseVerdict(reply, { body, root }) {
-    const target = reply && typeof reply === 'object' && reply.data && typeof reply.data === 'object' && !Array.isArray(reply.data) ? reply.data : reply
-    if (!target || typeof target !== 'object' || Array.isArray(target)) return reply
+    const target = reply && typeof reply === 'object' && isPlainObject(reply.data) ? reply.data : reply
+    if (!isPlainObject(target)) return reply
     if (!('session_owner_before_this_dispatch' in target) && !('session_mismatch' in target)) return reply
     const owner = typeof target.session_owner_before_this_dispatch === 'string' && target.session_owner_before_this_dispatch ? target.session_owner_before_this_dispatch : null
     const incoming = explicitBodySessionId(body) || (typeof target.session_id === 'string' && target.session_id ? target.session_id : null)
@@ -1378,7 +1379,7 @@ function unpackExecOutputEnvelope(verb, parsed) {
     if (!EXEC_FAMILY_VERBS.includes(verb) || !parsed || typeof parsed.data !== 'string') return parsed
     try {
         const inner = JSON.parse(parsed.data)
-        return inner && typeof inner === 'object' && !Array.isArray(inner) ? { ...parsed, data: inner } : parsed
+        return isPlainObject(inner) ? { ...parsed, data: inner } : parsed
     } catch {
         return parsed
     }
@@ -1843,22 +1844,22 @@ function resumeDisclosure(task, landedAtMs, callStartedAtMs) {
 }
 
 function carriedNoFailure(out) {
-    return Boolean(out) && typeof out === 'object' && !Array.isArray(out)
+    return isPlainObject(out)
         && out.error === undefined && out.error_code === undefined
         && out.dispatch_ledger_error === undefined && out.dream_rsi_observation_error === undefined
         && out.timed_out !== true && out.ok !== false
-        && (!out.data || typeof out.data !== 'object' || Array.isArray(out.data) || carriedNoFailure(out.data))
+        && (!isPlainObject(out.data) || carriedNoFailure(out.data))
 }
 
 const DISPATCH_WAIT_DISCLOSED_AT_MS = 5000
 
 function withDispatchWait(out, waitedMs) {
-    if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !out || typeof out !== 'object' || Array.isArray(out)) return out
+    if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !isPlainObject(out)) return out
     return { ...out, dispatch_waited_ms: waitedMs }
 }
 
 function withResumeDisclosure(out, disclosure) {
-    if (!out || typeof out !== 'object' || Array.isArray(out)) return { resumed: disclosure, response: out }
+    if (!isPlainObject(out)) return { resumed: disclosure, response: out }
     const key = 'resumed' in out ? 'resumed_dispatch' : 'resumed'
     return { ...out, [key]: disclosure }
 }
@@ -2098,12 +2099,12 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     if (!resume_task && isPlainText && typeof raw_body !== 'string') {
         raw_body = plainTextFromBody(body)
         if (typeof raw_body !== 'string') {
-            const carried = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body).join(', ') || 'none' : typeof body
+            const carried = isPlainObject(body) ? Object.keys(body).join(', ') || 'none' : typeof body
             return `error: ${verb} takes a plain-text body -- pass the text as the top-level raw_body argument (a string), e.g. raw_body: "ls -la". body is accepted here too: as a plain string ("ls -la"), or as an object carrying one of ${PLAIN_TEXT_BODY_FIELDS.join(', ')}; when it carries several of them the first of those names wins. This body carried none of them (keys: ${carried}).`
         }
     }
 
-    if (!resume_task && isPlainText && TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === 'string' && body && typeof body === 'object' && !Array.isArray(body) && body.timeoutMs !== undefined) {
+    if (!resume_task && isPlainText && TIMEOUT_MS_PREFIX_VERBS.has(verb) && typeof raw_body === 'string' && isPlainObject(body) && body.timeoutMs !== undefined) {
         const folded = foldTypedTimeoutMs(body.timeoutMs, raw_body)
         if (folded.error) return `error: ${folded.error}`
         raw_body = folded.raw_body
@@ -2201,13 +2202,13 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             const named = withSearchIncompleteness(ranged)
             const cleaned = full_response ? named : cleanResponse(named, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
             let out = cleaned
-            if (!full_response && cleaned && typeof cleaned === 'object' && !Array.isArray(cleaned) && cleaned.data && typeof cleaned.data === 'object' && !Array.isArray(cleaned.data)) {
+            if (!full_response && isPlainObject(cleaned) && isPlainObject(cleaned.data)) {
                 const { data, ...rest } = cleaned
                 const collides = Object.keys(data).some(k => k in rest)
                 if (!collides) out = { ...rest, ...data }
             }
             if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
-            if (ownerTransport && ownerTransport !== 'header-v1' && out && typeof out === 'object' && !Array.isArray(out)) out = { ...out, owner_transport: ownerTransport }
+            if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
             out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, out))
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
@@ -2217,7 +2218,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
             }
             if (include_timing === true || include_timing === 'true') {
-                const timingKey = out && typeof out === 'object' && !Array.isArray(out) && 'mcp_timing' in out ? 'mcp_client_timing' : 'mcp_timing'
+                const timingKey = isPlainObject(out) && 'mcp_timing' in out ? 'mcp_client_timing' : 'mcp_timing'
                 const timing = {
                     submitted_at_ms: callStartedAtMs,
                     response_observed_at_ms: Date.now(),
@@ -2225,7 +2226,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                     response_wakeup: lastWakeSource,
                     daemon_at_submission: readDaemonLiveness(spoolDir),
                 }
-                out = out && typeof out === 'object' && !Array.isArray(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
+                out = isPlainObject(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
             }
             const rendered = (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
             const spillNote = verb === 'fs_read' ? fsReadSpillNote(out, rendered) : ''

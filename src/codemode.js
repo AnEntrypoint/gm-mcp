@@ -1,3 +1,4 @@
+import { isPlainObject } from './plain-object.js';
 import { z } from 'zod'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { canonicalToolName, nearestNames } from './verbs.js'
@@ -39,7 +40,7 @@ const JSON_OBJECT_TEXT = /^\s*\{/
 
 export function foldVerbArgs(tool, args) {
     if (!tool?.verb) return args
-    if (!args || typeof args !== 'object' || Array.isArray(args)) return args
+    if (!isPlainObject(args)) return args
     const topLevel = new Set(Object.keys(tool.inputSchema ?? {}))
     const envelope = {}
     let extra = null
@@ -66,14 +67,14 @@ export function foldVerbArgs(tool, args) {
             return envelope
         }
     }
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return envelope
+    if (!isPlainObject(body)) return envelope
     return { ...envelope, body: { ...extra, ...body } }
 }
 
 export function refuseUndeclaredBodyKeys(name, verb, folded) {
     if (!verb || !folded || typeof folded !== 'object') return
     const body = folded.body
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return
+    if (!isPlainObject(body)) return
     const schema = verbBodySchema(verb)
     if (!schema.declared) return
     const known = new Set(Object.keys(schema.fields))
@@ -120,7 +121,7 @@ function clipDescription(text, max) {
 }
 
 function listEntries(tools, options) {
-    const opts = options && typeof options === 'object' && !Array.isArray(options) ? options : {}
+    const opts = isPlainObject(options) ? options : {}
     const maxDesc = nonNegativeNumber(opts.max_desc, DEFAULT_LIST_DESC_CHARS)
     const needle = typeof opts.filter === 'string' && opts.filter.trim() !== '' ? opts.filter.trim().toLowerCase() : null
     let rows = canonicalCatalog(tools)
@@ -162,7 +163,6 @@ function bindings(tools, { session_id, cwd }, extra) {
         const hyphenated = key.replace(/_/g, '-')
         return tools.has(hyphenated) ? hyphenated : null
     }
-    const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 
     // gm.<verb>({...}) takes one object, and the envelope keys (cwd, max_chars, ...) are top-level
     // keys of it, so gm.git_status({cwd: "<root>"}) repoints the dispatch. Callers routinely write
