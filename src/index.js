@@ -37,9 +37,6 @@ function seedHttpSingletonInBackground({ skipPort = null } = {}) {
     }
 }
 
-// A stdio process relays to the shared HTTP singleton when one answers or can be spawned.
-// Null (no relay) only when the singleton is opted out or cannot start; the local server
-// then runs with its own watchers, the documented degraded mode.
 async function stdioRelayTarget() {
     if (!httpSingletonEnabled()) return null
     const started = await ensureHttpSingleton({ port: defaultHttpPort(), wait: true, sweep: false }).catch((error) => {

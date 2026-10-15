@@ -43,10 +43,9 @@ test('every registry verb is reachable through the served tool', { timeout: 30_0
     await withBundle(async (client) => {
         const { parsed } = await codemodeReply(client, 'return gm.list().map((entry) => entry.name)')
         assert.ok(parsed.length > 0, 'gm.list() named no callable verb')
-        // gm.list() names each verb by its canonical underscore spelling; gm.describe accepts either spelling.
-        const spelled = (verb) => verb.replace(/-/g, '_')
-        const listed = new Set(parsed.map(spelled))
-        const missing = RUNNER_REGISTRY_VERBS.filter((verb) => !listed.has(spelled(verb)))
+        const canonicalUnderscoreSpelling = (verb) => verb.replace(/-/g, '_')
+        const listed = new Set(parsed.map(canonicalUnderscoreSpelling))
+        const missing = RUNNER_REGISTRY_VERBS.filter((verb) => !listed.has(canonicalUnderscoreSpelling(verb)))
         assert.deepEqual(missing, [], `registry verbs not callable through gm_codemode: ${missing.join(', ')}`)
     })
 })

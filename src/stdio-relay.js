@@ -3,6 +3,8 @@ import { appendDiagnostic, describeError } from './server-log.js'
 
 const RELAY_ERROR_CODE = -32000
 const PARSE_ERROR_CODE = -32700
+const SSE_CONTENT_TYPE = 'text/event-stream'
+const SSE_DATA_PREFIX = 'data:'
 
 function writeFrame(text) {
     const body = text.trim()
@@ -13,11 +15,9 @@ function errorFrame(id, code, message) {
     return JSON.stringify({ jsonrpc: '2.0', id: id ?? null, error: { code, message } })
 }
 
-// One JSON-RPC body per POST: the stateless HTTP transport answers JSON (or an SSE
-// frame stream when it chooses one), and notifications answer 202 with no body.
 function framesFromResponse(contentType, text) {
-    if (!contentType.includes('text/event-stream')) return [text]
-    return text.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).filter(Boolean)
+    if (!contentType.includes(SSE_CONTENT_TYPE)) return [text]
+    return text.split('\n').filter((line) => line.startsWith(SSE_DATA_PREFIX)).map((line) => line.slice(SSE_DATA_PREFIX.length).trim()).filter(Boolean)
 }
 
 async function forwardLine(url, line) {
@@ -45,9 +45,6 @@ async function forwardLine(url, line) {
     }
 }
 
-// Forwards each stdin frame to the shared HTTP singleton and writes its reply to stdout.
-// Starts no watchers and no server: the HTTP process owns those. Requests run concurrently;
-// JSON-RPC replies carry their id, so their order on stdout does not matter.
 export function serveStdioRelay({ url }) {
     let inFlight = 0
     let inputClosed = false

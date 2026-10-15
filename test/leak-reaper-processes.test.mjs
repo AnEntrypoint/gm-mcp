@@ -1,7 +1,3 @@
-// The two leaks `reap --json` could not see: a gm-mcp server no ledger row ever recorded, and a
-// second http supervisor armed on a port that already had one. Both passes are judged here on an
-// injected process table and an injected signal, so the suite never reads the host and never
-// signals a pid -- only the predicates and the report shape are under test.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -23,10 +19,8 @@ const ENTRY = '/opt/gm-mcp/bin/gm-mcp-server.mjs'
 const NODE = '/usr/local/bin/node'
 const now = Date.now()
 
-// One live pid stands in for a leaked server: every predicate that measures liveness has to see a
-// process that is really there, and this one is ours.
-const fixture = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
-const fixturePid = fixture.pid
+const liveServerStandIn = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+const liveServerStandInPid = liveServerStandIn.pid
 
 let passed = 0
 const failures = []
@@ -42,7 +36,7 @@ const test = async (name, fn) => {
 }
 
 const cleanup = () => {
-    try { fixture.kill() } catch {}
+    try { liveServerStandIn.kill() } catch {}
     for (const dir of [home, root]) {
         try { rmSync(dir, { recursive: true, force: true }) } catch {}
     }
@@ -107,11 +101,11 @@ await test('a command is classified only when node runs the gm-mcp entry', () =>
 
 await test('an unattributed stdio server with no client above it is retireable', async () => {
     const table = [
-        row(fixturePid, process.pid, `${NODE} ${ENTRY}`, now - 5_000),
+        row(liveServerStandInPid, process.pid, `${NODE} ${ENTRY}`, now - 5_000),
         row(process.pid, 1, `node ${process.argv[1]}`, now - 10_000),
     ]
     const findings = await assessUnattributedServers({ roots: [root], processes: table, now })
-    const finding = findings.find((entry) => entry.pid === fixturePid)
+    const finding = findings.find((entry) => entry.pid === liveServerStandInPid)
     assert.ok(finding, 'the stdio server appears in the report')
     assert.equal(finding.source, 'unattributed-server')
     assert.equal(finding.transport, 'stdio')
@@ -125,11 +119,11 @@ await test('an unattributed stdio server with no client above it is retireable',
 
 await test('a stdio server with a live MCP client above it is kept', async () => {
     const table = [
-        row(fixturePid, process.pid, `${NODE} ${ENTRY}`, now - 5_000),
+        row(liveServerStandInPid, process.pid, `${NODE} ${ENTRY}`, now - 5_000),
         row(process.pid, 1, '/usr/local/bin/claude --mcp-config /tmp/mcp.json', now - 10_000),
     ]
     const findings = await assessUnattributedServers({ roots: [root], processes: table, now })
-    const finding = findings.find((entry) => entry.pid === fixturePid)
+    const finding = findings.find((entry) => entry.pid === liveServerStandInPid)
     assert.equal(finding.verdict, 'keep', `verdict was ${finding.verdict}`)
     assert.ok((finding.protected_by ?? []).includes('no-live-mcp-client'), `protected by ${JSON.stringify(finding.protected_by)}`)
     assert.match(finding.predicates.find((entry) => entry.predicate === 'no-live-mcp-client').value, /^client:/)
@@ -144,11 +138,11 @@ await test('a server whose port still answers /health is never a candidate', asy
     const port = server.address().port
     try {
         const table = [
-            row(fixturePid, process.pid, `${NODE} ${ENTRY} --http --port ${port} --host 127.0.0.1`, now - 5_000),
+            row(liveServerStandInPid, process.pid, `${NODE} ${ENTRY} --http --port ${port} --host 127.0.0.1`, now - 5_000),
             row(process.pid, 1, `node ${process.argv[1]}`, now - 10_000),
         ]
         const findings = await assessUnattributedServers({ roots: [root], processes: table, now })
-        const finding = findings.find((entry) => entry.pid === fixturePid)
+        const finding = findings.find((entry) => entry.pid === liveServerStandInPid)
         assert.equal(finding.transport, 'http')
         assert.equal(finding.verdict, 'keep', `verdict was ${finding.verdict}`)
         assert.deepEqual(finding.protected_by, ['not-live-http-instance'])
@@ -159,42 +153,42 @@ await test('a server whose port still answers /health is never a candidate', asy
 })
 
 await test('a reparented server (ppid 1) is abandoned as well as unattributed', async () => {
-    const table = [row(fixturePid, 1, `${NODE} ${ENTRY}`, now - 5_000)]
+    const table = [row(liveServerStandInPid, 1, `${NODE} ${ENTRY}`, now - 5_000)]
     const findings = await assessUnattributedServers({ roots: [root], processes: table, now })
-    const finding = findings.find((entry) => entry.pid === fixturePid)
+    const finding = findings.find((entry) => entry.pid === liveServerStandInPid)
     assert.equal(finding.verdict, 'retire', `verdict was ${finding.verdict}: ${JSON.stringify(finding.protected_by ?? finding.unmeasured)}`)
     assert.equal(finding.predicates.find((entry) => entry.predicate === 'orphan-evidence').value, 'unattributed+parent-abandoned')
 })
 
 await test('an unreadable ancestor leaves the client question unmeasured, so nothing is retired', async () => {
     const table = [
-        row(fixturePid, process.pid, `${NODE} ${ENTRY}`, now - 5_000),
+        row(liveServerStandInPid, process.pid, `${NODE} ${ENTRY}`, now - 5_000),
         row(process.pid, 1, '', now - 10_000),
     ]
-    const chain = liveMcpClientInParentChain(fixturePid, process.pid, table)
+    const chain = liveMcpClientInParentChain(liveServerStandInPid, process.pid, table)
     assert.equal(chain.value, null)
     const findings = await assessUnattributedServers({ roots: [root], processes: table, now })
-    const finding = findings.find((entry) => entry.pid === fixturePid)
+    const finding = findings.find((entry) => entry.pid === liveServerStandInPid)
     assert.equal(finding.verdict, 'unknown', `verdict was ${finding.verdict}`)
     assert.deepEqual(finding.unmeasured, ['no-live-mcp-client'])
 })
 
 await test('a supervisor process is left to the supervisor sweep, not the reaper', async () => {
-    const table = [row(fixturePid, 1, `${NODE} ${ENTRY} http-supervise --port 8787 --interval 15`)]
+    const table = [row(liveServerStandInPid, 1, `${NODE} ${ENTRY} http-supervise --port 8787 --interval 15`)]
     const findings = await assessUnattributedServers({ roots: [root], processes: table, now })
     assert.equal(findings.length, 0)
 })
 
 await test('reap --json carries the new pass, and a dry run still signals nothing', async () => {
     const table = [
-        row(fixturePid, process.pid, `${NODE} ${ENTRY}`, now - 5_000),
+        row(liveServerStandInPid, process.pid, `${NODE} ${ENTRY}`, now - 5_000),
         row(process.pid, 1, `node ${process.argv[1]}`, now - 10_000),
     ]
     const report = await reapReport({ roots: [root], apply: false, unattributed: table })
     assert.deepEqual(report.unattributed_scan, { enabled: true, scanned: 2 })
     const finding = report.findings.find((entry) => entry.source === 'unattributed-server')
     assert.ok(finding, 'the unattributed server is in the report')
-    assert.equal(finding.pid, fixturePid)
+    assert.equal(finding.pid, liveServerStandInPid)
     assert.equal(report.retired.length, 0)
 
     const skipped = await reapReport({ roots: [root], apply: false, unattributed: false })
@@ -232,16 +226,15 @@ await test('the freshest supervisor is kept and the older duplicates are retired
 })
 
 await test('a fresh claim in the state file outranks an older start time', () => {
-    // the claim has to be a live pid to be worth keeping, so the fixture stands in for it
-    writeFileSync(supervisorStateFilePath(8787), JSON.stringify({ port: 8787, pid: fixturePid, ts: now, interval_ms: 15_000, server_pid: 8000 }, null, 2), 'utf8')
+    writeFileSync(supervisorStateFilePath(8787), JSON.stringify({ port: 8787, pid: liveServerStandInPid, ts: now, interval_ms: 15_000, server_pid: 8000 }, null, 2), 'utf8')
     const signalled = []
     const retired = retireDuplicateHttpSupervisors({
-        processes: [row(fixturePid, 1, `${NODE} ${ENTRY} http-supervise --port 8787 --interval 15`, now - 30 * 86_400_000), ...supervisorRows([now - 17 * 86_400_000, now - 86_400_000, now - 3_600_000])],
+        processes: [row(liveServerStandInPid, 1, `${NODE} ${ENTRY} http-supervise --port 8787 --interval 15`, now - 30 * 86_400_000), ...supervisorRows([now - 17 * 86_400_000, now - 86_400_000, now - 3_600_000])],
         now,
         signalPid: (pid) => { signalled.push(pid); return true },
     })
     assert.deepEqual(signalled.slice().sort((left, right) => left - right), [7001, 7002, 7003])
-    assert.ok(retired.every((entry) => entry.kept_pid === fixturePid))
+    assert.ok(retired.every((entry) => entry.kept_pid === liveServerStandInPid))
     rmSync(supervisorStateFilePath(8787), { force: true })
 })
 
