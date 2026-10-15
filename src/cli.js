@@ -7,7 +7,7 @@ import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
 import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
 import { reapReport, formatFindings } from './leak-reaper.js'
-import { formatLeakWatchLine, leakWatchReport } from './leak-watch.js'
+import { formatLeakWatchLine, formatOrphanLine, leakWatchReport } from './leak-watch.js'
 import { attributePid, globalLedgerPath } from './child-ledger.js'
 
 function repeatedFlag(name) {
@@ -273,6 +273,10 @@ const COMMANDS = {
             for (const entry of report.auto_apply.skipped) {
                 console.log(`  SKIPPED pid ${entry.pid} -- blocked by ${entry.blocked_by.join(', ')}`)
             }
+            if (report.orphans?.count > 0) {
+                for (const item of report.orphans.items) console.log(formatOrphanLine(item))
+                console.log(`\n(report only: an orphan is a process gm never spawned, so nothing here retires it -- classify pid(s) ${report.orphans.items.map((item) => item.pid).join(',')} by hand, thresholds ${JSON.stringify(report.orphans.thresholds)})`)
+            }
             if (!apply && report.population.retireable > 0) {
                 console.log(`\n(report only: nothing was signalled -- re-run with --apply, or set GM_MCP_LEAK_AUTO_APPLY=1 to let the hourly pass retire them)`)
             }
@@ -328,7 +332,9 @@ usage:
   gm-mcp-server.js leak-watch [--apply] [--root <dir>]... [--json]
                                    the same pass the server runs hourly: how many gm-mcp
                                    processes are alive, how many are unattributed or
-                                   retireable, and how many duplicate supervisors a port has
+                                   retireable, how many duplicate supervisors a port has,
+                                   and which heavyweight orphans (ppid 1, not ours) are
+                                   holding memory while burning no CPU
   gm-mcp-server.js attribute --pid N [--root <dir>]...
                                    print which dispatch spawned pid N (exit 1 if unattributed)
   gm-mcp-server.js port-pool [--preferred N]
