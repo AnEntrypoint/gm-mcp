@@ -1,3 +1,4 @@
+import { isPlainObject } from './plain-object.js';
 const NOISE_KEYS = new Set(['request_fingerprint'])
 
 function envPositiveInt(name, fallback) {
@@ -97,7 +98,7 @@ function searchShowsNoHits(source) {
     if (Array.isArray(source.matches)) return source.matches.length === 0
     if (Array.isArray(source.hits)) return source.hits.length === 0
     const counts = source.counts
-    if (counts && typeof counts === 'object' && !Array.isArray(counts)) {
+    if (isPlainObject(counts)) {
         const definitions = counts.definitions
         const references = counts.references
         if (Number.isFinite(definitions) || Number.isFinite(references)) {
@@ -113,8 +114,8 @@ function searchShowsNoHits(source) {
 }
 
 export function withSearchIncompleteness(out) {
-    if (!out || typeof out !== 'object' || Array.isArray(out)) return out
-    const data = out.data && typeof out.data === 'object' && !Array.isArray(out.data) ? out.data : null
+    if (!isPlainObject(out)) return out
+    const data = isPlainObject(out.data) ? out.data : null
     const verb = typeof out.verb === 'string' ? out.verb : (data && typeof data.verb === 'string' ? data.verb : '')
     if (!SEARCH_VERBS.has(verb)) return out
     const source = data || out
@@ -149,9 +150,9 @@ function withNoticeCodesAt(level) {
 }
 
 export function withNoticeCodes(out) {
-    if (!out || typeof out !== 'object' || Array.isArray(out)) return out
+    if (!isPlainObject(out)) return out
     const top = withNoticeCodesAt(out)
-    if (top.data && typeof top.data === 'object' && !Array.isArray(top.data)) return { ...top, data: withNoticeCodesAt(top.data) }
+    if (isPlainObject(top.data)) return { ...top, data: withNoticeCodesAt(top.data) }
     return top
 }
 
@@ -208,7 +209,7 @@ function cleanHit(hit, outPath, plainTextFile, untruncatedKeys, inlineMax) {
         if (HIT_NOISE_KEYS.has(k)) continue
         if (v === '' || v === null || v === undefined) continue
         out[k] = typeof v === 'string' ? truncateLongText(v, k, outPath, plainTextFile, untruncatedKeys, inlineMax)
-            : (v && typeof v === 'object' && !Array.isArray(v)) ? cleanHit(v, outPath, plainTextFile, untruncatedKeys, inlineMax)
+            : (isPlainObject(v)) ? cleanHit(v, outPath, plainTextFile, untruncatedKeys, inlineMax)
             : v
     }
     return out
@@ -239,7 +240,7 @@ export function cleanResponse(value, keyHint, outPath, plainTextFile, untruncate
             }
             const cleanedV = cleanResponse(v, k, outPath, plainTextFile, untruncatedKeys, inlineMax)
             if (Array.isArray(cleanedV) && cleanedV.length === 0 && !EMPTY_LIST_IS_THE_ANSWER_KEYS.has(k)) continue
-            if (cleanedV && typeof cleanedV === 'object' && !Array.isArray(cleanedV) && Object.keys(cleanedV).length === 0) continue
+            if (isPlainObject(cleanedV) && Object.keys(cleanedV).length === 0) continue
             out[k] = cleanedV
         }
         return out
@@ -324,7 +325,7 @@ function wireExcerpt(value) {
 }
 
 function excerptRow(row) {
-    if (!row || typeof row !== 'object' || Array.isArray(row)) return row
+    if (!isPlainObject(row)) return row
     const out = {}
     for (const [k, v] of Object.entries(row)) out[k] = WIRE_EXCERPT_IMMUNE_KEYS.has(k) ? v : wireExcerpt(v)
     return out
@@ -474,12 +475,12 @@ function equalJsonValues(left, right, depth = 0) {
 }
 
 export function omitRepeatedFaultStdout(response, outPath) {
-    if (!response || typeof response !== 'object' || Array.isArray(response)) return response
+    if (!isPlainObject(response)) return response
     const omitted = []
     const omitAt = (object, prefix, depth = 0) => {
-        if (!object || typeof object !== 'object' || Array.isArray(object) || depth >= 32) return object
+        if (!isPlainObject(object) || depth >= 32) return object
         let next = object
-        if (object.data && typeof object.data === 'object' && !Array.isArray(object.data)) {
+        if (isPlainObject(object.data)) {
             const data = omitAt(object.data, prefix + 'data.', depth + 1)
             if (data !== object.data) next = { ...object, data }
         }
@@ -487,7 +488,7 @@ export function omitRepeatedFaultStdout(response, outPath) {
             || !(object.ok === false || object.error !== undefined || object.error_code !== undefined)) return next
         let parsed
         try { parsed = JSON.parse(object.stdout) } catch { return next }
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return next
+        if (!isPlainObject(parsed)) return next
         const keys = Object.keys(parsed)
         if (!keys.length || !keys.every(key => Object.hasOwn(object, key) && equalJsonValues(parsed[key], object[key]))) return next
         const { stdout, ...rest } = next
@@ -508,7 +509,7 @@ export function omitRepeatedFaultStdout(response, outPath) {
 }
 
 export function compactWireResponse(response, outPath, receiptVerb = response?.verb) {
-    if (!response || typeof response !== 'object' || Array.isArray(response)) return response
+    if (!isPlainObject(response)) return response
     const gitReceiptContext = WIRE_GIT_COMMIT_VERBS.has(receiptVerb)
         && gitReceiptCarriesNoFailure(response)
     const committedGitReceipt = gitReceiptContext && response.committed === true
@@ -536,7 +537,7 @@ export function compactWireResponse(response, outPath, receiptVerb = response?.v
             continue
         }
         const omittedSubkeys = WIRE_OMITTED_SUBKEYS.get(key)
-        let next = omittedSubkeys && value && typeof value === 'object' && !Array.isArray(value)
+        let next = omittedSubkeys && isPlainObject(value)
             ? omitKeys(value, omittedSubkeys)
             : value
         const fieldCompactor = WIRE_FIELD_COMPACTORS.get(key)
@@ -544,7 +545,7 @@ export function compactWireResponse(response, outPath, receiptVerb = response?.v
         else if (WIRE_HIT_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_HITS_INLINE_MAX).map(excerptRow)
         else if (WIRE_ROW_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.map(excerptRow)
         else if (committedGitReceipt && WIRE_GIT_EXCLUSION_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_GIT_EXCLUSIONS_INLINE_MAX)
-        if (key === 'data' && next && typeof next === 'object' && !Array.isArray(next)) {
+        if (key === 'data' && isPlainObject(next)) {
             const inner = compactWireResponse(next, outPath, gitReceiptContext ? receiptVerb : null)
             if (inner !== next) {
                 const { wire_compacted: innerWire, ...innerRest } = inner
@@ -576,7 +577,7 @@ export function compactWireResponse(response, outPath, receiptVerb = response?.v
 export const VERBATIM_TEXT_MARKER = '--- data (verbatim, no indentation added) ---'
 
 export function renderVerbatimFileText(out, toYaml) {
-    if (!out || typeof out !== 'object' || Array.isArray(out)) return undefined
+    if (!isPlainObject(out)) return undefined
     if (typeof out.data === 'string') {
         const { data, ...rest } = out
         return `${toYaml(rest)}${VERBATIM_TEXT_MARKER}\n${data}`
