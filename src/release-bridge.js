@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { execFile } from 'node:child_process'
+import { execFile } from './process-port.js'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -35,6 +35,7 @@ const RELEASE_TAG = /^v?(\d+\.\d+\.\d+)$/
 const execFileAsync = promisify(execFile)
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
+const fileSha256 = (file) => sha256(readFileSync(file))
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-')
 
 function readJson(file) {
@@ -70,12 +71,12 @@ function clearBomMisclassifiedSideloadMarker(dir) {
     appendDiagnostic('guest-sideload-marker-cleared', { file: markerPath, installed_marker: marker.installed_marker })
 }
 function writeAtomic(file, text) {
-    const temp = `${file}.${process.pid}.${Date.now()}.tmp`
+    const tempPath = `${file}.${process.pid}.${Date.now()}.tmp`
     try {
-        writeFileSync(temp, text, { flag: 'wx' })
-        renameSync(temp, file)
+        writeFileSync(tempPath, text, { flag: 'wx' })
+        renameSync(tempPath, file)
     } catch (error) {
-        rmSync(temp, { force: true })
+        rmSync(tempPath, { force: true })
         throw error
     }
 }
@@ -91,10 +92,10 @@ function runnerFileName() {
 }
 
 export function runnerAssetName(platform = process.platform, arch = process.arch) {
-    const os = { linux: 'linux', darwin: 'macos', win32: 'windows' }[platform]
-    const cpu = { x64: 'x64', arm64: 'arm64' }[arch]
-    if (!os || !cpu) return null
-    return os === 'windows' ? `agentplug-runner-windows-${cpu}.exe` : `agentplug-runner-${os}-${cpu}`
+    const releaseOs = { linux: 'linux', darwin: 'macos', win32: 'windows' }[platform]
+    const cpuName = { x64: 'x64', arm64: 'arm64' }[arch]
+    if (!releaseOs || !cpuName) return null
+    return releaseOs === 'windows' ? `agentplug-runner-windows-${cpuName}.exe` : `agentplug-runner-${releaseOs}-${cpuName}`
 }
 
 export function parseReleaseTag(tag) {
@@ -206,7 +207,7 @@ export async function probeRunner(file) {
     }
 }
 
-function swapIn(target, candidate, backupLabel) {
+function swapIn(target, tempPath, backupLabel) {
     try {
         let backup = null
         if (existsSync(target)) {
@@ -215,14 +216,14 @@ function swapIn(target, candidate, backupLabel) {
             renameSync(target, backup)
         }
         try {
-            renameSync(candidate, target)
+            renameSync(tempPath, target)
         } catch (error) {
             if (backup) renameSync(backup, target)
             throw error
         }
         return backup
     } catch (error) {
-        rmSync(candidate, { force: true })
+        rmSync(tempPath, { force: true })
         throw error
     }
 }
@@ -248,31 +249,31 @@ async function reconcileRunner(release) {
     if (!installed) return { outcome: 'skipped', reason: 'installed-version-unknown' }
     if (!installed.release_build) return { outcome: 'skipped', reason: 'local-build' }
     if (compareVersions(release.version, installed.version) <= 0) {
-        const liveSha = sha256(readFileSync(runnerPath))
+        const liveSha = fileSha256(runnerPath)
         if (liveSha === publishedDigest(release, asset) && !runnerSwapRecorded(installed.version, liveSha)) recordRunnerSwap(installed.version, liveSha)
         return { outcome: 'current', version: installed.version }
     }
     if (readJson(path.join(agentplugDir(), 'daemon-status.json'))?.runner_update_in_progress) {
         return { outcome: 'deferred', reason: 'runner-update-in-progress' }
     }
-    const installedSha = sha256(readFileSync(runnerPath))
+    const installedSha = fileSha256(runnerPath)
     if (readJson(path.join(agentplugDir(), RUNNER_LOCAL_BUILD_PIN_FILE))?.sha256 === installedSha) {
         return { outcome: 'refused', reason: 'local-build-pinned', installed_sha256: installedSha }
     }
 
     const { bytes, sha256: newSha } = await fetchVerified(release, asset)
-    const candidate = path.join(toolsDir(), `${runnerFileName()}.bridge-${process.pid}-${Date.now()}.new`)
-    writeFileSync(candidate, bytes, { flag: 'wx', mode: 0o755 })
+    const tempPath = path.join(toolsDir(), `${runnerFileName()}.bridge-${process.pid}-${Date.now()}.new`)
+    writeFileSync(tempPath, bytes, { flag: 'wx', mode: 0o755 })
     try {
-        const staged = await probeRunner(candidate)
+        const staged = await probeRunner(tempPath)
         if (!staged || staged.version !== release.version || !staged.release_build) {
             throw new Error(`staged runner reports ${JSON.stringify(staged)}, expected release build ${release.version}`)
         }
     } catch (error) {
-        rmSync(candidate, { force: true })
+        rmSync(tempPath, { force: true })
         throw error
     }
-    const backup = swapIn(runnerPath, candidate, `bak-${installed.version}`)
+    const backup = swapIn(runnerPath, tempPath, `bak-${installed.version}`)
     recordRunnerSwap(release.version, newSha)
     return { outcome: 'swapped', from: installed.version, to: release.version, sha256: newSha, previous_sha256: installedSha, backup }
 }
@@ -299,9 +300,9 @@ async function reconcileGuest(release) {
     const { bytes, sha256: newSha } = await fetchVerified(release, GUEST_ASSET)
     if (!WASM_MAGIC.every((byte, index) => bytes[index] === byte)) throw new Error(`${GUEST_ASSET} is not a wasm module`)
     mkdirSync(dir, { recursive: true })
-    const candidate = `${wasmPath}.bridge-${process.pid}-${Date.now()}.tmp`
-    writeFileSync(candidate, bytes, { flag: 'wx' })
-    const backup = swapIn(wasmPath, candidate, `bak-${recorded ?? 'unversioned'}`)
+    const tempPath = `${wasmPath}.bridge-${process.pid}-${Date.now()}.tmp`
+    writeFileSync(tempPath, bytes, { flag: 'wx' })
+    const backup = swapIn(wasmPath, tempPath, `bak-${recorded ?? 'unversioned'}`)
     writeAtomic(versionPath, release.version)
     recordGuestBuild(dir, release, newSha, bytes.length)
     return { outcome: 'swapped', from: recorded, to: release.version, sha256: newSha, backup }
@@ -368,61 +369,90 @@ function acquireLock() {
     return null
 }
 
+function bridgeStatePath() {
+    return path.join(agentplugDir(), STATE_FILE)
+}
+
+function loadBridgeState() {
+    return readJson(bridgeStatePath()) ?? {}
+}
+
+function persistBridgeState(state) {
+    writeAtomic(bridgeStatePath(), `${JSON.stringify(state, null, 2)}\n`)
+}
+
+function retryPendingSignal(state) {
+    if (!state.pending_signal) return state
+    const pending = state.pending_signal
+    const signal = signalDaemonForSwap(pending.want)
+    if (signal.outcome === 'signalled') appendDiagnostic('release-bridge-signal', { ...signal, want: pending.want })
+    return signal.outcome === 'deferred' ? state : { ...state, pending_signal: null }
+}
+
+function bridgeIntervalMs() {
+    return Number(process.env.GM_MCP_RELEASE_BRIDGE_INTERVAL_MS) > 0
+        ? Number(process.env.GM_MCP_RELEASE_BRIDGE_INTERVAL_MS)
+        : DEFAULT_INTERVAL_MS
+}
+
+async function reconcileRepo(repo, reconcile) {
+    try {
+        return await reconcile(await fetchLatestRelease(repo))
+    } catch (error) {
+        return { outcome: 'failed', error: error?.message ?? String(error) }
+    }
+}
+
+function swapSignalFor(runner, guest) {
+    if (runner.outcome !== 'swapped' && guest.outcome !== 'swapped') return null
+    const want = {
+        exe_sha256: runner.outcome === 'swapped' ? runner.sha256 : null,
+        gm_sha256: guest.outcome === 'swapped' ? guest.sha256 : null,
+    }
+    return { want, signal: signalDaemonForSwap(want) }
+}
+
+async function withBridgeLock(body) {
+    mkdirSync(agentplugDir(), { recursive: true })
+    const lockPath = acquireLock()
+    if (!lockPath) return { outcome: 'busy' }
+    try {
+        return await body()
+    } finally {
+        rmSync(lockPath, { force: true })
+    }
+}
+
 export async function runReleaseBridge() {
     if ((process.env.GM_MCP_RELEASE_BRIDGE || '').trim() === '0') return { outcome: 'disabled' }
     const suppressed = bridgeNoSelfUpdateReason()
     if (suppressed) return { outcome: 'frozen', reason: suppressed }
 
-    mkdirSync(agentplugDir(), { recursive: true })
-    const lockPath = acquireLock()
-    if (!lockPath) return { outcome: 'busy' }
-    try {
-        const statePath = path.join(agentplugDir(), STATE_FILE)
-        const state = readJson(statePath) ?? {}
-        if (state.pending_signal) {
-            const pending = state.pending_signal
-            const signal = signalDaemonForSwap(pending.want)
-            if (signal.outcome !== 'deferred') state.pending_signal = null
-            if (signal.outcome === 'signalled') appendDiagnostic('release-bridge-signal', { ...signal, want: pending.want })
-        }
+    return withBridgeLock(async () => {
+        const state = loadBridgeState()
+        let next = retryPendingSignal(state)
 
-        const intervalMs = Number(process.env.GM_MCP_RELEASE_BRIDGE_INTERVAL_MS) > 0
-            ? Number(process.env.GM_MCP_RELEASE_BRIDGE_INTERVAL_MS)
-            : DEFAULT_INTERVAL_MS
+        const intervalMs = bridgeIntervalMs()
         const lastChecked = Number(state.last_checked_ts) || 0
-        if (Date.now() - lastChecked < intervalMs) {
-            writeAtomicIfChanged(statePath, `${JSON.stringify(state, null, 2)}\n`)
-            return { outcome: 'checked-recently', next_check_ms: intervalMs - (Date.now() - lastChecked) }
+        const now = Date.now()
+        if (now - lastChecked < intervalMs) {
+            writeAtomicIfChanged(bridgeStatePath(), `${JSON.stringify(next, null, 2)}\n`)
+            return { outcome: 'checked-recently', next_check_ms: intervalMs - (now - lastChecked) }
         }
-        writeAtomic(statePath, `${JSON.stringify({ ...state, last_checked_ts: Date.now() }, null, 2)}\n`)
+        persistBridgeState({ ...next, last_checked_ts: now })
 
-        let runner
-        try {
-            runner = await reconcileRunner(await fetchLatestRelease(RUNNER_REPO))
-        } catch (error) {
-            runner = { outcome: 'failed', error: error?.message ?? String(error) }
-        }
-        let guest
-        try {
-            guest = await reconcileGuest(await fetchLatestRelease(GUEST_REPO))
-        } catch (error) {
-            guest = { outcome: 'failed', error: error?.message ?? String(error) }
-        }
+        const runner = await reconcileRepo(RUNNER_REPO, reconcileRunner)
+        const guest = await reconcileRepo(GUEST_REPO, reconcileGuest)
 
-        let signal = null
-        if (runner.outcome === 'swapped' || guest.outcome === 'swapped') {
-            const runnerSha = runner.outcome === 'swapped' ? runner.sha256 : null
-            const want = { exe_sha256: runnerSha, gm_sha256: guest.outcome === 'swapped' ? guest.sha256 : null }
-            signal = signalDaemonForSwap(want)
-            state.pending_signal = signal.outcome === 'deferred' ? { want, ts: Date.now(), reason: signal.reason } : null
-        }
+        const swap = swapSignalFor(runner, guest)
+        const signal = swap ? swap.signal : null
+        const pendingSignal = signal?.outcome === 'deferred' ? { want: swap.want, ts: now, reason: signal.reason } : null
         const summary = { outcome: 'checked', runner, guest, signal }
-        writeAtomic(statePath, `${JSON.stringify({ ...state, last_checked_ts: Date.now(), last_runner: runner, last_guest: guest, last_signal: signal }, null, 2)}\n`)
+        const settled = { ...next, last_checked_ts: now, pending_signal: swap ? pendingSignal : next.pending_signal, last_runner: runner, last_guest: guest, last_signal: signal }
+        persistBridgeState(settled)
         appendDiagnostic('release-bridge', summary)
         return summary
-    } finally {
-        rmSync(lockPath, { force: true })
-    }
+    })
 }
 
 export function runReleaseBridgeInBackground() {

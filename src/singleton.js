@@ -1,5 +1,5 @@
 import { agentplugDir } from './paths.js'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn } from './process-port.js'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -9,6 +9,7 @@ import { portListenerState } from './ports.js'
 import { recordChild } from './child-ledger.js'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { keepServingOnAsyncFailure, logSignalExits } from './transport-guard.js'
+import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { DEFAULT_HOST, DEFAULT_PORT, HEALTH_PATH, MCP_PATH } from './http-transport.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { compareVersions } from './self-update.js'
@@ -53,8 +54,7 @@ export function httpSingletonEnabled() {
         const value = envValue(name)
         if (value !== null && !OFF_VALUES.has(value)) return false
     }
-    const legacy = envValue('GM_MCP_HTTP_SINGLETON')
-    return !(legacy !== null && OFF_VALUES.has(legacy))
+    return true
 }
 
 export function launchedEntryPath() {
@@ -64,22 +64,27 @@ export function launchedEntryPath() {
 }
 
 function readStateFile(filePath, port = null) {
+    let state
     try {
-        const state = JSON.parse(readFileSync(filePath, 'utf8'))
-        if (!state || typeof state !== 'object') return null
-        if (port !== null && Number(state.port) !== Number(port)) return null
-        return state
-    } catch {
+        state = JSON.parse(readFileSync(filePath, 'utf8'))
+    } catch (error) {
+        if (error?.code !== 'ENOENT') appendDiagnostic('singleton-state-corrupt', { file: filePath, error: describeError(error) })
         return null
     }
+    if (!state || typeof state !== 'object' || Array.isArray(state)) {
+        appendDiagnostic('singleton-state-corrupt', { file: filePath, error: 'not a JSON object' })
+        return null
+    }
+    if (port !== null && Number(state.port) !== Number(port)) return null
+    return state
 }
 
 function writeStateFile(filePath, state) {
     try {
         mkdirSync(path.dirname(filePath), { recursive: true })
-        const temporary = `${filePath}.${process.pid}.tmp`
-        writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
-        renameSync(temporary, filePath)
+        const tempPath = `${filePath}.${process.pid}.tmp`
+        writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+        renameSync(tempPath, filePath)
         return true
     } catch {
         return false
@@ -149,10 +154,8 @@ export function spawnServerProcess({ port = defaultHttpPort(), host = DEFAULT_HO
     const { stdio, fd } = childStdio()
     const child = spawn(process.execPath, [entry, '--http', '--port', String(port), '--host', String(host)], {
         cwd: homedir(),
-        detached: true,
-        stdio,
-        windowsHide: true,
-        env: { ...process.env, GM_MCP_TRANSPORT: 'http', GM_MCP_HTTP_SINGLETON: '0' },
+        ...hiddenDetachedOptions({ stdio }),
+        env: { ...process.env, GM_MCP_TRANSPORT: 'http', GM_MCP_NO_HTTP_SINGLETON: '1' },
     })
     if (fd !== null) closeSync(fd)
     child.on('error', (error) => {
@@ -593,10 +596,8 @@ export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = su
     const entry = launchedEntryPath()
     const { stdio, fd } = childStdio()
     const child = spawn(process.execPath, [entry, 'http-supervise', '--port', String(port), '--interval', String(Math.round(intervalMs / 1000))], {
+        ...hiddenDetachedOptions({ stdio }),
         cwd: homedir(),
-        detached: true,
-        stdio,
-        windowsHide: true,
         env: { ...process.env, GM_MCP_HTTP_SUPERVISOR: '0' },
     })
     if (fd !== null) closeSync(fd)

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,10 +22,53 @@ if (parseBundleVersion(fresh) !== BUNDLE_VERSION) {
 
 if (committed === fresh) {
     console.log(`bin/gm-mcp-server.js matches a fresh build of src/ (${fresh.length} bytes) -- no drift`)
-    process.exit(0)
+} else {
+    console.error('bin/gm-mcp-server.js is STALE: it does not match a fresh build of src/cli.js.')
+    console.error(`committed: ${committed.length} bytes -- fresh build: ${fresh.length} bytes`)
+    console.error('Run: npm run build   (then commit bin/gm-mcp-server.js in the same commit as the src/ change)')
+    process.exit(1)
 }
 
-console.error('bin/gm-mcp-server.js is STALE: it does not match a fresh build of src/cli.js.')
-console.error(`committed: ${committed.length} bytes -- fresh build: ${fresh.length} bytes`)
-console.error('Run: npm run build   (then commit bin/gm-mcp-server.js in the same commit as the src/ change)')
-process.exit(1)
+// A reply a dispatch only reaches on its rare paths (a poll timeout, a resumed task) is the one a
+// broken build never runs in anger, so the gate builds every one from the committed bundle and
+// fails when any of them could not be built: an undeclared identifier in a shipped bundle is a
+// build failure here, not a ReferenceError a caller meets at runtime.
+const REPLY_KEYS = ['timed_out', 'task', 'poll_timeout_ms', 'in_path', 'out_path', 'resume_task_supported', 'dispatch_state', 'dispatch_wait', 'daemon']
+
+const selfCheck = spawnSync(process.execPath, [committedPath, 'self-check'], { encoding: 'utf8' })
+if (selfCheck.error) {
+    console.error(`bin/gm-mcp-server.js self-check did not run: ${selfCheck.error.message}`)
+    process.exit(1)
+}
+if (selfCheck.status !== 0) {
+    console.error(`bin/gm-mcp-server.js self-check exited ${selfCheck.status}: ${(selfCheck.stderr || '').trim()}`)
+    process.exit(1)
+}
+let envelopes
+try {
+    envelopes = JSON.parse(selfCheck.stdout)
+} catch (error) {
+    console.error(`bin/gm-mcp-server.js self-check printed no JSON: ${error.message}`)
+    process.exit(1)
+}
+if (!envelopes || typeof envelopes !== 'object' || Object.keys(envelopes).length === 0) {
+    console.error('bin/gm-mcp-server.js self-check printed no reply envelope, so the gate checked nothing')
+    process.exit(1)
+}
+const problems = []
+for (const [name, reply] of Object.entries(envelopes)) {
+    if (!reply || typeof reply !== 'object') {
+        problems.push(`${name} is not a reply object`)
+        continue
+    }
+    for (const key of REPLY_KEYS) if (!(key in reply)) problems.push(`${name} carries no ${key}`)
+    if (reply.timed_out !== true) problems.push(`${name} does not report timed_out: true`)
+    if (reply.diagnostics_failed !== undefined) problems.push(`${name} fell back to its minimal reply: ${reply.diagnostics_failed}`)
+    if (reply.requested_poll_timeout_ms === undefined) problems.push(`${name} never reached its own diagnostics`)
+}
+if (problems.length > 0) {
+    for (const problem of problems) console.error(`bin/gm-mcp-server.js self-check: ${problem}`)
+    process.exit(1)
+}
+console.log(`bin/gm-mcp-server.js self-check built every reply a dispatch can end on (${Object.keys(envelopes).join(', ')})`)
+process.exit(0)
