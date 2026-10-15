@@ -246,7 +246,8 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     if (suppressed) return refuse('frozen', suppressed)
 
     const stampPath = `${deployedPath}.checked`
-    if (checkedRecently(stampPath)) return { outcome: 'checked-recently', self }
+    const ignoreStamp = options.ignoreStamp === true || options.force === true
+    if (!ignoreStamp && checkedRecently(stampPath)) return { outcome: 'checked-recently', self }
 
     const { bytes: deployedBytes, sha256: deployedHash } = readDigest(deployedPath)
     const pinned = localBuildPinReason(deployedHash)
@@ -270,6 +271,49 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     replaceDeployedBundle(deployedPath, freshBytes)
     touch(stampPath)
     return { outcome: 'refreshed', self, from: deployedHash, to: freshHash, url, deployed_bundle: deployedPath, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
+}
+
+// A fix pushed upstream reaches a running server only when the hourly stamp lets it, so an operator
+// (or an agent that just pushed one and needs it NOW) has to be able to ask for the check without
+// waiting out the interval. This skips ONLY the stamp-freshness deferral: the freeze file, the
+// local-build pin, the no-downgrade guard, the loadability check and the inflight-dispatch wait all
+// still hold, and it reloads nothing -- a forced check is the same file swap the hourly tick does.
+export async function refreshDeployedBundleNow(deployedPath = defaultDeployedPath(), options = {}) {
+    const result = await refreshStaleDeployedBundle(deployedPath, { ...options, ignoreStamp: true })
+    const forced = { ...result, forced: true }
+    appendDiagnostic('self-update-check', forced)
+    return forced
+}
+
+export function deployedBundleVersion(deployedPath = defaultDeployedPath()) {
+    try {
+        return parseBundleVersion(readFileSync(deployedPath))
+    } catch {
+        return null
+    }
+}
+
+export function describeSelfUpdateOutcome(result) {
+    switch (result?.outcome) {
+        case 'refreshed':
+            return `refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} from ${result.url}`
+        case 'current':
+            return `already the release-channel build${result.hash ? ` (sha ${shortHash(result.hash)})` : ''}`
+        case 'checked-recently':
+            return `checked within the last ${Math.round(checkIntervalMs() / 1000)}s, so the stamp was honoured`
+        case 'deferred-dispatch-inflight':
+            return `waiting on ${result.dispatches_inflight} dispatch(es) inflight -- the swap waits rather than cutting a reply mid-write`
+        case 'disabled':
+            return 'GM_MCP_SELF_UPDATE=0 disables the release channel'
+        case 'no-deployed-copy':
+            return `no deployed bundle at ${result.deployed_bundle}, and one is never created behind the operator`
+        case 'not-deployed-copy':
+            return result.reason
+        case 'refused':
+            return `refused (${result.code}) -- ${result.reason}`
+        default:
+            return `no outcome to report (${JSON.stringify(result ?? null)})`
+    }
 }
 
 let deferRetriesLeft = MAX_DEFER_RETRIES_PER_TRIGGER
