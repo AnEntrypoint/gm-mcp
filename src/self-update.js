@@ -16,6 +16,7 @@ const MIN_PLAUSIBLE_BUNDLE_BYTES = 100_000
 const BUNDLE_SHEBANG = '#!/usr/bin/env node'
 
 const NO_SELF_UPDATE_ENV = 'GM_MCP_NO_SELF_UPDATE'
+const DEPLOYED_ONLY_ENV = 'GM_MCP_SELF_UPDATE_DEPLOYED_ONLY'
 const NO_SELF_UPDATE_FILE = 'gm-mcp-server.no-self-update'
 const LOCAL_BUILD_PIN_FILE = 'gm-mcp-server.local-build.json'
 const SELF_UPDATE_OFF_VALUES = new Set(['0', 'false', 'no', 'off'])
@@ -48,6 +49,13 @@ export function noSelfUpdateReason() {
     const marker = noSelfUpdateFilePath()
     if (existsSync(marker)) return `${marker} exists, which suppresses self-update of the deployed bundle (delete that file to allow updates again)`
     return null
+}
+
+export function deployedOnlySelfUpdateReason() {
+    const envValue = process.env[DEPLOYED_ONLY_ENV]
+    if (envValue === undefined) return null
+    if (SELF_UPDATE_OFF_VALUES.has(envValue.trim().toLowerCase())) return null
+    return `${DEPLOYED_ONLY_ENV}=${JSON.stringify(envValue)} limits the release channel to the deployed bundle's own process (set it to 0 to let any running copy keep the deployed bundle current)`
 }
 
 export function readLocalBuildPin() {
@@ -213,20 +221,22 @@ function replaceDeployedBundle(deployedPath, bytes) {
     }
 }
 
-export async function refreshStaleDeployedBundle() {
+export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedPath()) {
     if (process.env.GM_MCP_SELF_UPDATE === '0') return { outcome: 'disabled' }
-    const deployedPath = defaultDeployedPath()
-    if (!isRunningFromDeployedBundle(deployedPath)) return { outcome: 'not-deployed-copy' }
+    const self = isRunningFromDeployedBundle(deployedPath)
+    const deployedOnly = deployedOnlySelfUpdateReason()
+    if (deployedOnly && !self) return { outcome: 'not-deployed-copy', self, reason: deployedOnly }
+    if (!existsSync(deployedPath)) return { outcome: 'no-deployed-copy', self, deployed_bundle: deployedPath }
     const refuse = (code, reason) => {
         console.error(`gm-mcp: refusing deployed bundle self-update (${code}) -- ${reason}`)
-        appendDiagnostic('self-update-refused', { code, reason, deployed_bundle: deployedPath })
-        return { outcome: 'refused', code, reason, deployed_bundle: deployedPath }
+        appendDiagnostic('self-update-refused', { code, reason, self, deployed_bundle: deployedPath })
+        return { outcome: 'refused', code, reason, self, deployed_bundle: deployedPath }
     }
     const suppressed = noSelfUpdateReason()
     if (suppressed) return refuse('frozen', suppressed)
 
     const stampPath = `${deployedPath}.checked`
-    if (checkedRecently(stampPath)) return { outcome: 'checked-recently' }
+    if (checkedRecently(stampPath)) return { outcome: 'checked-recently', self }
 
     const { bytes: deployedBytes, sha256: deployedHash } = readDigest(deployedPath)
     const pinned = localBuildPinReason(deployedHash)
@@ -237,28 +247,31 @@ export async function refreshStaleDeployedBundle() {
     const freshHash = sha256(freshBytes)
     if (freshHash === deployedHash) {
         touch(stampPath)
-        return { outcome: 'current', hash: freshHash }
+        return { outcome: 'current', self, hash: freshHash }
     }
     const version = versionGuardReason(freshBytes, deployedBytes)
     if (version.code) return refuse(version.code, version.reason)
 
-    if (inflightDispatchCount() > 0) return { outcome: 'deferred-dispatch-inflight', dispatches_inflight: inflightDispatchCount() }
+    if (inflightDispatchCount() > 0) return { outcome: 'deferred-dispatch-inflight', self, dispatches_inflight: inflightDispatchCount() }
 
     replaceDeployedBundle(deployedPath, freshBytes)
     touch(stampPath)
-    return { outcome: 'refreshed', from: deployedHash, to: freshHash, url, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
+    return { outcome: 'refreshed', self, from: deployedHash, to: freshHash, url, deployed_bundle: deployedPath, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
 }
 
 export function refreshStaleDeployedBundleInBackground(onRefreshed = null) {
-    refreshStaleDeployedBundle()
+    return refreshStaleDeployedBundle()
         .then(async (result) => {
             appendDiagnostic('self-update-check', result)
             if (result.outcome !== 'refreshed') return
-            if (onRefreshed) {
+            // Only the deployed copy may hand its listen handle over: a repo-build process that
+            // refreshed a foreign deployment would otherwise reload into a bundle it is not running.
+            if (onRefreshed && result.self === true) {
                 await onRefreshed(result)
                 return
             }
-            console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} (${result.version}) from ${result.url}; takes effect on next connect (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`)
+            const takesEffect = result.self === true ? 'takes effect on next connect' : 'takes effect for whoever launches the deployed copy next'
+            console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} (${result.version}) from ${result.url}; ${takesEffect} (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`)
         })
         .catch((error) => {
             appendDiagnostic('self-update-failed', { error: error?.message ? String(error.message) : String(error) })
