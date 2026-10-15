@@ -22,9 +22,6 @@ import {
 const BROWSER_NAMES = new Set(['chrome', 'chrome.exe', 'msedge', 'msedge.exe', 'firefox', 'firefox.exe'])
 export const DEFAULT_LEAK_KINDS = ['exec']
 
-// A stdio gm-mcp server is spawned by the MCP client, so the process that has to still be there
-// for the server to have a reason to live is up its parent chain, not in our ledger. These are the
-// shapes that count as that client: a name we know launches MCP servers, or an explicit MCP flag.
 export const MCP_CLIENT_PATTERNS = [
     /(^|[\\/])(claude|claude-code|code|code-insiders|codium|cursor|windsurf|zed|cline|roo-code|copilot|gemini)(\.exe)?(\s|$)/i,
     /visual studio code/i,
@@ -244,10 +241,6 @@ export async function assessAttributedChildren({ roots = [], liveSessionIds = nu
     return findings
 }
 
-// The ledger is the only evidence assessAttributedChildren can read, so a gm-mcp server the ledger
-// never recorded -- a stdio server the MCP client spawned, or one whose entry was rotated away --
-// is invisible to every other pass. This one enumerates the host process table instead and reads
-// the command line, which is evidence no ledger can supply.
 export function liveMcpClientInParentChain(pid, parentPid, table, { maxHops = MAX_PARENT_HOPS } = {}) {
     const byPid = new Map()
     for (const row of table) {
@@ -272,8 +265,6 @@ export function liveMcpClientInParentChain(pid, parentPid, table, { maxHops = MA
         if (!Number.isInteger(Number(next)) || Number(next) <= 0) break
         current = Number(next)
     }
-    // An ancestor we could not read is not an ancestor with no client: saying so would retire a
-    // server on evidence we never had, so the finding stays unmeasured.
     if (unreadable !== null) return { value: null, client: false, unreadable }
     return { value: 'no-client-in-parent-chain', client: false }
 }
@@ -310,7 +301,6 @@ export async function assessUnattributedServers({ roots = [], liveSessionIds = n
         const attributed = ledgerRow !== null
         const evidence = [attributed ? null : 'unattributed', parentAbandoned(parentPid) ? 'parent-abandoned' : null].filter(Boolean).join('+')
         const port = info.port
-        // A port that answers /health is a live server whatever its ledger says: never touch it.
         const health = port === null ? null : await probeHealth(port)
         const owned = ownedPorts.find((entry) => entry.owner === pid) ?? null
         let laneValue = 'no-ledger-row'
@@ -380,8 +370,6 @@ function removeFile(filePath) {
     }
 }
 
-// `unattributed` is true to enumerate the host process table, false to skip the pass entirely, or
-// an array of { pid, ppid, started_at, command } rows to judge instead of reading the host.
 export async function reapReport({ roots = [], apply = false, liveSessionIds = null, kinds = DEFAULT_LEAK_KINDS, now = Date.now(), unattributed = unattributedScanEnabled() } = {}) {
     const unattributedEnabled = unattributed !== false && unattributed !== null
     const table = Array.isArray(unattributed) ? unattributed : (unattributedEnabled ? readProcessTable() : [])

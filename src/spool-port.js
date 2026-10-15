@@ -1,8 +1,3 @@
-// The filesystem and process port that dispatch.js reaches the spool through.
-// dispatch.js imports only this module. index.js installs the node adapter
-// (spool-port-node.js) at startup; a caller that imports dispatch.js without
-// index.js gets the same node modules through process.getBuiltinModule.
-
 let installed = null
 let builtin = null
 

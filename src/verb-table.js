@@ -1,14 +1,5 @@
 import { z } from 'zod'
 
-// The single table of gm verbs. Every verb-facing value is derived from these rows:
-//   canonical   the tool and lookup spelling, underscores only (fs_read, prd_add)
-//   hyphen      true when the runner's own verb name is hyphenated (prd-add, memorize-prune)
-//   aliases     top-level keys folded into body when a caller sends them beside body
-//   fields      zod shape of those top-level keys, merged into the tool's input schema
-//   description extra prose appended to the tool description
-//   body        declared body schema (required and fields); absent when the runner's body is undeclared
-// The runner receives the hyphen spelling only through runnerVerb(), the one boundary conversion.
-
 const numberLike = z.union([z.number(), z.string()])
 const booleanLike = z.union([z.boolean(), z.string()])
 const pathspec = z.union([z.string(), z.array(z.string())])
@@ -491,8 +482,7 @@ const WEBSEARCH_BODY = {
     },
 }
 
-// One row per registry verb, in the runner's registry order.
-const ROWS = [
+const REGISTRY_ROWS = [
     { canonical: 'fs_read', aliases: FS_READ_RANGE_ALIASES, fields: FS_READ_RANGE_FIELDS, description: FS_READ_DESCRIPTION, body: FS_READ_BODY },
     { canonical: 'fs_write', body: FS_WRITE_BODY },
     { canonical: 'fs_readdir', description: FS_READ_PATH_RULE, body: FS_READDIR_BODY },
@@ -658,8 +648,7 @@ const ROWS = [
     { canonical: 'ps1' },
 ]
 
-// Normalised rows: every key present, defaults filled in.
-export const VERB_TABLE = ROWS.map((row) => ({
+export const VERB_TABLE = REGISTRY_ROWS.map((row) => ({
     canonical: row.canonical,
     hyphen: row.hyphen === true,
     aliases: row.aliases ?? [],
@@ -668,17 +657,14 @@ export const VERB_TABLE = ROWS.map((row) => ({
     body: row.body,
 }))
 
-// The sentence every runner verb's tool description opens with; gm.list() strips it from its summary.
 export function verbDescriptionLead(verb) {
     return `gm spool verb \`${verb}\`, dispatched exactly as the generic gm tool dispatches it. Plain-text verbs take raw_body instead of body.`
 }
 
-// The only place a canonical (underscore) name becomes the runner's spelling.
 export function runnerVerb(row) {
     return row.hyphen ? row.canonical.replace(/_/g, '-') : row.canonical
 }
 
-// Any spelling a caller uses (runner, hyphen or underscore) to its canonical name.
 export function canonicalName(spelling) {
     return String(spelling).replace(/-/g, '_')
 }

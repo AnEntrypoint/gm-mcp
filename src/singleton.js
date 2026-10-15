@@ -499,12 +499,6 @@ export function allocateHttpPort({ preferred = null, from = PORT_POOL_FROM, to =
     return null
 }
 
-// Nothing ever retired a superseded supervisor: `ensureHttpSupervisor` only refuses to spawn while
-// a claim reads fresh, and the claim file is dropped by the very sweeps that reap a dead port, so
-// the next arm spawns a second supervisor beside the one still probing that port. N live
-// supervisors on one port are one supervisor plus N-1 leaks, so the sweep keeps the freshest claim
-// and retires the rest. A port whose newest claim cannot be named is left alone: retiring the
-// wrong one would leave the port unsupervised rather than duplicated.
 export function listHttpSupervisors({ processes = null, platform = process.platform, exec = execFileSync } = {}) {
     const table = Array.isArray(processes) ? processes : readProcessTable({ platform, exec })
     const rows = []
@@ -526,14 +520,12 @@ export function listHttpSupervisors({ processes = null, platform = process.platf
 }
 
 export function supervisorToKeep(group, state = null, now = Date.now()) {
-    const statePid = Number(state?.pid)
-    // the claim file is written by the supervisor that owns the port, so a fresh claim names the
-    // keeper outright; a stale one is worth no more than the start times below it
-    if (Number.isInteger(statePid) && statePid > 0 && supervisorRunning(state, now) && group.some((row) => row.pid === statePid)) return statePid
+    const freshClaimPid = Number(state?.pid)
+    if (Number.isInteger(freshClaimPid) && freshClaimPid > 0 && supervisorRunning(state, now) && group.some((row) => row.pid === freshClaimPid)) return freshClaimPid
     const timed = group.filter((row) => Number.isFinite(row.started_at)).sort((left, right) => right.started_at - left.started_at)
     if (timed.length === 0) return null
-    // ps start times resolve to the second, so two sharing one are neither newer nor older
-    if (timed.length > 1 && timed[1].started_at === timed[0].started_at) return null
+    const tiedAtSecond = timed.length > 1 && timed[1].started_at === timed[0].started_at
+    if (tiedAtSecond) return null
     return timed[0].pid
 }
 
@@ -674,25 +666,24 @@ function supervisorRunning(state, now = Date.now()) {
 }
 
 const SPAWN_CLAIM_STALE_MS = 20_000
+const EXCLUSIVE_CREATE_FLAG = 'wx'
 
 function spawnClaimPath(name, port) {
     return path.join(agentplugDir(), `gm-mcp-${name}-${port}.claim`)
 }
 
-// Atomic single-writer guard: 'wx' create wins for exactly one caller. A claim older than
-// SPAWN_CLAIM_STALE_MS is moved aside with rename (one winner) before a fresh create.
 export function claimSpawn(name, port) {
     const file = spawnClaimPath(name, port)
     mkdirSync(agentplugDir(), { recursive: true })
     for (let attempt = 0; attempt < 2; attempt++) {
         try {
-            writeFileSync(file, String(Date.now()), { flag: 'wx' })
+            writeFileSync(file, String(Date.now()), { flag: EXCLUSIVE_CREATE_FLAG })
             return true
         } catch (error) {
             if (error?.code !== 'EEXIST') throw error
             const claimedAt = Number(readFileSyncSafe(file))
             if (Number.isFinite(claimedAt) && Date.now() - claimedAt < SPAWN_CLAIM_STALE_MS) return false
-            try { renameSync(file, `${file}.${process.pid}.stale`) } catch {}
+            moveStaleClaimAside(file)
         }
     }
     return false
@@ -700,6 +691,10 @@ export function claimSpawn(name, port) {
 
 function readFileSyncSafe(file) {
     try { return readFileSync(file, 'utf8') } catch { return '' }
+}
+
+function moveStaleClaimAside(file) {
+    try { renameSync(file, `${file}.${process.pid}.stale`) } catch {}
 }
 
 export function releaseSpawnClaim(name, port) {
