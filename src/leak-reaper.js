@@ -4,10 +4,13 @@ import path from 'node:path'
 
 import { attributePid, attributeRows } from './child-ledger.js'
 import { pidAlive } from './dispatch.js'
-import { portAcceptsConnection } from './ports.js'
+import { classifyGmServerCommand } from './gm-cmdline.js'
+import { listeningPidOf, portAcceptsConnection } from './ports.js'
+import { readProcessTable } from './process-table.js'
 import {
     establishedConnectionCount,
     instanceFilePath,
+    launchedEntryPath,
     liveSupervisorPid,
     parentPidOf,
     portOwnerPid,
@@ -18,6 +21,25 @@ import {
 
 const BROWSER_NAMES = new Set(['chrome', 'chrome.exe', 'msedge', 'msedge.exe', 'firefox', 'firefox.exe'])
 export const DEFAULT_LEAK_KINDS = ['exec']
+
+// A stdio gm-mcp server is spawned by the MCP client, so the process that has to still be there
+// for the server to have a reason to live is up its parent chain, not in our ledger. These are the
+// shapes that count as that client: a name we know launches MCP servers, or an explicit MCP flag.
+export const MCP_CLIENT_PATTERNS = [
+    /(^|[\\/])(claude|claude-code|code|code-insiders|codium|cursor|windsurf|zed|cline|roo-code|copilot|gemini)(\.exe)?(\s|$)/i,
+    /visual studio code/i,
+    /@modelcontextprotocol/i,
+    /--mcp-config/i,
+    /mcp-client/i,
+]
+
+const MAX_PARENT_HOPS = 8
+const OFF_VALUES = new Set(['0', 'false', 'no', 'off'])
+
+function unattributedScanEnabled() {
+    const raw = (process.env.GM_MCP_REAP_UNATTRIBUTED || '').trim().toLowerCase()
+    return !(raw !== '' && OFF_VALUES.has(raw))
+}
 
 export const VERDICT = { RETIRE: 'retire', KEEP: 'keep', UNKNOWN: 'unknown' }
 
@@ -222,6 +244,124 @@ export async function assessAttributedChildren({ roots = [], liveSessionIds = nu
     return findings
 }
 
+// The ledger is the only evidence assessAttributedChildren can read, so a gm-mcp server the ledger
+// never recorded -- a stdio server the MCP client spawned, or one whose entry was rotated away --
+// is invisible to every other pass. This one enumerates the host process table instead and reads
+// the command line, which is evidence no ledger can supply.
+export function liveMcpClientInParentChain(pid, parentPid, table, { maxHops = MAX_PARENT_HOPS } = {}) {
+    const byPid = new Map()
+    for (const row of table) {
+        const rowPid = Number(row.pid)
+        if (Number.isInteger(rowPid) && rowPid > 0) byPid.set(rowPid, row)
+    }
+    let current = Number.isInteger(Number(parentPid)) && Number(parentPid) > 0 ? Number(parentPid) : parentPidOf(pid)
+    const seen = new Set()
+    let unreadable = null
+    for (let hop = 0; hop < maxHops; hop += 1) {
+        if (!Number.isInteger(current) || current <= 1) break
+        if (seen.has(current)) break
+        seen.add(current)
+        if (pidAlive(current) !== true) return { value: `parent-${current}-dead`, client: false }
+        const command = byPid.get(current)?.command ?? commandLineOf(current)
+        if (typeof command !== 'string' || command === '') {
+            unreadable = current
+        } else if (MCP_CLIENT_PATTERNS.some((pattern) => pattern.test(command))) {
+            return { value: `client:${current}:${command.slice(0, 80)}`, client: true }
+        }
+        const next = byPid.get(current)?.ppid ?? parentPidOf(current)
+        if (!Number.isInteger(Number(next)) || Number(next) <= 0) break
+        current = Number(next)
+    }
+    // An ancestor we could not read is not an ancestor with no client: saying so would retire a
+    // server on evidence we never had, so the finding stays unmeasured.
+    if (unreadable !== null) return { value: null, client: false, unreadable }
+    return { value: 'no-client-in-parent-chain', client: false }
+}
+
+export async function assessUnattributedServers({ roots = [], liveSessionIds = null, now = Date.now(), processes = null, entryPath = null } = {}) {
+    const table = Array.isArray(processes) ? processes : readProcessTable()
+    const hint = entryPath ?? safeEntryPath()
+    const candidates = []
+    for (const row of table) {
+        const info = classifyGmServerCommand(row.command, { entryPath: hint })
+        if (info === null || info.transport === 'supervisor') continue
+        const pid = Number(row.pid)
+        if (!Number.isInteger(pid) || pid <= 0) continue
+        candidates.push({ pid, row, info })
+    }
+    if (candidates.length === 0) return []
+    const ledgerByPid = new Map()
+    for (const root of [...roots, null]) {
+        for (const ledgerRow of attributeRows({ root })) {
+            const pid = Number(ledgerRow.pid)
+            if (!Number.isInteger(pid) || pid <= 0) continue
+            const held = ledgerByPid.get(pid) ?? []
+            held.push(ledgerRow)
+            ledgerByPid.set(pid, held)
+        }
+    }
+    const ownedPorts = registeredHttpPorts().map((port) => ({ port, owner: portOwnerPid(port) }))
+
+    const findings = []
+    for (const { pid, row, info } of candidates) {
+        const ledgerRows = ledgerByPid.get(pid) ?? []
+        const ledgerRow = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1] : null
+        const parentPid = Number.isInteger(Number(row.ppid)) && Number(row.ppid) > 0 ? Number(row.ppid) : parentPidOf(pid)
+        const attributed = ledgerRow !== null
+        const evidence = [attributed ? null : 'unattributed', parentAbandoned(parentPid) ? 'parent-abandoned' : null].filter(Boolean).join('+')
+        const port = info.port
+        // A port that answers /health is a live server whatever its ledger says: never touch it.
+        const health = port === null ? null : await probeHealth(port)
+        const owned = ownedPorts.find((entry) => entry.owner === pid) ?? null
+        let laneValue = 'no-ledger-row'
+        let lanePass = true
+        const sessionId = typeof ledgerRow?.session_id === 'string' && ledgerRow.session_id !== '' ? ledgerRow.session_id : null
+        if (attributed && sessionId !== null) {
+            laneValue = `session:${sessionId}:${liveSessionIds ? (liveSessionIds.has(sessionId) ? 'live' : 'dead') : 'lane-unmeasured'}`
+            lanePass = liveSessionIds ? !liveSessionIds.has(sessionId) : false
+        } else if (attributed) {
+            laneValue = 'no-session-recorded'
+        }
+        const chain = info.transport === 'stdio'
+            ? liveMcpClientInParentChain(pid, parentPid, table)
+            : { value: 'not-a-stdio-server', client: false }
+        const alive = pidAlive(pid)
+        const predicates = [
+            measure('gm-mcp-entry', info.entry, true),
+            measure('not-self', pid !== process.pid, pid !== process.pid),
+            measure('alive', alive, alive === true),
+            measure('not-live-http-instance', health !== null ? `health-answers-on-port-${port}` : (owned !== null ? `owns-port-${owned.port}` : (port === null ? 'stdio-no-port' : `port-${port}-silent`)), health === null && owned === null),
+            measure('orphan-evidence', evidence === '' ? null : evidence, evidence !== ''),
+            measure('no-live-lane', laneValue, lanePass),
+            measure('no-live-mcp-client', chain.value, chain.value !== null && chain.client === false),
+            measure('not-user-browser', isProtectedBrowser(pid) === false, isProtectedBrowser(pid) === false),
+        ]
+        findings.push(verdictOf(predicates, {
+            source: 'unattributed-server',
+            pid,
+            transport: info.transport,
+            entry: info.entry,
+            port,
+            parent_pid: parentPid,
+            attributed,
+            session_id: ledgerRow?.session_id ?? null,
+            dispatch_id: ledgerRow?.dispatch_id ?? null,
+            started_at: row.started_at ?? null,
+            age_ms: Number.isFinite(Number(row.started_at)) ? Number(now) - Number(row.started_at) : null,
+            scanned_processes: table.length,
+        }))
+    }
+    return findings
+}
+
+function safeEntryPath() {
+    try {
+        return launchedEntryPath()
+    } catch {
+        return null
+    }
+}
+
 async function retirePid(pid, { signal = 'SIGTERM' } = {}) {
     try {
         process.kill(Number(pid), signal)
@@ -240,11 +380,16 @@ function removeFile(filePath) {
     }
 }
 
-export async function reapReport({ roots = [], apply = false, liveSessionIds = null, kinds = DEFAULT_LEAK_KINDS, now = Date.now() } = {}) {
+// `unattributed` is true to enumerate the host process table, false to skip the pass entirely, or
+// an array of { pid, ppid, started_at, command } rows to judge instead of reading the host.
+export async function reapReport({ roots = [], apply = false, liveSessionIds = null, kinds = DEFAULT_LEAK_KINDS, now = Date.now(), unattributed = unattributedScanEnabled() } = {}) {
+    const unattributedEnabled = unattributed !== false && unattributed !== null
+    const table = Array.isArray(unattributed) ? unattributed : (unattributedEnabled ? readProcessTable() : [])
     const findings = [
         ...(await assessHttpInstances({ roots, now })),
         ...(await assessLeases({ roots })),
         ...(await assessAttributedChildren({ roots, liveSessionIds, kinds })),
+        ...(unattributedEnabled ? await assessUnattributedServers({ roots, liveSessionIds, now, processes: table }) : []),
     ]
     const retired = []
     for (const finding of findings) {
@@ -260,7 +405,14 @@ export async function reapReport({ roots = [], apply = false, liveSessionIds = n
     }
     const counts = { retire: 0, keep: 0, unknown: 0 }
     for (const finding of findings) counts[finding.verdict] += 1
-    return { apply, retired, findings, counts, generated_at: new Date(now).toISOString() }
+    return {
+        apply,
+        retired,
+        findings,
+        counts,
+        unattributed_scan: { enabled: unattributedEnabled, scanned: table.length },
+        generated_at: new Date(now).toISOString(),
+    }
 }
 
 export function formatFindings(report) {
