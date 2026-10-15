@@ -104,7 +104,8 @@ await new Promise((resolve, reject) => {
     client.once('error', reject)
 })
 
-const first = await reapReport({ roots: [root], apply: false, liveSessionIds: new Set() })
+// the unattributed pass enumerates the host process table, which no assertion here is about
+const first = await reapReport({ roots: [root], apply: false, liveSessionIds: new Set(), unattributed: false })
 const findingA = first.findings.find((entry) => entry.pid === leakA.pid)
 const findingB = first.findings.find((entry) => entry.pid === leakB.pid)
 
@@ -130,7 +131,7 @@ check('dry run signals nothing', () => {
     assert.equal(pidAlive(leakA.pid), true)
 })
 
-const applied = await reapReport({ roots: [root], apply: true, liveSessionIds: new Set() })
+const applied = await reapReport({ roots: [root], apply: true, liveSessionIds: new Set(), unattributed: false })
 const retiredA = applied.retired.find((entry) => entry.pid === leakA.pid)
 check('apply retires the proven orphan with no manual action', () => {
     assert.ok(retiredA, 'leak A was retired')
@@ -147,7 +148,7 @@ check('the retired pid is gone', () => {
 
 client.destroy()
 await new Promise((resolve) => setTimeout(resolve, 300))
-const second = await reapReport({ roots: [root], apply: true, liveSessionIds: new Set() })
+const second = await reapReport({ roots: [root], apply: true, liveSessionIds: new Set(), unattributed: false })
 check('B is reaped once its client disconnects', () => {
     const finding = second.findings.find((entry) => entry.pid === leakB.pid)
     assert.ok(finding, 'leak B still in the report')
