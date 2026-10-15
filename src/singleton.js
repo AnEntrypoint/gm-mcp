@@ -546,6 +546,11 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
             note: 'a live pid holds the port but answers no health check',
         })
     }
+    if (!claimSpawn('singleton', port)) {
+        const peer = await waitForHealth(port, timeoutMs)
+        if (peer) return { url: httpMcpUrl(port), port, pid: peer.pid ?? null, reused: true, version: peer.version ?? null }
+        return { url: null, port, pid: null, reused: false, spawned: false, error: `another starter holds the spawn claim for port ${port}` }
+    }
     dropSingletonState()
 
     const pid = spawnServerProcess({ port })
@@ -555,6 +560,7 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
     }
 
     const health = await waitForHealth(port, timeoutMs)
+    releaseSpawnClaim('singleton', port)
     if (!health) {
         appendDiagnostic('http-singleton-start-failed', { port, spawned_pid: pid, entry: launchedEntryPath() })
         return { url: null, port, pid, reused: false, spawned: Boolean(pid), error: `no healthy gm-mcp HTTP server on port ${port} after ${timeoutMs} ms` }
