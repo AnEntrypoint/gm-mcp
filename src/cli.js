@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { main, flagValue } from './index.js'
-import { gmDispatch } from './dispatch.js'
+import { gmDispatch, replyEnvelopeSelfCheck } from './dispatch.js'
 import { runDevSync } from './dev-sync.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
@@ -112,15 +112,7 @@ function resolvePayloadValue(value) {
     return value
 }
 
-async function dispatchCommand() {
-    await ensureHttpSingleton({ port: defaultHttpPort(), wait: false }).catch(() => {})
-
-    const argv = process.argv.slice(3)
-    if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
-        console.log(DISPATCH_USAGE)
-        return 0
-    }
-
+function parseDispatchArgv(argv) {
     const verb = argv[0]
     const positional = dispatchPositional(argv)
     const rawFlag = dispatchFlag(argv, 'raw')
@@ -138,19 +130,16 @@ async function dispatchCommand() {
         try {
             body = JSON.parse(bodyText)
         } catch (error) {
-            console.error(`gm-mcp dispatch: --body is not valid JSON: ${error.message}`)
-            return 2
+            return { usageError: `gm-mcp dispatch: --body is not valid JSON: ${error.message}` }
         }
         if (body === null || typeof body !== 'object' || Array.isArray(body)) {
-            console.error('gm-mcp dispatch: --body must be a JSON object')
-            return 2
+            return { usageError: 'gm-mcp dispatch: --body must be a JSON object' }
         }
     }
 
     if (argv.includes('--no-ignore')) {
         if (!NO_IGNORE_VERBS.has(verb)) {
-            console.error(`gm-mcp dispatch: --no-ignore applies to the search verbs (${[...NO_IGNORE_VERBS].join(', ')}), not "${verb}"`)
-            return 2
+            return { usageError: `gm-mcp dispatch: --no-ignore applies to the search verbs (${[...NO_IGNORE_VERBS].join(', ')}), not "${verb}"` }
         }
         if (body === undefined) body = {}
         body.no_ignore = true
@@ -161,21 +150,39 @@ async function dispatchCommand() {
         return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
     }
 
-    const args = {
-        verb,
-        body,
-        raw_body: rawBody,
-        session_id: dispatchFlag(argv, 'session-id') || `gm-cli-${process.pid}-${Date.now()}`,
-        cwd: dispatchFlag(argv, 'cwd') || process.cwd(),
-        timeout_seconds: numberOrUndefined(dispatchFlag(argv, 'timeout')),
-        poll_interval_seconds: numberOrUndefined(dispatchFlag(argv, 'poll')),
-        max_chars: numberOrUndefined(dispatchFlag(argv, 'max-chars')),
-        resume_task: dispatchFlag(argv, 'resume'),
-        full_response: argv.includes('--full') ? true : undefined,
-        include_timing: argv.includes('--timing') ? true : undefined,
+    return {
+        args: {
+            verb,
+            body,
+            raw_body: rawBody,
+            session_id: dispatchFlag(argv, 'session-id') || `gm-cli-${process.pid}-${Date.now()}`,
+            cwd: dispatchFlag(argv, 'cwd') || process.cwd(),
+            timeout_seconds: numberOrUndefined(dispatchFlag(argv, 'timeout')),
+            poll_interval_seconds: numberOrUndefined(dispatchFlag(argv, 'poll')),
+            max_chars: numberOrUndefined(dispatchFlag(argv, 'max-chars')),
+            resume_task: dispatchFlag(argv, 'resume'),
+            full_response: argv.includes('--full') ? true : undefined,
+            include_timing: argv.includes('--timing') ? true : undefined,
+        },
+    }
+}
+
+async function dispatchCommand() {
+    await ensureHttpSingleton({ port: defaultHttpPort(), wait: false }).catch(() => {})
+
+    const argv = process.argv.slice(3)
+    if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
+        console.log(DISPATCH_USAGE)
+        return 0
     }
 
-    const text = await gmDispatch(args)
+    const parsed = parseDispatchArgv(argv)
+    if (parsed.usageError) {
+        console.error(parsed.usageError)
+        return 2
+    }
+
+    const text = await gmDispatch(parsed.args)
     process.stdout.write(text.endsWith('\n') ? text : `${text}\n`)
     return text.trimStart().startsWith('error:') ? 1 : 0
 }
@@ -201,6 +208,11 @@ const COMMANDS = {
         const report = runDevSync(flagValue('root') || process.cwd())
         console.log(JSON.stringify(report, null, 2))
         return 0
+    },
+    'self-check': () => {
+        const envelopes = replyEnvelopeSelfCheck()
+        console.log(JSON.stringify(envelopes, null, 2))
+        return Object.values(envelopes).some((reply) => reply.diagnostics_failed !== undefined) ? 1 : 0
     },
     'ensure-http': async () => {
         const port = defaultHttpPort()
@@ -290,6 +302,7 @@ usage:
   gm-mcp-server.js dispatch <verb> [--body <json>] [--raw <text>] [--cwd <dir>] [--no-ignore] [--help]
                                    run a gm dispatch from the shell and print its reply,
                                    with no MCP client involved
+  gm-mcp-server.js self-check        build every reply a dispatch can end on and print them; exits non-zero when one fell back
   gm-mcp-server.js reap [--apply] [--root <dir>]... [--json]
                                    report leaked processes and leases; without --apply it only
                                    prints what it WOULD retire, and it never signals a pid it

@@ -9,7 +9,7 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
 - Writes `.gm/exec-spool/in/<verb>/<N>.txt`
 - Polls `.gm/exec-spool/out/<verb>-<N>.json` until it appears (or a timeout elapses)
 - Returns the response as flat YAML text, auto-cleaned for readability:
-  - opaque internal ids (`dispatch_id`, `request_fingerprint`) stripped
+  - opaque internal id `request_fingerprint` stripped; `dispatch_id` kept as the reply's actionable evidence (`prd-list`, `prd-resolve`'s `witness_dispatch_id` and `rs-plugkit` `prd.rs` read it from the witness body, and `complete.md` serves that contract to workers)
   - the redundant `response`/`data` nesting levels flattened to the top (unless a field name would collide)
   - long text fields (e.g. `instruction`'s full phase prose) truncated with a pointer naming the on-disk file to read for the full text -- the plain-text-body verbs get a far larger budget so their `stdout` comes back inline (see "Long text inline limits")
   - hit-array ranking internals (`cos`/`recency` in `recall_hits`/`bm25_hits`/`vector_hits`/`commits`) dropped, `score` retained as ranked evidence
@@ -51,7 +51,7 @@ connects, at most once per hour. On a sha256 mismatch it validates the fresh
 bundle (size, shebang, `node --check`), keeps the old one as
 `gm-mcp-server.mjs.prev`, atomically swaps the new one in, and prints one
 stderr line (`deployed bundle was stale -- refreshed <old> -> <new> ...`); the
-refreshed tool schema is served from the next connect. A failed check keeps the
+refreshed tool schema is served from the next connect, or sooner when the transport hands over in-process (see gm-mcp/AGENTS.md "Bundle drift and handover"). A failed check keeps the
 deployed copy and prints one line. Env: `GM_MCP_SELF_UPDATE=0` disables,
 `GM_MCP_BUNDLE_URL` (http(s) or `file:`) overrides the source,
 `GM_MCP_SELF_UPDATE_INTERVAL_MS` overrides the throttle. A bundle from before
@@ -216,7 +216,7 @@ node C:\Users\user\.gm-tools\gm-mcp-server.mjs --http --port 8787   # run it in 
 Every entry point seeds it: a stdio server, an HTTP server started on another
 port and a `dispatch` run all health-probe the port and spawn the shared server
 detached when nothing answers, so the durable transport is up before any client
-asks for it and comes back by itself after a crash. `GM_MCP_HTTP_SINGLETON=0`
+asks for it and comes back by itself after a crash. `GM_MCP_NO_HTTP_SINGLETON=1`
 (or `GM_MCP_NO_HTTP_SINGLETON=1`) opts out, `GM_MCP_HTTP_PORT` moves the port.
 Because no state is carried between requests, a restart of the HTTP server
 never loses an in-flight dispatch.

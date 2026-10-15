@@ -17,6 +17,8 @@ export { PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MA
 
 const NEVER_TRUNCATE_KEYS = new Set(['error', 'reason', 'residuals', 'dispatch_ledger_error', 'dream_rsi_observation_error', 'detail'])
 
+const CI_LOG_TEXT_KEYS = new Set(['text'])
+
 const NO_KEYS = new Set()
 
 const NULL_IS_THE_ANSWER_KEYS = new Set(['concurrency_shortfall'])
@@ -80,17 +82,33 @@ function searchScopeSize(source) {
 
 function incompleteScanReasons(source) {
     const reasons = []
-    for (const key of INCOMPLETE_SCAN_WHEN_TRUE) if (source[key] === true) reasons.push(key)
+    for (const key of INCOMPLETE_SCAN_WHEN_TRUE) {
+        const value = source[key]
+        if (value === true) reasons.push(key)
+        else if (typeof value === 'string' && value.length > 0) reasons.push(`${key}:${value}`)
+    }
     for (const key of INCOMPLETE_SCAN_WHEN_FALSE) if (source[key] === false) reasons.push(`${key}:false`)
+    const uncovered = source.uncovered_scan
+    if (uncovered && typeof uncovered === 'object' && uncovered.complete === false) reasons.push('uncovered_scan.complete:false')
     return reasons
 }
 
 function searchShowsNoHits(source) {
     if (Array.isArray(source.matches)) return source.matches.length === 0
+    if (Array.isArray(source.hits)) return source.hits.length === 0
+    const counts = source.counts
+    if (counts && typeof counts === 'object' && !Array.isArray(counts)) {
+        const definitions = counts.definitions
+        const references = counts.references
+        if (Number.isFinite(definitions) || Number.isFinite(references)) {
+            return (definitions ?? 0) + (references ?? 0) === 0
+        }
+    }
     for (const key of SEARCH_EMPTY_RESULT_KEYS) {
         const value = source[key]
         if (Number.isFinite(value)) return value === 0
     }
+    if (Number.isFinite(source.count)) return source.count === 0
     return true
 }
 
@@ -145,6 +163,7 @@ const HELP_TEXT_KEYS = new Set(['parameters'])
 
 export function untruncatedKeysFor(verb, body) {
     if (body && typeof body === 'object' && body.help === true) return HELP_TEXT_KEYS
+    if (verb === 'ci-log' || verb === 'ci_log') return CI_LOG_TEXT_KEYS
     if (verb === 'prd-list') return PRD_LISTING_KEYS
     if (verb === 'pool-brief') return POOL_BRIEF_KEYS
     const expandsRecall = verb === 'recall' && body && typeof body === 'object' && (body.full === true || typeof body.key === 'string')
@@ -403,8 +422,19 @@ const WIRE_FIELD_COMPACTORS = new Map([
     ['dream_rsi_replay', compactDreamRsiReplay],
 ])
 
+function sameJsonValue(a, b) {
+    if (a === b) return true
+    if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
+    if (Array.isArray(a) !== Array.isArray(b)) return false
+    if (Array.isArray(a)) return a.length === b.length && a.every((v, i) => sameJsonValue(v, b[i]))
+    const keysA = Object.keys(a)
+    const keysB = Object.keys(b)
+    return keysA.length === keysB.length
+        && keysA.every(k => Object.prototype.hasOwnProperty.call(b, k) && sameJsonValue(a[k], b[k]))
+}
+
 function unchangedByCompaction(before, after) {
-    return JSON.stringify(before) === JSON.stringify(after)
+    return sameJsonValue(before, after)
 }
 
 const WIRE_GIT_COMMIT_VERBS = new Set(['git_commit', 'git_finalize'])

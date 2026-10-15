@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.60 - a fetch page the caller asked for is inlined instead of being left in the spill file
+
+`cleanResponse` inlines every long text field to `LONG_TEXT_FIELD_TRUNCATE_AT` (400 characters) and replaces the rest with `... [N chars total, full text at <spool> field 'content']`, which is right for a whole-document read and wrong for a page. With `fetch` able to read one bounded page (`offset`/`length`, or `start_line`/`end_line`/`lines`), a caller that asked for a page got 400 characters of it and a pointer, so a document still could not be read through the port — which is what paging exists to fix. `inlineMaxForVerb` now gives a `fetch` carrying a page key the file-read budget (`FILE_READ_INLINE_MAX`, 65536) instead of the 400-character one, so the page comes back whole, while the dispatch reply cap still bounds the whole reply. Only a call carrying a page key pays it: an ordinary `fetch` keeps its 6000-character default and its 400-character window, and no other verb's inline budget changes. `BUNDLE_VERSION` moves to 0.2.60.
+
+## 0.2.59 - fetch declares offset/length, start_line/end_line and lines
+
+The guest read one bounded page of a document, but the `fetch` body schema declared none of the nine keys, so `refuseUndeclaredBodyKeys` refused `offset` by name before it ever reached the guest and the paging was unreachable through this port. All nine are now declared in `FETCH_TYPES`/`FETCH_KEYS` — accepted at the top level and folded into the body — and in `FETCH_BODY`, and `FETCH_DESCRIPTION` says what a page reply carries (`offset`, `length`, `total_chars`, `has_more`, `next_offset`, or `start_line`, `end_line`, `lines`, `total_lines`, `has_more`, `next_start_line`), that a character key and a line key may not be mixed, and what `answer_status` means, so `gm.describe("fetch")` is enough to use it. `BUNDLE_VERSION` moves to 0.2.59.
+
+## 0.2.56 - gm_codemode folds a second object argument in instead of dropping it
+
+`bindings` generated every verb as `(args) => call(resolved, args)`, so `gm.git_status({}, {cwd: "C:/dev/gm/rs-plugkit"})` — the envelope-as-second-argument form callers write constantly — lost the whole object with no error and the dispatch ran against the ambient project: a submodule's `git_status` came back as a different repository's status, and no reply said so. A second object argument is now folded into the first (`{...args, ...envelope}`), and a second argument that is not an object is refused rather than dropped, which is the rule `refuseUnknownKeys` already applies to keys. `cwd` as a top-level key of the single object, and `gm.gm({verb, body, cwd})`, both already worked and still do. `git_root_override` now pins `cwd` when a call names no cwd of its own, the same `cwd || git_root_override` rule the per-verb MCP tools apply, so the body field `docs/verbs.md` documents as pinning the root for any verb pins it inside gm_codemode too. `BUNDLE_VERSION` moves to 0.2.56.
+
+## 0.2.55 - codeinsight declares the body it accepts, and callers/callees/impact stop being undeclared
+
+`codeinsight` had no `body` row in the verb table, so `gm.describe("codeinsight")` answered `body_schema.declared: false` and a caller had no way to learn the selector it must send. The table gains `CODEINSIGHT_BODY`: `verb` (aliases `action`, `mode`) enumerating the seventeen actions the Rust handler accepts, plus `symbol`, `path`, `root`, `limit`, `kind`, `max_depth`, `direction`, `through_ambiguous` and `language` with the action each one belongs to. `callers`, `callees` and `impact` take the same schema, because they are the same `code_symbols::handle` body under a verb that preselects the action, so a lane no longer has to guess `{"symbol": ...}` for them either. `codesearch`'s declared `output` enum gains `content`, which the wasm now parses as `compact`. `BUNDLE_VERSION` moves to 0.2.55.
+
+## 0.2.52 - release bridge settles its state once per run
+
+src/release-bridge.js stamps one timestamp per run and builds the pending signal into a single settled state value before the one write that closes the run. The on-disk keys and the checked-recently return are unchanged; a dry run with the interval set large returns checked-recently and keeps last_checked_ts and marker. `BUNDLE_VERSION` moves to 0.2.52.
+
+## 0.2.51 - ci_log reads a CI step's printed text through the spool
+
+The verb table gains `ci_log` (runner spelling `ci-log`, `hyphen: true`) with a declared body schema, so `gm.list()` and `gm.describe()` name it and its fields and a lane stops falling through to `bash` plus `gh run view --log` plus a temp file to read what a step printed. `response-compact.js` returns `CI_LOG_TEXT_KEYS` for it, so a matched line's `text` reaches the caller whole instead of at `LONG_TEXT_FIELD_TRUNCATE_AT` (400 chars), which is what made the fallback worth writing: the truncation pointer sent the caller to the spool out-file anyway. The wasm caps the reply at `max_lines` and `max_chars` before it is ever serialized, so widening the inline cap cannot widen a dispatch. Each returned row carries a 1-based `n`, which also keeps `dropDuplicateRows` from collapsing the repeated lines a CI log is full of. `BUNDLE_VERSION` moves to 0.2.51.
+
+## 0.2.43 - exec_js takes a typed timeoutMs field
+
+The exec-family budget can be given as a `timeoutMs` field on the body object (`{code, timeoutMs}`) as well as by the leading `timeoutMs=<ms>` line of the raw body. `runDispatch` folds the field into that line (`foldTypedTimeoutMs`), so the daemon, the poll budget and the ceiling check see one spelling. Sending both spellings is refused. Before this change a typed `timeoutMs: 1000` on a 5 s busy child ran to completion (dispatch 1791954507602-500-58b60f39766a06e9, duration_ms 5046, timed_out false). `BUNDLE_VERSION` moves to 0.2.43.
+
 ## 0.2.40 - a stale server says restart required, with the command
 
 A stale process was reporting `bundle_stale` in the reply, but its restart instruction went to stderr,
@@ -280,7 +308,7 @@ Registering gm as `"type": "http"` means the agent host never starts the server,
 
 ## Unreleased - sha256 release bridge for the runner and guest plugin
 
-`src/release-bridge.js` upgrades the installed `agentplug-runner` from `AnEntrypoint/agentplug-bin` and the `gm` guest (`gm.wasm`) from `AnEntrypoint/plugkit-bin` on server start, at most hourly. Verification is the release's `.sha256` sidecar. Each swap keeps the replaced file as a backup, and a successful swap signals the daemon of this `AGENTPLUG_HOME` so the next dispatch respawns the new build. `BUNDLE_VERSION` moves to 0.2.12.
+`src/release-bridge.js` upgrades the installed `agentplug-runner` from `AnEntrypoint/agentplug-bin` and the `gm` guest (`gm.wasm`) from `AnEntrypoint/plugkit-bin` on server start, at most once per 10 minutes. Verification is the release's `.sha256` sidecar. Each swap keeps the replaced file as a backup, and a successful swap signals the daemon of this `AGENTPLUG_HOME` so the next dispatch respawns the new build. `BUNDLE_VERSION` moves to 0.2.12.
 
 ## Unreleased - headless-browser verbs removed from the wrapper
 

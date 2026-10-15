@@ -79,11 +79,12 @@ const GIT_SHOW_DESCRIPTION = ` ${GIT_SHOW_KEYS.join(', ')} are accepted at the t
 
 const PRD_LIST_TYPES = {
     id: z.string(),
-    status: z.enum(['pending', 'ready', 'completed', 'blocked']),
+    status: z.enum(['pending', 'ready', 'completed', 'blocked', 'all']),
     limit: numberLike,
+    offset: numberLike,
     full: booleanLike,
 }
-const PRD_LIST_KEYS = ['id', 'status', 'limit', 'full']
+const PRD_LIST_KEYS = ['id', 'status', 'limit', 'offset', 'full']
 const PRD_LIST_FIELDS = aliasFields('prd_list', PRD_LIST_TYPES, PRD_LIST_KEYS)
 const PRD_LIST_DESCRIPTION = ` ${PRD_LIST_KEYS.join(', ')} are accepted at the top level and folded into body, so {"id":"<row id>"} and body:{"id":"<row id>"} are the same call; a key named in both takes its value from body. Without one of them the whole PRD is listed, which is what a dropped selector used to look like.`
 
@@ -152,6 +153,7 @@ const EXEC_JS_BODY = {
     required: ['code'],
     fields: {
         code: { type: 'string', aliases: ['body'], description: 'JavaScript body, run as nodejs. Pass it as the top-level raw_body argument: a JSON object body is refused. A leading "timeoutMs=<ms>" line sets the budget (floor 100, ceiling 900000).' },
+        timeoutMs: { type: 'integer', description: 'Wall-clock budget for the child in milliseconds (floor 100, ceiling 900000, default 300000). Sent as a leading timeoutMs= line of the raw body.' },
         cwd: { type: 'string', description: 'Directory the script runs in.' },
     },
 }
@@ -218,6 +220,22 @@ const POOL_OBSERVE_BODY = {
         refusal: { type: 'string', description: 'A spawn refusal text, so the pool can record the ceiling.' },
     },
 }
+const CODEINSIGHT_ACTIONS = ['overview', 'status', 'sync', 'outline', 'find', 'callers', 'callees', 'impact', 'hotspots', 'orphans', 'imports', 'importers', 'cycles', 'coupling', 'complexity', 'duplicates', 'tests']
+const CODEINSIGHT_BODY = {
+    required: [],
+    fields: {
+        verb: { type: 'string', aliases: ['action', 'mode'], enum: CODEINSIGHT_ACTIONS, description: 'Which answer to build. Omitting verb/action/mode is the index overview, so a caller that meant "callers" and dropped the selector reads the whole-index stats instead of an error. callers/callees/impact/tests need `symbol`; outline/imports/importers need `path`; find needs `symbol`.' },
+        symbol: { type: 'string', aliases: ['name'], description: 'Symbol callers/callees/impact/tests/find resolve. Call edges are keyed by unqualified name, so a qualified "pkg.Name" with no edge of its own is answered from its last dotted segment and the reply names both spellings.' },
+        path: { type: 'string', aliases: ['file', 'path_prefix'], description: 'File for outline/imports/importers, or a path scope for find/orphans/coupling. callers/callees/impact/tests refuse it: edges are keyed by unqualified names, so use codesearch for path-scoped call sites.' },
+        root: { type: 'string', aliases: ['projectPath', 'cwd'], description: 'Answers for another project root.' },
+        limit: { type: 'integer', aliases: ['k'], description: 'Row cap; default 25, maximum 200.' },
+        kind: { type: 'string', description: 'find only: symbol kind filter.' },
+        max_depth: { type: 'integer', description: 'impact only: call hops to walk; default 3, clamped to 1-10.' },
+        direction: { type: 'string', enum: ['callers', 'upstream', 'callees', 'downstream'], description: 'impact only: "callees"/"downstream" walks what the symbol depends on; anything else walks its callers. The gm.impact verb itself defaults to callees.' },
+        through_ambiguous: { type: 'boolean', description: 'impact only: keep walking through ambiguous names instead of stopping at them.' },
+        language: { type: 'string', aliases: ['lang'], description: 'orphans only: language filter.' },
+    },
+}
 const CODESEARCH_BODY = {
     required: ['query'],
     fields: {
@@ -233,7 +251,7 @@ const CODESEARCH_BODY = {
         glob: { type: 'string', aliases: ['path_glob'], description: 'Path glob; a "!" prefix negates.' },
         exclude: { type: 'string', aliases: ['exclude_glob', 'exclude_globs'], description: 'Exclusion glob.' },
         combine: { type: 'string', aliases: ['term_combination'], enum: ['phrase', 'and', 'or'], description: 'Anything else is refused.' },
-        output: { type: 'string', enum: ['matches', 'full', 'compact', 'files', 'count'], description: 'Output shape.' },
+        output: { type: 'string', enum: ['matches', 'full', 'compact', 'content', 'files', 'count'], description: 'Output shape. "compact" is path:line: trimmed text and "content" is the same shape under grep\'s name for it; "full" is an alias of "matches".' },
         case_insensitive: { type: 'boolean', description: 'Folds case.' },
         whole_word: { type: 'boolean', description: 'Whole-word match; refused in filename mode.' },
         comments_only: { type: 'boolean', aliases: ['comments'], description: 'Scans comments only; refused in filename mode.' },
@@ -310,6 +328,23 @@ const GIT_PUSH_BODY = {
         allow_foreign_commits: { type: 'boolean', description: 'Pushes commits another session owns.' },
     },
 }
+const CI_LOG_BODY = {
+    required: [],
+    fields: {
+        run_id: { type: 'integer', aliases: ['run'], description: 'GitHub Actions run id to read; ci-status returns one per job. Required unless sha, rev or ref is given.' },
+        job_id: { type: 'integer', description: 'Reads only that job\'s log. Without it the whole run is read.' },
+        sha: { type: 'string', aliases: ['rev', 'ref'], description: 'Reads the newest run for this commit when run_id is absent.' },
+        github_repo: { type: 'string', aliases: ['repo'], description: 'owner/name; defaults to the origin remote of cwd.' },
+        job: { type: 'string', description: 'Keeps only lines whose job name matches.' },
+        step: { type: 'string', description: 'Keeps only lines whose step name matches.' },
+        pattern: { type: 'string', aliases: ['match', 'grep'], description: 'Keeps only lines whose message matches.' },
+        mode: { type: 'string', enum: ['literal', 'regex'], description: 'How pattern, job and step match; literal is the default and any other value is refused.' },
+        regex: { type: 'boolean', description: 'Shorthand for mode:"regex".' },
+        ignore_case: { type: 'boolean', description: 'Folds case in every match.' },
+        max_lines: { type: 'integer', description: 'Line cap, 1 through 500, default 40, so a whole multi-job run is never dumped into context.' },
+        max_chars: { type: 'integer', description: 'Character cap, 1 through 40000, default 8000.' },
+    },
+}
 const RECALL_BODY = {
     required: [],
     fields: {
@@ -330,13 +365,134 @@ const MEMORIZE_BODY = {
     },
 }
 
+const FETCH_TYPES = {
+    url: z.string(),
+    query: z.string(),
+    q: z.string(),
+    search: z.string(),
+    backend: z.string(),
+    engine: z.string(),
+    count: numberLike,
+    limit: numberLike,
+    max_results: numberLike,
+    k: numberLike,
+    n: numberLike,
+    kind: z.string(),
+    wiki: z.string(),
+    user: z.string(),
+    repo: z.string(),
+    stars: z.union([z.string(), z.number()]),
+    allowed_domains: z.array(z.string()),
+    blocked_domains: z.array(z.string()),
+    prompt: z.string(),
+    max_chars: numberLike,
+    answer_max_chars: numberLike,
+    offset: numberLike,
+    length: numberLike,
+    len: numberLike,
+    start_line: numberLike,
+    startLine: numberLike,
+    end_line: numberLike,
+    endLine: numberLike,
+    lines: numberLike,
+    line_count: numberLike,
+    lineCount: numberLike,
+    raw: booleanLike,
+    method: z.string(),
+    headers: z.record(z.string(), z.string()),
+    timeoutMs: numberLike,
+}
+const FETCH_KEYS = ['url', 'query', 'q', 'search', 'backend', 'engine', 'count', 'limit', 'max_results', 'k', 'n', 'kind', 'wiki', 'user', 'repo', 'stars', 'allowed_domains', 'blocked_domains', 'prompt', 'max_chars', 'answer_max_chars', 'offset', 'length', 'len', 'start_line', 'startLine', 'end_line', 'endLine', 'lines', 'line_count', 'lineCount', 'raw', 'method', 'headers', 'timeoutMs']
+const FETCH_FIELDS = aliasFields('fetch', FETCH_TYPES, FETCH_KEYS)
+const FETCH_DESCRIPTION = ` ${FETCH_KEYS.join(', ')} are accepted at the top level and folded into body, so {"url":"<url>"} and body:{"url":"<url>"} are the same call; a key named in both takes its value from body. The reply is the READABLE page, not the transport payload: HTML is converted to markdown before it is returned (head, script, style, svg, nav, header, footer, aside, form and iframe blocks are dropped; article or main wins over the rest of the document), and a body that is not HTML is returned as it arrived. query (aliases q, search) with no url turns the call into a web search on the same port, walking the same backends websearch walks -- the structured JSON backends github, hn and wikipedia first, then the keyless html engines -- and backend (alias engine) picks the order; kind, wiki, user, repo and stars tune the github and wikipedia backends, count (aliases limit, max_results, k, n) caps the hits and allowed_domains/blocked_domains filter every backend. prompt answers that prompt against the converted page and returns the matching passages instead of the page: gm holds no outbound model credential, so answer_mode is always "extractive". max_chars caps the characters returned (default 6000), so one fetch cannot dump a whole page into context; answer_max_chars caps a prompt answer (default 4000). offset/length (characters, offset 0-based) or start_line/end_line (1-based, inclusive) or start_line plus lines read one bounded page of that document instead of its head, with offset/length/total_chars/has_more/next_offset or start_line/end_line/total_lines/has_more/next_start_line on the reply, so a document longer than the cap is readable end to end; a page defaults to 24000 characters and never mixes character keys with line keys. A prompt reply carries answer_status: matched, no_match (the page has text and none of it scored), or empty_source (no text was retrieved or converted, which is a failure and comes back ok:false with error_code fetch_empty_source). raw:true (aliases full_response, fullResponse) is the escape hatch that returns the original body with no conversion and no prompt answering.`
+const FETCH_BODY = {
+    required: [],
+    fields: {
+        url: { type: 'string', description: 'Page to fetch. https:// and http:// only; no whitespace and at most 2048 bytes. Required unless query is given.' },
+        query: { type: 'string', description: 'With no url, turns the call into a web search on the same port; aliases q and search.' },
+        backend: { type: 'string', description: 'Backend order for a search: github, hn, wikipedia, duckduckgo, mojeek, bing, searxng, brave, marginalia, or a comma-separated list. Alias engine; GM_SEARCH_BACKEND sets the same order.' },
+        kind: { type: 'string', description: 'The github endpoint for a search: repos (the default), code or issues.' },
+        wiki: { type: 'string', description: 'MediaWiki host for the wikipedia backend; default en.wikipedia.org.' },
+        user: { type: 'string', description: 'github qualifier appended to a search query as user:<value>.' },
+        repo: { type: 'string', description: 'github qualifier appended to a search query as repo:<value>.' },
+        stars: { type: 'string', description: 'github qualifier appended to a search query as stars:>=<value>.' },
+        count: { type: 'number', description: 'Hits returned by a search. Default 10, ceiling 50; aliases limit, max_results, k and n.' },
+        allowed_domains: { type: 'array', description: 'Host suffixes a search result must match to be kept.' },
+        blocked_domains: { type: 'array', description: 'Host suffixes that drop a search result.' },
+        prompt: { type: 'string', description: 'When present the reply answers this against the converted page and returns the matching passages, not the page. Answering is extractive: the passages are verbatim from the page.' },
+        max_chars: { type: 'number', description: 'Cap on characters returned. Default 6000, ceiling 4000000.' },
+        answer_max_chars: { type: 'number', description: 'Cap on the characters of a prompt answer. Default 4000.' },
+        offset: { type: 'number', description: '0-based character offset of a bounded page; with no length it reads to the end of the document. Never combine with start_line/end_line.' },
+        length: { type: 'number', description: 'Characters to return from offset (alias len). A paged read defaults to 24000 characters, not 6000, and an explicit max_chars still caps it.' },
+        start_line: { type: 'number', description: 'First line of a bounded page, 1-based (alias startLine).' },
+        end_line: { type: 'number', description: 'Last line of a bounded page, 1-based and inclusive (alias endLine).' },
+        lines: { type: 'number', description: 'Line count to read from start_line; aliases line_count and lineCount.' },
+        raw: { type: 'boolean', description: 'Return the original response body with no markdown conversion and no prompt answering. Aliases full_response and fullResponse.' },
+        method: { type: 'string', description: 'HTTP method; GET when absent.' },
+        headers: { type: 'object', description: 'Request headers.' },
+        body: { type: 'string', description: 'Request body, sent when method carries one.' },
+        timeoutMs: { type: 'number', description: 'Transport timeout in milliseconds. Default 60000, ceiling 600000.' },
+        opts: { type: 'object', description: 'Transport options object; method, headers and body are folded into it.' },
+    },
+}
+
+const WEBSEARCH_TYPES = {
+    query: z.string(),
+    q: z.string(),
+    url: z.string(),
+    engine: z.string(),
+    backend: z.string(),
+    kind: z.string(),
+    wiki: z.string(),
+    user: z.string(),
+    repo: z.string(),
+    stars: z.union([z.string(), z.number()]),
+    limit: numberLike,
+    max_results: numberLike,
+    maxResults: numberLike,
+    k: numberLike,
+    allowed_domains: z.array(z.string()),
+    blocked_domains: z.array(z.string()),
+    prompt: z.string(),
+    max_chars: numberLike,
+    answer_max_chars: numberLike,
+    raw: booleanLike,
+    timeoutMs: numberLike,
+}
+const WEBSEARCH_KEYS = ['query', 'q', 'url', 'engine', 'backend', 'kind', 'wiki', 'user', 'repo', 'stars', 'limit', 'max_results', 'maxResults', 'k', 'allowed_domains', 'blocked_domains', 'prompt', 'max_chars', 'answer_max_chars', 'raw', 'timeoutMs']
+const WEBSEARCH_FIELDS = aliasFields('websearch', WEBSEARCH_TYPES, WEBSEARCH_KEYS)
+const WEBSEARCH_DESCRIPTION = ` ${WEBSEARCH_KEYS.join(', ')} are accepted at the top level and folded into body, so {"query":"<query>"} and body:{"query":"<query>"} are the same call; a key named in both takes its value from body. Web discovery stays inside gm: results are fetched over the same fetch port and returned as compact rows (title, url, host, snippet, source). One call walks the structured JSON backends FIRST -- github, hn, wikipedia -- because each answers machine-readable JSON with no credential and no challenge page, and only then falls back to the keyless html engines -- duckduckgo, mojeek, bing, searxng, brave, marginalia -- which answer a CAPTCHA or consent page to some clients; it stops at the first backend that parses into hits, 7 at most, and every attempt is reported in attempts. engine (alias backend) picks one or a comma-separated list; url reads a results page of your own, and a url answering JSON is parsed as JSON. kind selects the github endpoint: repos (the default), code or issues; user, repo and stars become github qualifiers and a qualifier written into the query (user:lanmower, repo:owner/name, stars:>100) is passed through. wiki names the MediaWiki host, default en.wikipedia.org. limit caps the rows returned (default 8, ceiling 25; max_results, maxResults and k are aliases). allowed_domains keeps only results whose host matches and blocked_domains drops them, both host suffixes, and both filter every backend, so a backend whose rows are all filtered out does not stop the walk. prompt answers that prompt against the result titles, urls and snippets the same extractive way fetch answers one.`
+const WEBSEARCH_BODY = {
+    required: [],
+    fields: {
+        query: { type: 'string', description: 'What to search for; q is an alias. Required unless url is given.' },
+        url: { type: 'string', description: 'Read this search results page instead of building one from query; a url answering JSON is parsed as JSON.' },
+        engine: { type: 'string', description: 'Backend order: github, hn, wikipedia, duckduckgo, mojeek, bing, searxng, brave, marginalia, or a comma-separated list. Alias backend; GM_SEARCH_BACKEND sets the same order. The JSON backends are tried first.' },
+        kind: { type: 'string', description: 'The github endpoint: repos (the default), code or issues.' },
+        wiki: { type: 'string', description: 'MediaWiki host for the wikipedia backend; default en.wikipedia.org. Any MediaWiki install works.' },
+        user: { type: 'string', description: 'github qualifier appended to q as user:<value>; a user: qualifier already in the query is passed through.' },
+        repo: { type: 'string', description: 'github qualifier appended to q as repo:<value>; a repo: qualifier already in the query is passed through.' },
+        stars: { type: 'string', description: 'github qualifier appended to q as stars:>=<value>; a stars: qualifier already in the query is passed through.' },
+        limit: { type: 'number', description: 'Rows returned. Default 8, ceiling 25; aliases max_results, maxResults and k.' },
+        allowed_domains: { type: 'array', description: 'Host suffixes to keep; a non-matching result is dropped. Applied to every backend.' },
+        blocked_domains: { type: 'array', description: 'Host suffixes to drop; a matching result is removed. Applied to every backend.' },
+        prompt: { type: 'string', description: 'Answered against the kept rows instead of returning the whole listing.' },
+        max_chars: { type: 'number', description: 'Cap on characters returned. Default 20000.' },
+        answer_max_chars: { type: 'number', description: 'Cap on the characters of a prompt answer. Default 4000.' },
+        raw: { type: 'boolean', description: 'Return the raw search page with no result parsing.' },
+        timeoutMs: { type: 'number', description: 'Transport timeout in milliseconds. Default 30000, ceiling 600000.' },
+    },
+}
+
 // One row per registry verb, in the runner's registry order.
 const ROWS = [
     { canonical: 'fs_read', aliases: FS_READ_RANGE_ALIASES, fields: FS_READ_RANGE_FIELDS, description: FS_READ_DESCRIPTION, body: FS_READ_BODY },
     { canonical: 'fs_write', body: FS_WRITE_BODY },
     { canonical: 'fs_readdir', description: FS_READ_PATH_RULE, body: FS_READDIR_BODY },
     { canonical: 'fs_stat', body: FS_STAT_BODY },
-    { canonical: 'fetch' },
+    { canonical: 'fetch', aliases: FETCH_KEYS, fields: FETCH_FIELDS, description: FETCH_DESCRIPTION, body: FETCH_BODY },
+    { canonical: 'websearch', aliases: WEBSEARCH_KEYS, fields: WEBSEARCH_FIELDS, description: WEBSEARCH_DESCRIPTION, body: WEBSEARCH_BODY },
+    { canonical: 'web_search', aliases: WEBSEARCH_KEYS, fields: WEBSEARCH_FIELDS, description: WEBSEARCH_DESCRIPTION, body: WEBSEARCH_BODY },
     { canonical: 'env_get' },
     { canonical: 'kv_get' },
     { canonical: 'kv_put' },
@@ -385,7 +541,7 @@ const ROWS = [
     { canonical: 'memorize_prune', hyphen: true },
     { canonical: 'recall', body: RECALL_BODY },
     { canonical: 'codeinsight_index' },
-    { canonical: 'codeinsight' },
+    { canonical: 'codeinsight', body: CODEINSIGHT_BODY },
     { canonical: 'codesearch', body: CODESEARCH_BODY },
     { canonical: 'forget' },
     { canonical: 'discipline' },
@@ -464,11 +620,12 @@ const ROWS = [
     { canonical: 'chrome' },
     { canonical: 'scan_deps' },
     { canonical: 'code_index' },
-    { canonical: 'callers' },
-    { canonical: 'callees' },
-    { canonical: 'impact' },
-    { canonical: 'grep' },
+    { canonical: 'callers', body: CODEINSIGHT_BODY },
+    { canonical: 'callees', body: CODEINSIGHT_BODY },
+    { canonical: 'impact', body: CODEINSIGHT_BODY },
+    { canonical: 'grep', body: CODESEARCH_BODY },
     { canonical: 'ci_status', hyphen: true },
+    { canonical: 'ci_log', hyphen: true, body: CI_LOG_BODY },
     { canonical: 'prd_status', hyphen: true },
     { canonical: 'prd_block', hyphen: true },
     { canonical: 'pool_brief', hyphen: true },
