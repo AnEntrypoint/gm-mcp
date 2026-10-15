@@ -14,6 +14,7 @@ const { readProcessTable } = await import('../src/process-table.js')
 const { classifyGmServerCommand, flagPortOf } = await import('../src/gm-cmdline.js')
 const { assessUnattributedServers, reapReport, liveMcpClientInParentChain } = await import('../src/leak-reaper.js')
 const { listHttpSupervisors, retireDuplicateHttpSupervisors, supervisorStateFilePath } = await import('../src/singleton.js')
+const { ageMsSince, measuredMs } = await import('../src/timestamp.js')
 
 const ENTRY = '/opt/gm-mcp/bin/gm-mcp-server.mjs'
 const NODE = '/usr/local/bin/node'
@@ -115,6 +116,41 @@ await test('an unattributed stdio server with no client above it is retireable',
     assert.equal(value('orphan-evidence'), 'unattributed')
     assert.equal(value('not-live-http-instance'), 'stdio-no-port')
     assert.equal(value('no-live-mcp-client'), 'no-client-in-parent-chain')
+})
+
+await test('a start time the ps never gave is reported as unknown, not as an epoch-zero age', async () => {
+    const table = [
+        row(liveServerStandInPid, process.pid, `${NODE} ${ENTRY}`),
+        row(process.pid, 1, `node ${process.argv[1]}`, now - 10_000),
+    ]
+    const findings = await assessUnattributedServers({ roots: [root], processes: table, now })
+    const finding = findings.find((entry) => entry.pid === liveServerStandInPid)
+    assert.ok(finding, 'the server is still in the report')
+    assert.equal(finding.started_at, null)
+    assert.equal(finding.age_ms, null, `age was ${finding.age_ms}, which reads as ${Math.round((finding.age_ms ?? 0) / 31_536_000_000)} year(s) old`)
+})
+
+await test('a measured start time still yields the age it names', async () => {
+    const table = [
+        row(liveServerStandInPid, process.pid, `${NODE} ${ENTRY}`, now - 5_000),
+        row(process.pid, 1, `node ${process.argv[1]}`, now - 10_000),
+    ]
+    const findings = await assessUnattributedServers({ roots: [root], processes: table, now })
+    const finding = findings.find((entry) => entry.pid === liveServerStandInPid)
+    assert.equal(finding.started_at, now - 5_000)
+    assert.equal(finding.age_ms, 5_000)
+})
+
+await test('an unmeasured millisecond reading stays null instead of collapsing to zero', () => {
+    assert.equal(measuredMs(null), null)
+    assert.equal(measuredMs(undefined), null)
+    assert.equal(measuredMs(''), null)
+    assert.equal(measuredMs('not-a-number'), null)
+    assert.equal(measuredMs(now - 5_000), now - 5_000)
+    assert.equal(measuredMs(String(now - 5_000)), now - 5_000)
+    assert.equal(ageMsSince(null, now), null)
+    assert.equal(ageMsSince(undefined, now), null)
+    assert.equal(ageMsSince(now - 5_000, now), 5_000)
 })
 
 await test('a stdio server with a live MCP client above it is kept', async () => {

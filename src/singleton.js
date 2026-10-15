@@ -16,6 +16,7 @@ import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { DEFAULT_HOST, DEFAULT_PORT, HEALTH_PATH, MCP_PATH } from './http-transport.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { compareVersions } from './self-update.js'
+import { measuredMs } from './timestamp.js'
 
 const STATE_FILE_NAME = 'gm-mcp-http.json'
 const INSTANCE_FILE_PREFIX = 'gm-mcp-http-instance-'
@@ -517,7 +518,7 @@ export function listHttpSupervisors({ processes = null, platform = process.platf
             pid,
             ppid: Number.isInteger(ppid) && ppid > 0 ? ppid : null,
             port: info.port,
-            started_at: Number.isFinite(Number(row.started_at)) ? Number(row.started_at) : null,
+            started_at: measuredMs(row.started_at),
             command: row.command,
         })
     }

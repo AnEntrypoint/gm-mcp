@@ -272,6 +272,19 @@ await test('an unmeasured start time is never read as an old age', () => {
     assert.deepEqual(blockedBy({ finding: retireableFinding({ started_at: now - 31 * 60_000 }) }), [])
 })
 
+await test('an unmeasured start time is reported as no age, not as the age of the epoch', async () => {
+    const census = censusGmProcesses([stdioServer(101, 1), stdioServer(102, 1, now - HOUR)])
+    assert.equal(census.servers[0].started_at, null)
+    assert.equal(census.servers[1].started_at, now - HOUR)
+    assert.equal(populationOf(census, { warnAt: 8, now }).oldest_age_ms, HOUR, 'the old process is the oldest, not the unmeasured one')
+
+    const report = await leakWatchReport({ roots: [root], processes: orphanTable(null), now, httpPorts: [] })
+    const entry = report.retireable.find((item) => item.pid === livePid)
+    assert.ok(entry, 'the unmeasured server is still reported as retireable')
+    assert.equal(entry.age_ms, null, `age was ${entry.age_ms}, which reads as an epoch-zero process`)
+    assert.equal(report.population.oldest_age_ms, null)
+})
+
 await test('an hourly pass that throws is recorded, and never rejected into the process', async () => {
     const previousSelfUpdate = process.env.GM_MCP_SELF_UPDATE
     const previousLogPath = process.env.GM_MCP_LOG_PATH

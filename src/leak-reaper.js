@@ -18,6 +18,7 @@ import {
     registeredHttpPorts,
     supervisorStateFilePath,
 } from './singleton.js'
+import { ageMsSince } from './timestamp.js'
 
 const BROWSER_NAMES = new Set(['chrome', 'chrome.exe', 'msedge', 'msedge.exe', 'firefox', 'firefox.exe'])
 export const DEFAULT_LEAK_KINDS = ['exec']
@@ -193,7 +194,7 @@ export async function assessLeases({ roots = [] } = {}) {
                 browser_pid: browserPid > 0 ? browserPid : null,
                 port: port > 0 ? port : null,
                 heartbeat_at: record.heartbeatAt ?? null,
-                heartbeat_age_ms: Number.isFinite(Number(record.heartbeatAt)) ? Date.now() - Number(record.heartbeatAt) : null,
+                heartbeat_age_ms: ageMsSince(record.heartbeatAt),
                 owner: record.owner ?? null,
             }))
         }
@@ -337,7 +338,7 @@ export async function assessUnattributedServers({ roots = [], liveSessionIds = n
             session_id: ledgerRow?.session_id ?? null,
             dispatch_id: ledgerRow?.dispatch_id ?? null,
             started_at: row.started_at ?? null,
-            age_ms: Number.isFinite(Number(row.started_at)) ? Number(now) - Number(row.started_at) : null,
+            age_ms: ageMsSince(row.started_at, now),
             scanned_processes: table.length,
         }))
     }

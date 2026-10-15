@@ -14,6 +14,7 @@ import {
     supervisorStateFilePath,
     supervisorToKeep,
 } from './singleton.js'
+import { measuredMs } from './timestamp.js'
 
 export const DEFAULT_POPULATION_WARN_AT = 8
 export const DEFAULT_MIN_RETIRE_AGE_MS = 30 * 60 * 1000
@@ -86,7 +87,7 @@ export function censusGmProcesses(table, { entryPath = null } = {}) {
             ppid: Number.isInteger(ppid) && ppid > 0 ? ppid : null,
             transport: info.transport,
             port: info.port,
-            started_at: Number.isFinite(Number(row.started_at)) ? Number(row.started_at) : null,
+            started_at: measuredMs(row.started_at),
         }
         if (info.transport === 'supervisor') supervisors.push(entry)
         else servers.push(entry)
@@ -219,7 +220,7 @@ function findingSummary(finding) {
         pid: finding.pid ?? null,
         port: finding.port ?? null,
         transport: finding.transport ?? null,
-        age_ms: Number.isFinite(Number(finding.age_ms)) ? Number(finding.age_ms) : null,
+        age_ms: measuredMs(finding.age_ms),
     }
 }
 
