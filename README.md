@@ -343,11 +343,37 @@ value is never read as "old". Duplicate `http-supervise --port <N>` supervisors
 are counted and reported; retiring them stays with the supervisor sweep
 (`GM_MCP_HTTP_SUPERVISOR_DUPE_REAP`).
 
+**Orphans are the leaks the ledger cannot see.** The reaper assesses only pids
+the child ledger knows, so a process gm never spawned piles up invisibly — 11
+reparented runners held 3367 MB of a 7.8 GB box on 2026-10-15 without one line
+from the watch. The same pass now also scans for processes whose `ppid` is `1`
+(reparented to init), that no ledger row claims, that are **heavyweight** (RSS at
+or above `GM_MCP_LEAK_ORPHAN_RSS_MB`, default 150 MB) and **idle** — CPU seconds
+burned divided by seconds alive below `GM_MCP_LEAK_ORPHAN_DUTY` (default `0.02`)
+— after `GM_MCP_LEAK_ORPHAN_MIN_AGE_MS` (default 900000 ms, 15 minutes) alive.
+The duty ratio is the discriminator: the 11 real leaks sat near 0.01 while the
+one live run of the same binary was still burning CPU.
+
+```
+  ORPHAN pid 1860399 -- 292.1 MB RSS, 791s alive, 15.5s cpu (duty 0.0196) -- target/debug/litebox_runner_linux_userland -Z --uid 0 ...
+```
+
+An orphan is reported, never signalled: gm did not spawn it, so gm does not
+classify whether it may be killed. Detection reads `/proc/<pid>/stat` and
+`/proc/<pid>/status` directly — a `ps` on a box loaded enough to grow orphans
+can take over 120 s and time out, which is exactly the box this scan exists to
+diagnose — so on mac and Windows, which have no `/proc`, the section is simply
+empty rather than wrongly quiet about a number it never measured.
+
 | Env var | Effect | Default |
 |---|---|---|
 | `GM_MCP_LEAK_WATCH` | `0`/`false`/`no`/`off` disables the hourly pass | unset (on) |
 | `GM_MCP_LEAK_POPULATION_WARN` | process count at which the pass goes loud | `8` |
 | `GM_MCP_LEAK_AUTO_APPLY` | any value but `0`/`false`/`no`/`off` arms auto-retire | unset (report only) |
+| `GM_MCP_LEAK_ORPHANS` | `0`/`false`/`no`/`off` disables the orphan scan | unset (on) |
+| `GM_MCP_LEAK_ORPHAN_RSS_MB` | RSS floor at which a reparented process is heavyweight | `150` |
+| `GM_MCP_LEAK_ORPHAN_DUTY` | CPU-seconds-per-second-alive below which it counts as idle | `0.02` |
+| `GM_MCP_LEAK_ORPHAN_MIN_AGE_MS` | age floor, so a starting process is never reported | `900000` |
 
 ## Development
 

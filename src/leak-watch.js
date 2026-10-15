@@ -4,6 +4,7 @@ import { attributeRows } from './child-ledger.js'
 import { classifyGmServerCommand } from './gm-cmdline.js'
 import { MCP_CLIENT_PATTERNS, reapReport, VERDICT } from './leak-reaper.js'
 import { listeningPidOf } from './ports.js'
+import { orphanFindings, orphanRssTotalMb } from './orphan-scan.js'
 import { liveSessionNameOf, readProcessTable } from './process-table.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import {
@@ -224,13 +225,16 @@ function findingSummary(finding) {
     }
 }
 
-export async function leakWatchReport({ roots = null, processes = null, now = Date.now(), apply = false, httpPorts = null, signalPid = signalPidByDefault, minAgeMs = DEFAULT_MIN_RETIRE_AGE_MS, maxPerPass = DEFAULT_MAX_AUTO_RETIRE_PER_PASS, warnAt = populationWarnAt() } = {}) {
+export async function leakWatchReport({ roots = null, processes = null, now = Date.now(), apply = false, httpPorts = null, signalPid = signalPidByDefault, minAgeMs = DEFAULT_MIN_RETIRE_AGE_MS, maxPerPass = DEFAULT_MAX_AUTO_RETIRE_PER_PASS, warnAt = populationWarnAt(), readProc = undefined } = {}) {
     const table = Array.isArray(processes) ? processes : readProcessTable()
     const scanRoots = Array.isArray(roots) && roots.length > 0 ? roots : ledgerRoots()
     const reap = await reapReport({ roots: scanRoots, apply: false, now, unattributed: table })
     const census = censusGmProcesses(table)
     const duplicates = duplicateSupervisorFindings({ processes: table, now })
     const sharedPids = await sharedHttpPids(Array.isArray(httpPorts) ? httpPorts : registeredHttpPorts())
+    // Orphans are processes gm does not own at all, so they never appear in the ledger the reap
+    // above reads: they are found by walking the process table itself. Report only.
+    const orphans = orphanFindings({ table, roots: scanRoots, now, readProc })
 
     const retireable = reap.findings.filter((finding) => finding.verdict === VERDICT.RETIRE)
     const unattributedServers = reap.findings.filter((finding) => finding.source === 'unattributed-server')
@@ -268,8 +272,9 @@ export async function leakWatchReport({ roots = null, processes = null, now = Da
         duplicate_supervisor_count: duplicateSupervisorCount,
         reap_counts: reap.counts,
         retireable: retireable.map(findingSummary),
+        orphans,
         auto_apply: { enabled: apply === true, applied, skipped, min_age_ms: minAgeMs, max_per_pass: maxPerPass },
-        notable: population.above_warn || duplicateSupervisorCount > 0 || unattributedServers.length > 0 || applied.length > 0,
+        notable: population.above_warn || duplicateSupervisorCount > 0 || unattributedServers.length > 0 || applied.length > 0 || orphans.count > 0,
     }
 }
 
@@ -289,7 +294,16 @@ export function formatLeakWatchLine(report) {
         const entry = safeEntryPath()
         line += `; retire them with "node ${entry ?? '~/.gm-tools/gm-mcp-server.mjs'} reap --apply"`
     }
+    const orphans = report.orphans
+    if (orphans?.count > 0) {
+        line += `; ${orphans.count} orphaned heavyweight process(es) (ppid 1, >=${orphans.thresholds.rss_mb} MB RSS, duty <${orphans.thresholds.duty}) holding ${Math.round(orphanRssTotalMb(orphans))} MB: ${orphans.items.map((item) => item.pid).join(',')}`
+    }
     return line
+}
+
+export function formatOrphanLine(item) {
+    const cmdline = typeof item.cmdline === 'string' && item.cmdline !== '' ? item.cmdline : '<cmdline unreadable>'
+    return `  ORPHAN pid ${item.pid} -- ${item.rss_mb} MB RSS, ${Math.round(item.age_ms / 1000)}s alive, ${item.cpu_seconds}s cpu (duty ${item.duty}) -- ${cmdline}`
 }
 
 export async function runLeakWatchPass(options = {}) {
@@ -313,6 +327,8 @@ export async function runLeakWatchPass(options = {}) {
         supervisors: report.population.supervisors,
         unattributed_servers: report.population.unattributed_servers,
         retireable: report.population.retireable,
+        orphans: report.orphans.count,
+        orphan_pids: report.orphans.items.map((item) => item.pid),
         duplicate_supervisors: report.duplicate_supervisor_count,
         duplicate_ports: report.duplicate_supervisors.map((entry) => entry.port),
         reap_counts: report.reap_counts,
