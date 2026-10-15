@@ -4,7 +4,7 @@ import { main, flagValue } from './index.js'
 import { gmDispatch, replyEnvelopeSelfCheck } from './dispatch.js'
 import { runDevSync } from './dev-sync.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
-import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
+import { clearLocalBuildPin, deployedBundleVersion, describeSelfUpdateOutcome, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, refreshDeployedBundleNow, selfUpdateStatus } from './self-update.js'
 import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
 import { reapReport, formatFindings } from './leak-reaper.js'
 import { formatLeakWatchLine, formatOrphanLine, leakWatchReport } from './leak-watch.js'
@@ -205,6 +205,22 @@ const COMMANDS = {
         console.log(JSON.stringify(selfUpdateStatus(), null, 2))
         return 0
     },
+    'self-update-now': async () => {
+        // Read-only apart from the deployed bundle and its stamp: no server is started, no port is
+        // bound, nothing is signalled, and this process is never handed over to the bundle it installs.
+        const { deployed_bundle: deployedPath } = selfUpdateStatus()
+        const before = deployedBundleVersion(deployedPath)
+        const result = await refreshDeployedBundleNow(deployedPath)
+        const after = deployedBundleVersion(deployedPath)
+        const moved = result.outcome === 'refreshed'
+        const versions = moved ? `${before} -> ${after}` : `${after ?? before ?? 'unknown version'}`
+        console.log(`gm-mcp ${BUNDLE_VERSION}: deployed bundle ${versions} -- ${describeSelfUpdateOutcome(result)}`)
+        if (moved) {
+            const takesEffect = result.self === true ? 'takes effect on next connect' : 'takes effect for whoever launches the deployed copy next'
+            console.log(`  ${deployedPath} -- ${takesEffect} (previous kept as ${path.basename(deployedPath)}.prev)`)
+        }
+        return 0
+    },
     'dev-sync': async () => {
         const report = runDevSync(flagValue('root') || process.cwd())
         console.log(JSON.stringify(report, null, 2))
@@ -343,6 +359,8 @@ usage:
   gm-mcp-server.js pin-local-build [path]   pin the deployed bundle (default ~/.gm-tools/gm-mcp-server.mjs) so a self-update cannot overwrite it
   gm-mcp-server.js unpin-local-build        clear that pin
   gm-mcp-server.js self-update-status       print no-self-update state, local-build pin and deployed bundle sha256
+  gm-mcp-server.js self-update-now          check the release channel NOW, ignoring the hourly stamp (safe beside a
+                                   running server: it starts none, binds no port and signals no process)
 
 register the durable transport instead of stdio with:
   claude mcp remove gm -s user && claude mcp add --transport http gm ${'http://127.0.0.1:'}${defaultHttpPort()}${'/mcp'} -s user
