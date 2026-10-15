@@ -11,6 +11,8 @@ import { inflightDispatchCount } from './dispatch.js'
 const DEPLOYED_BUNDLE_FILE_NAME = 'gm-mcp-server.mjs'
 const DEFAULT_BUNDLE_URL = 'https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js'
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000
+const DEFER_RETRY_DELAY_MS = 20_000
+const MAX_DEFER_RETRIES_PER_TRIGGER = 4
 const FETCH_TIMEOUT_MS = 20_000
 const MIN_PLAUSIBLE_BUNDLE_BYTES = 100_000
 const BUNDLE_SHEBANG = '#!/usr/bin/env node'
@@ -188,6 +190,13 @@ function checkedRecently(stampPath) {
     return Date.now() - statSync(stampPath).mtimeMs < checkIntervalMs()
 }
 
+function deferRetryDelayMs() {
+    // A retry finishes the trigger that deferred, so it is not a second poll loop -- but it must
+    // still never fetch faster than the interval the operator asked for, so an operator who
+    // shortened that interval below the default retry delay gets retries no faster than it.
+    return Math.min(DEFER_RETRY_DELAY_MS, checkIntervalMs())
+}
+
 function touch(stampPath) {
     if (!existsSync(stampPath)) writeFileSync(stampPath, '')
     const now = new Date()
@@ -221,7 +230,8 @@ function replaceDeployedBundle(deployedPath, bytes) {
     }
 }
 
-export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedPath()) {
+export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedPath(), options = {}) {
+    const countInflightDispatches = options.countInflightDispatches ?? inflightDispatchCount
     if (process.env.GM_MCP_SELF_UPDATE === '0') return { outcome: 'disabled' }
     const self = isRunningFromDeployedBundle(deployedPath)
     const deployedOnly = deployedOnlySelfUpdateReason()
@@ -252,17 +262,74 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     const version = versionGuardReason(freshBytes, deployedBytes)
     if (version.code) return refuse(version.code, version.reason)
 
-    if (inflightDispatchCount() > 0) return { outcome: 'deferred-dispatch-inflight', self, dispatches_inflight: inflightDispatchCount() }
+    // Swapping the bundle under a dispatch that is running would cut that dispatch's reply off
+    // mid-write, so the swap waits -- and the wait is retried soon instead of an interval later.
+    const dispatchesInflight = countInflightDispatches()
+    if (dispatchesInflight > 0) return { outcome: 'deferred-dispatch-inflight', self, dispatches_inflight: dispatchesInflight }
 
     replaceDeployedBundle(deployedPath, freshBytes)
     touch(stampPath)
     return { outcome: 'refreshed', self, from: deployedHash, to: freshHash, url, deployed_bundle: deployedPath, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
 }
 
-export function refreshStaleDeployedBundleInBackground(onRefreshed = null) {
-    return refreshStaleDeployedBundle()
+let deferRetriesLeft = MAX_DEFER_RETRIES_PER_TRIGGER
+let deferRetriesScheduled = 0
+let deferRetriesExhausted = 0
+let pendingDeferRetryPromise = null
+
+export function pendingDeferRetry() {
+    return pendingDeferRetryPromise
+}
+
+export function deferRetryState() {
+    return {
+        max_retries_per_trigger: MAX_DEFER_RETRIES_PER_TRIGGER,
+        retries_left: deferRetriesLeft,
+        scheduled: deferRetriesScheduled,
+        exhausted: deferRetriesExhausted,
+        pending: pendingDeferRetryPromise !== null,
+        delay_ms: deferRetryDelayMs(),
+    }
+}
+
+function armDeferRetry(onRefreshed, options, deferred) {
+    if (deferRetriesLeft <= 0) {
+        deferRetriesLeft = MAX_DEFER_RETRIES_PER_TRIGGER
+        deferRetriesExhausted += 1
+        appendDiagnostic('self-update-defer-retry-exhausted', {
+            dispatches_inflight: deferred.dispatches_inflight,
+            retries: MAX_DEFER_RETRIES_PER_TRIGGER,
+            next_check_in_ms: checkIntervalMs(),
+        })
+        return null
+    }
+    deferRetriesLeft -= 1
+    const delayMs = options.deferRetryDelayMs ?? deferRetryDelayMs()
+    appendDiagnostic('self-update-defer-retry', {
+        delay_ms: delayMs,
+        retries_left: deferRetriesLeft,
+        dispatches_inflight: deferred.dispatches_inflight,
+    })
+    deferRetriesScheduled += 1
+    pendingDeferRetryPromise = new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            pendingDeferRetryPromise = null
+            refreshStaleDeployedBundleInBackground(onRefreshed, options).finally(resolve)
+        }, delayMs)
+        timer.unref()
+    })
+    return pendingDeferRetryPromise
+}
+
+export function refreshStaleDeployedBundleInBackground(onRefreshed = null, options = {}) {
+    return refreshStaleDeployedBundle(undefined, options)
         .then(async (result) => {
             appendDiagnostic('self-update-check', result)
+            if (result.outcome === 'deferred-dispatch-inflight') {
+                armDeferRetry(onRefreshed, options, result)
+                return
+            }
+            deferRetriesLeft = MAX_DEFER_RETRIES_PER_TRIGGER
             if (result.outcome !== 'refreshed') return
             // Only the deployed copy may hand its listen handle over: a repo-build process that
             // refreshed a foreign deployment would otherwise reload into a bundle it is not running.
