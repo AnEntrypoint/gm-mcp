@@ -82,4 +82,15 @@ test('an unrecognised range key is refused, never dropped', () => {
     assert.deepEqual(out.unknown_range_keys, ['startRow'])
 })
 
+test('snake_case start_line/end_line return the same lines as startLine/endLine', () => {
+    const landed = { ok: true, verb: 'fs_read', path: 'f', data: file }
+    const camel = applyFsReadRangeFallback('fs_read', { path: 'f', startLine: 2, endLine: 3 }, landed)
+    const snake = applyFsReadRangeFallback('fs_read', { path: 'f', start_line: 2, end_line: 3 }, landed)
+    assert.equal(snake.content, 'l2\nl3')
+    assert.deepEqual(snake, camel)
+    assert.deepEqual(fsReadRangeCanonicalBody('fs_read', { path: 'a', start_line: 2, end_line: 5 }), { path: 'a', startLine: 2, endLine: 5 })
+    assert.deepEqual(fsReadRangeCanonicalBody('fs_read', { path: 'a', start_line: 2 }), { path: 'a', startLine: 2 })
+    assert.deepEqual(fsReadRangeCanonicalBody('fs_read', { path: 'a', startLine: 2, end_line: 5 }), { path: 'a', startLine: 2, endLine: 5 })
+})
+
 console.log(`\n${passed} passed, ${process.exitCode ? 'FAILED' : '0 failed'}`)
