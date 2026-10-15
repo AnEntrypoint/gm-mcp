@@ -3,10 +3,10 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { BUNDLE_VERSION } from '../src/bundle-version.js'
 import { toolsDir } from '../src/paths.js'
-import { compareVersions, deferRetryState, localBuildPinPath, pendingDeferRetry, refreshStaleDeployedBundle, refreshStaleDeployedBundleInBackground } from '../src/self-update.js'
+import { compareVersions, deferRetryState, deployedBundleVersion, describeSelfUpdateOutcome, localBuildPinPath, pendingDeferRetry, refreshDeployedBundleNow, refreshStaleDeployedBundle, refreshStaleDeployedBundleInBackground } from '../src/self-update.js'
 
 let passed = 0
 async function test(name, fn) {
@@ -270,6 +270,98 @@ await test('an operator interval shorter than the default retry delay drives the
     } finally {
         s.restore()
     }
+})
+
+const stampOf = (deployedPath) => `${deployedPath}.checked`
+
+await test('a forced check ignores a fresh stamp instead of deferring to the next interval', async () => {
+    const s = scenario()
+    try {
+        writeFileSync(stampOf(s.deployedPath), '')
+        const throttled = await refreshStaleDeployedBundle(s.deployedPath)
+        assert.equal(throttled.outcome, 'checked-recently', 'the stamp no longer gates an unforced check')
+        assert.equal(readFileSync(s.deployedPath, 'utf8'), s.deployedText)
+        const forced = await refreshDeployedBundleNow(s.deployedPath)
+        assert.equal(forced.outcome, 'refreshed')
+        assert.equal(forced.forced, true, 'a forced check does not say so in its result')
+        assert.equal(readFileSync(s.deployedPath, 'utf8'), s.candidateText, 'the forced check did not swap the bundle')
+        assert.ok(existsSync(`${s.deployedPath}.prev`), 'the previous bundle was not kept')
+    } finally {
+        s.restore()
+    }
+})
+
+await test('a forced check still refuses a candidate older than the running build', async () => {
+    const s = scenario({ candidateVersion: olderThanRunning, deployedVersion: '0.0.1' })
+    try {
+        writeFileSync(stampOf(s.deployedPath), '')
+        const forced = await refreshDeployedBundleNow(s.deployedPath)
+        assert.equal(forced.outcome, 'refused', 'forcing the check skipped the no-downgrade guard')
+        assert.equal(forced.code, 'no-downgrade')
+        assert.equal(readFileSync(s.deployedPath, 'utf8'), s.deployedText)
+        assert.equal(deployedBundleVersion(s.deployedPath), '0.0.1')
+    } finally {
+        s.restore()
+    }
+})
+
+await test('a forced check still refuses a frozen channel and a pinned local build', async () => {
+    for (const freeze of ['frozen', 'pinned']) {
+        const s = scenario()
+        try {
+            writeFileSync(stampOf(s.deployedPath), '')
+            if (freeze === 'frozen') process.env.GM_MCP_NO_SELF_UPDATE = '1'
+            else writeFileSync(localBuildPinPath(), `${JSON.stringify({ sha256: createHash('sha256').update(readFileSync(s.deployedPath)).digest('hex'), path: path.resolve(s.deployedPath) }, null, 2)}\n`, 'utf8')
+            const forced = await refreshDeployedBundleNow(s.deployedPath)
+            assert.equal(forced.outcome, 'refused', `forcing the check skipped the ${freeze} guard`)
+            assert.equal(forced.code, freeze === 'frozen' ? 'frozen' : 'local-build-pinned')
+            assert.equal(readFileSync(s.deployedPath, 'utf8'), s.deployedText)
+        } finally {
+            s.restore()
+        }
+    }
+})
+
+await test('a forced check still waits for an inflight dispatch instead of swapping under it', async () => {
+    const s = scenario()
+    try {
+        writeFileSync(stampOf(s.deployedPath), '')
+        const forced = await refreshDeployedBundleNow(s.deployedPath, { countInflightDispatches: () => 1 })
+        assert.equal(forced.outcome, 'deferred-dispatch-inflight', 'forcing the check swapped the bundle mid-dispatch')
+        assert.equal(readFileSync(s.deployedPath, 'utf8'), s.deployedText)
+        assert.equal(pendingDeferRetry(), null, 'the on-demand verb armed a background retry timer')
+    } finally {
+        s.restore()
+    }
+})
+
+await test('a forced check reports an already-current deployed bundle without touching it', async () => {
+    const s = scenario({ deployedVersion: newerThanRunning, candidateVersion: newerThanRunning })
+    try {
+        writeFileSync(s.candidatePath, readFileSync(s.deployedPath))
+        s.candidateText = readFileSync(s.candidatePath, 'utf8')
+        writeFileSync(stampOf(s.deployedPath), '')
+        const forced = await refreshDeployedBundleNow(s.deployedPath)
+        assert.equal(forced.outcome, 'current')
+        assert.equal(readFileSync(s.deployedPath, 'utf8'), s.deployedText)
+    } finally {
+        s.restore()
+    }
+})
+
+await test('every outcome the on-demand verb can end on says whether the bundle moved', () => {
+    assert.match(describeSelfUpdateOutcome({ outcome: 'refreshed', from: 'a'.repeat(64), to: 'b'.repeat(64), url: 'file:///x.mjs' }), /refreshed a{12} -> b{12} from file:\/\/\/x\.mjs/)
+    assert.match(describeSelfUpdateOutcome({ outcome: 'current', hash: 'c'.repeat(64) }), /already the release-channel build \(sha c{12}\)/)
+    assert.match(describeSelfUpdateOutcome({ outcome: 'deferred-dispatch-inflight', dispatches_inflight: 3 }), /waiting on 3 dispatch\(es\) inflight/)
+    assert.match(describeSelfUpdateOutcome({ outcome: 'refused', code: 'no-downgrade', reason: 'a self-update may not move backward' }), /refused \(no-downgrade\) -- .*move backward/)
+    assert.match(describeSelfUpdateOutcome({ outcome: 'no-deployed-copy', deployed_bundle: '/tmp/nope.mjs' }), /no deployed bundle at \/tmp\/nope\.mjs/)
+    assert.match(describeSelfUpdateOutcome(null), /no outcome to report/)
+})
+
+await test('the on-demand verb is registered by the CLI and named in its usage text', () => {
+    const cliSource = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'cli.js'), 'utf8')
+    assert.match(cliSource, /'self-update-now':/, 'src/cli.js registers no self-update-now command')
+    assert.match(cliSource, /self-update-now\s+check the release channel NOW/, 'the usage text never mentions self-update-now')
 })
 
 await test('no test in this file wrote to the deployed bundle of this machine', () => {

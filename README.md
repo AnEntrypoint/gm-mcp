@@ -82,6 +82,13 @@ guards stand between the channel and the deployed file:
   must be strictly greater than the installed one; equal or older is refused,
   and so is a candidate whose version cannot be read at all.
 
+The check runs on an hourly tick that defers while `<deployed bundle>.checked`
+is fresher than `GM_MCP_SELF_UPDATE_INTERVAL_MS` (default one hour), so a fix
+pushed upstream reaches this machine up to an hour later. `gm-mcp
+self-update-now` runs the same check at once, skipping only that stamp: it
+starts no server, binds no port, signals nothing and never hands this process
+over to the bundle it installs, and every guard above still stands.
+
 Every refusal goes to stderr with its reason (`refusing deployed bundle
 self-update (<code>) -- <reason>`), so it lands in the daemon log instead of
 being swallowed by the background check. The `.prev` backup and the `node
