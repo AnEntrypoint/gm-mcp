@@ -55,6 +55,9 @@ const EMPTY_LIST_IS_THE_ANSWER_KEYS = new Set([
     'candidates',
     'live_rows',
     'launch',
+    'bm25_hits',
+    'vector_hits',
+    'commits',
 ])
 
 const SEARCH_VERBS = new Set(['codesearch', 'grep', 'codeinsight', 'code_index', 'callers', 'callees', 'impact'])
@@ -269,6 +272,10 @@ const WIRE_OMITTED_SUBKEYS = new Map([
 ])
 
 const WIRE_HIT_ARRAY_KEYS = new Set(['recall_hits', 'bm25_hits', 'vector_hits'])
+
+const WIRE_CODESEARCH_CHANNEL_KEYS = new Set(['bm25_hits', 'vector_hits'])
+
+const WIRE_CODESEARCH_CHANNEL_INLINE_MAX = 20
 
 const WIRE_ROW_ARRAY_KEYS = new Set(['ready_wave', 'prd_items', 'mutables_pending', 'commits'])
 
@@ -542,7 +549,7 @@ export function compactWireResponse(response, outPath, receiptVerb = response?.v
             : value
         const fieldCompactor = WIRE_FIELD_COMPACTORS.get(key)
         if (fieldCompactor) next = fieldCompactor(next)
-        else if (WIRE_HIT_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_HITS_INLINE_MAX).map(excerptRow)
+        else if (WIRE_HIT_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_CODESEARCH_CHANNEL_KEYS.has(key) ? WIRE_CODESEARCH_CHANNEL_INLINE_MAX : WIRE_HITS_INLINE_MAX).map(excerptRow)
         else if (WIRE_ROW_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.map(excerptRow)
         else if (committedGitReceipt && WIRE_GIT_EXCLUSION_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_GIT_EXCLUSIONS_INLINE_MAX)
         if (key === 'data' && isPlainObject(next)) {
