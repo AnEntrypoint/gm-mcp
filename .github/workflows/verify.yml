@@ -26,6 +26,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          # the version-bump guard diffs the pushed range, so it needs more than the head commit
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -35,6 +38,10 @@ jobs:
 
       - name: bin/gm-mcp-server.js is a fresh build of src/
         run: npm run verify-build
+
+      - name: a src/ change ships with a bumped BUNDLE_VERSION and a rebuilt bundle
+        if: github.event_name == 'push'
+        run: node scripts/check-version-bump.mjs ${{ github.event.before }} ${{ github.sha }}
 
       - name: verb dispatch contracts
         run: |

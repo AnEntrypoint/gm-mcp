@@ -5,20 +5,13 @@ import { createServer } from './mcp-server.js'
 import { keepServingOnAsyncFailure, logSignalExits } from './transport-guard.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
+import { flagValue } from './argv.js'
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024
 export const DEFAULT_HOST = '127.0.0.1'
 export const DEFAULT_PORT = 8787
 export const MCP_PATH = '/mcp'
 export const HEALTH_PATH = '/health'
-
-function flagValue(name) {
-    const args = process.argv.slice(2)
-    const index = args.indexOf(`--${name}`)
-    if (index === -1) return undefined
-    const next = args[index + 1]
-    return next && !next.startsWith('--') ? next : undefined
-}
 
 export function httpListenOptions() {
     const port = Number(flagValue('port') ?? process.env.GM_MCP_HTTP_PORT ?? DEFAULT_PORT)
@@ -28,17 +21,15 @@ export function httpListenOptions() {
 
 const SERVED_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 
-function normalizeProtocolVersion(req) {
+function protocolVersionView(req) {
     const requested = req.headers['mcp-protocol-version']
-    if (typeof requested !== 'string' || SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) return
-    req.headers['mcp-protocol-version'] = SERVED_PROTOCOL_VERSION
-    const rawHeaders = req.rawHeaders
-    if (Array.isArray(rawHeaders)) {
-        for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
-            if (typeof rawHeaders[i] === 'string' && rawHeaders[i].toLowerCase() === 'mcp-protocol-version') rawHeaders[i + 1] = SERVED_PROTOCOL_VERSION
-        }
-    }
+    if (typeof requested !== 'string' || SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) return req
+    const headers = { ...req.headers, 'mcp-protocol-version': SERVED_PROTOCOL_VERSION }
+    const rawHeaders = Array.isArray(req.rawHeaders)
+        ? req.rawHeaders.map((value, i) => (i % 2 === 1 && typeof req.rawHeaders[i - 1] === 'string' && req.rawHeaders[i - 1].toLowerCase() === 'mcp-protocol-version' ? SERVED_PROTOCOL_VERSION : value))
+        : req.rawHeaders
     appendDiagnostic('http-protocol-version-normalized', { requested, served: SERVED_PROTOCOL_VERSION })
+    return Object.create(req, { headers: { value: headers, enumerable: true }, rawHeaders: { value: rawHeaders, enumerable: true } })
 }
 
 function rejectOversizedBody(req, res) {
@@ -82,7 +73,7 @@ async function serveStatelessMcpRequest(req, res) {
         sendJsonRpcError(res, 400, -32700, 'Parse error: request body is not JSON')
         return
     }
-    normalizeProtocolVersion(req)
+    const transportRequest = protocolVersionView(req)
     const mcp = createServer()
     const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
@@ -96,7 +87,7 @@ async function serveStatelessMcpRequest(req, res) {
         void mcp.close().catch(() => {})
     })
     await mcp.connect(transport)
-    await transport.handleRequest(req, res, read.body)
+    await transport.handleRequest(transportRequest, res, read.body)
 }
 
 function sendJson(res, status, payload) {
@@ -130,43 +121,32 @@ export function setHealthExtras(fn) {
     healthExtras = typeof fn === 'function' ? fn : null
 }
 
-export async function startHttpServer({ port, host, listenHandle = null, listenRetryMs = 0 } = {}) {
-    keepServingOnAsyncFailure()
-    logSignalExits()
-
-    const server = createHttpServer((req, res) => {
-        void handleRequest(req, res)
+async function handleRequest(req, res, port) {
+    const path = (req.url || '/').split('?')[0]
+    res.on('error', (error) => {
+        appendDiagnostic('http-response-error', { path, error: describeError(error) })
     })
-
-    async function handleRequest(req, res) {
-        const path = (req.url || '/').split('?')[0]
-        res.on('error', (error) => {
-            appendDiagnostic('http-response-error', { path, error: describeError(error) })
-        })
-        try {
-            if (req.method === 'GET' && path === HEALTH_PATH) {
-                sendJson(res, 200, healthPayload(port))
-                return
-            }
-            if (path !== MCP_PATH) {
-                sendJson(res, 404, { error: `no route for ${req.method} ${path}`, mcp_path: MCP_PATH })
-                return
-            }
-            await serveStatelessMcpRequest(req, res)
-        } catch (error) {
-            appendDiagnostic('http-request-failed', { path, method: req.method, error: describeError(error) })
-            if (res.headersSent) {
-                res.end()
-                return
-            }
-            sendJson(res, 400, { error: describeError(error) })
+    try {
+        if (req.method === 'GET' && path === HEALTH_PATH) {
+            sendJson(res, 200, healthPayload(port))
+            return
         }
+        if (path !== MCP_PATH) {
+            sendJson(res, 404, { error: `no route for ${req.method} ${path}`, mcp_path: MCP_PATH })
+            return
+        }
+        await serveStatelessMcpRequest(req, res)
+    } catch (error) {
+        appendDiagnostic('http-request-failed', { path, method: req.method, error: describeError(error) })
+        if (res.headersSent) {
+            res.end()
+            return
+        }
+        sendJson(res, 400, { error: describeError(error) })
     }
+}
 
-    server.on('clientError', (_error, socket) => {
-        socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
-    })
-
+async function listenWithRetry(server, { port, host, listenHandle, listenRetryMs }) {
     const listenOptions = listenHandle ? { handle: listenHandle } : { port, host }
     const retryDeadline = Date.now() + Math.max(0, listenRetryMs)
     for (;;) {
@@ -178,7 +158,7 @@ export async function startHttpServer({ port, host, listenHandle = null, listenR
                     resolve()
                 })
             })
-            break
+            return
         } catch (error) {
             const retryable = error?.code === 'EADDRINUSE' && Date.now() < retryDeadline
             appendDiagnostic('http-listen-failed', {
@@ -193,15 +173,28 @@ export async function startHttpServer({ port, host, listenHandle = null, listenR
             await new Promise((resolve) => setTimeout(resolve, 250))
         }
     }
+}
 
-    if (listenHandle) {
-        try {
-            process.send({ type: 'gm-mcp-handover-ready', pid: process.pid, version: BUNDLE_VERSION })
-        } catch {
-        }
-        appendDiagnostic('http-start-adopted', { host, port, path: MCP_PATH, pid: process.pid, version: BUNDLE_VERSION })
+function announceAdoption(listenHandle, host, port) {
+    if (!listenHandle) return
+    try {
+        process.send({ type: 'gm-mcp-handover-ready', pid: process.pid, version: BUNDLE_VERSION })
+    } catch {
     }
+    appendDiagnostic('http-start-adopted', { host, port, path: MCP_PATH, pid: process.pid, version: BUNDLE_VERSION })
+}
 
+export async function startHttpServer({ port, host, listenHandle = null, listenRetryMs = 0 } = {}) {
+    keepServingOnAsyncFailure()
+    logSignalExits()
+    const server = createHttpServer((req, res) => {
+        void handleRequest(req, res, port)
+    })
+    server.on('clientError', (_error, socket) => {
+        socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
+    })
+    await listenWithRetry(server, { port, host, listenHandle, listenRetryMs })
+    announceAdoption(listenHandle, host, port)
     appendDiagnostic('http-start', { host, port, path: MCP_PATH, pid: process.pid, version: BUNDLE_VERSION })
     console.error(`gm-mcp ${BUNDLE_VERSION}: serving streamable HTTP on http://${host}:${port}${MCP_PATH} (stateless)`)
     return { server, url: `http://${host}:${port}${MCP_PATH}`, port, host }

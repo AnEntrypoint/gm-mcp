@@ -41,9 +41,12 @@ test('the bundled server serves the codemode tool', { timeout: 30_000 }, async (
 
 test('every registry verb is reachable through the served tool', { timeout: 30_000 }, async () => {
     await withBundle(async (client) => {
-        const { parsed } = await codemodeReply(client, 'return gm.list().map((entry) => entry.verb ?? entry.name)')
+        const { parsed } = await codemodeReply(client, 'return gm.list().map((entry) => entry.name)')
         assert.ok(parsed.length > 0, 'gm.list() named no callable verb')
-        const missing = RUNNER_REGISTRY_VERBS.filter((verb) => !parsed.includes(verb))
+        // gm.list() names each verb by its canonical underscore spelling; gm.describe accepts either spelling.
+        const spelled = (verb) => verb.replace(/-/g, '_')
+        const listed = new Set(parsed.map(spelled))
+        const missing = RUNNER_REGISTRY_VERBS.filter((verb) => !listed.has(spelled(verb)))
         assert.deepEqual(missing, [], `registry verbs not callable through gm_codemode: ${missing.join(', ')}`)
     })
 })

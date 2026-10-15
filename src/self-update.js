@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawnSync } from './process-port.js'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,6 +22,10 @@ const SELF_UPDATE_OFF_VALUES = new Set(['0', 'false', 'no', 'off'])
 const BUNDLE_VERSION_ASSIGNMENT = /BUNDLE_VERSION\s*=\s*["']([^"']+)["']/
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
+const readDigest = (file) => {
+    const bytes = readFileSync(file)
+    return { bytes, sha256: sha256(bytes) }
+}
 const shortHash = (hex) => hex.slice(0, 12)
 
 function defaultDeployedPath() {
@@ -56,10 +60,10 @@ export function readLocalBuildPin() {
 }
 
 export function pinLocalBuild(deployedPath = defaultDeployedPath()) {
-    const bytes = readFileSync(deployedPath)
+    const { bytes, sha256: deployedHash } = readDigest(deployedPath)
     const pinPath = localBuildPinPath()
     const pin = {
-        sha256: sha256(bytes),
+        sha256: deployedHash,
         path: path.resolve(deployedPath),
         version: parseBundleVersion(bytes) || BUNDLE_VERSION,
         ts: new Date().toISOString(),
@@ -88,18 +92,18 @@ export function compareVersions(left, right) {
             const parsed = Number.parseInt(part, 10)
             return Number.isFinite(parsed) ? parsed : 0
         })
-    const a = parts(left)
-    const b = parts(right)
-    for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
-        const leftPart = a[i] ?? 0
-        const rightPart = b[i] ?? 0
+    const leftParts = parts(left)
+    const rightParts = parts(right)
+    for (let i = 0; i < Math.max(leftParts.length, rightParts.length); i += 1) {
+        const leftPart = leftParts[i] ?? 0
+        const rightPart = rightParts[i] ?? 0
         if (leftPart > rightPart) return 1
         if (leftPart < rightPart) return -1
     }
     return 0
 }
 
-export function versionGuardReason(candidateBytes) {
+export function versionGuardReason(candidateBytes, installedBytes = null) {
     const candidateVersion = parseBundleVersion(candidateBytes)
     if (!candidateVersion) {
         return {
@@ -107,10 +111,17 @@ export function versionGuardReason(candidateBytes) {
             reason: `the candidate bundle carries no ${BUNDLE_VERSION_ASSIGNMENT} assignment, so it cannot be proven newer than the installed ${BUNDLE_VERSION}`,
         }
     }
-    if (compareVersions(candidateVersion, BUNDLE_VERSION) <= 0) {
+    const order = compareVersions(candidateVersion, BUNDLE_VERSION)
+    if (order < 0) {
         return {
             code: 'no-downgrade',
-            reason: `the candidate bundle is version ${candidateVersion} and the installed one is ${BUNDLE_VERSION} -- a self-update may only move strictly forward`,
+            reason: `the candidate bundle is version ${candidateVersion} and the installed one is ${BUNDLE_VERSION} -- a self-update may not move backward`,
+        }
+    }
+    if (order === 0 && installedBytes && sha256(candidateBytes) === sha256(installedBytes)) {
+        return {
+            code: 'same-build',
+            reason: `the candidate bundle is byte-identical to the installed ${BUNDLE_VERSION} build -- nothing to update`,
         }
     }
     return { code: null, reason: null, candidateVersion }
@@ -217,7 +228,7 @@ export async function refreshStaleDeployedBundle() {
     const stampPath = `${deployedPath}.checked`
     if (checkedRecently(stampPath)) return { outcome: 'checked-recently' }
 
-    const deployedHash = sha256(readFileSync(deployedPath))
+    const { bytes: deployedBytes, sha256: deployedHash } = readDigest(deployedPath)
     const pinned = localBuildPinReason(deployedHash)
     if (pinned) return refuse(pinned.code, pinned.reason)
 
@@ -228,7 +239,7 @@ export async function refreshStaleDeployedBundle() {
         touch(stampPath)
         return { outcome: 'current', hash: freshHash }
     }
-    const version = versionGuardReason(freshBytes)
+    const version = versionGuardReason(freshBytes, deployedBytes)
     if (version.code) return refuse(version.code, version.reason)
 
     if (inflightDispatchCount() > 0) return { outcome: 'deferred-dispatch-inflight', dispatches_inflight: inflightDispatchCount() }
