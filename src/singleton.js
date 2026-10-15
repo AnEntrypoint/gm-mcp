@@ -103,7 +103,12 @@ function dropFile(filePath) {
     }
 }
 
+function isSharedRecordPort(port) {
+    return Number(port) === DEFAULT_PORT
+}
+
 function writeSingletonState(state) {
+    if (!isSharedRecordPort(state?.port)) return
     writeStateFile(stateFilePath(), state)
 }
 
@@ -621,7 +626,7 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
         if (peer) return { url: httpMcpUrl(port), port, pid: peer.pid ?? null, reused: true, version: peer.version ?? null }
         return { url: null, port, pid: null, reused: false, spawned: false, error: `another starter holds the spawn claim for port ${port}` }
     }
-    dropSingletonState()
+    if (isSharedRecordPort(port)) dropSingletonState()
 
     const pid = spawnServerProcess({ port })
     if (!wait) {
