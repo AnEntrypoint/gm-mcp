@@ -1539,7 +1539,7 @@ export function readDaemonLiveness(spoolDir) {
     const sharedPid = globalDaemonPid()
     const sharedFresh = sharedPid !== null && globalFresh
     const servedBySharedDaemon = sharedFresh
-    const useGlobalHeartbeat = !projectFresh && (sameLiveDaemon || pidOwnsDaemon || servedBySharedDaemon)
+    const useGlobalHeartbeat = !projectFresh && globalStatus !== null && (sameLiveDaemon || pidOwnsDaemon || servedBySharedDaemon)
     const heartbeatTs = useGlobalHeartbeat ? globalStatus.ts : status.ts
     const heartbeatAgeMs = timestampAgeMs(heartbeatTs, now)
     const alive = (pidAliveFlag === true && (projectFresh || sameLiveDaemon || pidOwnsDaemon)) || servedBySharedDaemon
