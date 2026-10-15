@@ -12,6 +12,7 @@ async function withBundle(fn) {
     const transport = new StdioClientTransport({
         command: process.execPath,
         args: [BUNDLE],
+        env: { ...process.env, GM_MCP_NO_HTTP_SINGLETON: '1' },
         stderr: 'pipe',
     })
     const client = new Client({ name: 'gm-mcp-catalog-test', version: '0.0.0' })
