@@ -168,7 +168,10 @@ const PRD_ADD_BODY = {
     required: [],
     fields: {
         id: { type: 'string', aliases: ['prd_id', 'slug'], description: 'Row id. Absent, it is slugged from subject, title, name, task, goal, description or notes. A row id is a claim until prd-list with that id resolves it.' },
-        subject: { type: 'string', description: 'What the row asserts.' },
+        subject: { type: 'string', description: 'What the row asserts. Persisted verbatim, so the accepted subject spellings (title, name, task, goal, description, notes) land on the row as written.' },
+        description: { type: 'string', description: 'Long-form row prose: what the row asserts and why. Persisted on the row and served by prd-list and {"prd_full_detail":true}.' },
+        acceptance_criteria: { type: 'string', description: 'What closes the row. Persisted on the row and served by prd-list and {"prd_full_detail":true}.' },
+        witness_plan: { type: 'string', description: 'The observation that would close the row. Persisted on the row and served by prd-list and {"prd_full_detail":true}.' },
         status: { type: 'string', enum: ['pending', 'ready', 'completed', 'blocked'], description: 'Row status; defaults to pending.' },
         blockedBy: { type: 'array', description: 'Row ids this row waits on.' },
         overwrite: { type: 'boolean', description: 'Rescopes an existing row; refused when that row is closed.' },
