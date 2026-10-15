@@ -298,6 +298,57 @@ move the targets; `--no-hook` or `--no-cron` skips one. The crontab it installs
 carries a `@reboot` entry and a five-minute entry, so a server that dies between
 invocations is back within five minutes even when nothing else runs gm.
 
+## Leak watch: gm defends itself at runtime
+
+No CI job can see what is running on a developer machine, so the runtime is the
+only place a process leak can be caught. Every server runs one leak pass on the
+hourly scheduler it already had (`scheduleStaleDeployedBundleChecks`) and once at
+startup, sharing a single host process-table read across the census, the reaper's
+unattributed pass and the duplicate-supervisor count:
+
+```bash
+gm-mcp-server.js leak-watch            # the same pass, by hand
+gm-mcp-server.js leak-watch --json     # the whole report
+gm-mcp-server.js reap --apply          # retire what the pass reports
+```
+
+A pass that finds nothing prints nothing. A pass that finds something writes a
+`leak-watch` diagnostic and one stderr line naming the counts:
+
+```
+gm-mcp: leak watch -- 27 gm-mcp process(es) on this host (warn at 8); 19 server(s), 8 supervisor(s); 27 unattributed, 24 retireable; 2 duplicate supervisor(s) -- ABOVE the population warning threshold
+```
+
+**The population warning is the early signal.** `gm_processes` counts every
+`gm-mcp-server` process alive on the host — servers and supervisors — and
+`above_warn` trips at `GM_MCP_LEAK_POPULATION_WARN` (default `8`), long before
+the count becomes memory pressure. It is a warning, never a kill: nothing is
+refused a start.
+
+**Retiring is opt-in and narrower than the reaper's own `retire` verdict.** By
+default the pass reports and stops. `GM_MCP_LEAK_AUTO_APPLY=1` lets it signal,
+and then only an unattributed **stdio** server that is also:
+
+- not the pid answering `/health` and not the owner of a registered port's
+  listening socket — one shared HTTP server carries every session on the box;
+- free of any live MCP-client ancestor (`claude`, `code`, `cursor`, ...), so a
+  server a session is driving is never touched;
+- free of any live desktop-session ancestor (`selkies`, `xfdesktop`,
+  `xfce4-session`, `s6-svscan`, `Xvfb`, ...) — those look exactly like multi-day
+  orphans and are the live session;
+- of a **measured** start time at least 30 minutes old, and at most 3 per pass.
+
+A process whose ancestry or age cannot be read is never signalled: an unmeasured
+value is never read as "old". Duplicate `http-supervise --port <N>` supervisors
+are counted and reported; retiring them stays with the supervisor sweep
+(`GM_MCP_HTTP_SUPERVISOR_DUPE_REAP`).
+
+| Env var | Effect | Default |
+|---|---|---|
+| `GM_MCP_LEAK_WATCH` | `0`/`false`/`no`/`off` disables the hourly pass | unset (on) |
+| `GM_MCP_LEAK_POPULATION_WARN` | process count at which the pass goes loud | `8` |
+| `GM_MCP_LEAK_AUTO_APPLY` | any value but `0`/`false`/`no`/`off` arms auto-retire | unset (report only) |
+
 ## Development
 
 `bin/gm-mcp-server.js` is a committed build artifact, not hand-edited source --

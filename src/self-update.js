@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { agentplugDir, toolsDir } from './paths.js'
-import { appendDiagnostic } from './server-log.js'
+import { appendDiagnostic, describeError } from './server-log.js'
 import { inflightDispatchCount } from './dispatch.js'
 
 const DEPLOYED_BUNDLE_FILE_NAME = 'gm-mcp-server.mjs'
@@ -279,9 +279,16 @@ export function refreshStaleDeployedBundleInBackground(onRefreshed = null) {
         })
 }
 
-export function scheduleStaleDeployedBundleChecks(onRefreshed = null) {
-    refreshStaleDeployedBundleInBackground(onRefreshed)
-    const timer = setInterval(() => refreshStaleDeployedBundleInBackground(onRefreshed), checkIntervalMs())
+export function scheduleStaleDeployedBundleChecks(onRefreshed = null, hourlyPass = null) {
+    const pass = () => {
+        refreshStaleDeployedBundleInBackground(onRefreshed)
+        if (typeof hourlyPass !== 'function') return
+        Promise.resolve()
+            .then(hourlyPass)
+            .catch((error) => appendDiagnostic('hourly-pass-failed', { error: describeError(error) }))
+    }
+    pass()
+    const timer = setInterval(pass, checkIntervalMs())
     timer.unref()
     return timer
 }
