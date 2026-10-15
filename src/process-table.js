@@ -1,6 +1,14 @@
 import { execFileSync } from 'node:child_process'
 
+import { commandTokens } from './gm-cmdline.js'
+
 const TABLE_TIMEOUT_MS = 15_000
+
+const LIVE_SESSION_NAMES = new Set([
+    's6-svscan', 's6-supervise', 'runit', 'runit-init', 'systemd', 'launchd', 'init', 'tini', 'dumb-init', 'supervisord',
+    'selkies', 'xfdesktop', 'xfce4-session', 'xfce4-panel', 'xfwm4', 'xfsettingsd', 'xfce4-terminal', 'mate-session', 'gnome-session',
+    'xvfb', 'xorg', 'xwayland', 'x11vnc', 'xrdp', 'novnc', 'websockify', 'pulseaudio', 'pipewire', 'wireplumber', 'dbus-daemon',
+])
 
 const POSIX_ARGS_WITH_START = ['-eo', 'pid=,ppid=,lstart=,args=']
 const POSIX_ARGS_NO_START = ['-eo', 'pid=,ppid=,args=']
@@ -94,6 +102,14 @@ function windowsRows({ exec }) {
         })
     }
     return rows
+}
+
+export function liveSessionNameOf(command) {
+    if (typeof command !== 'string' || command === '') return null
+    const tokens = commandTokens(command)
+    if (tokens.length === 0) return null
+    const program = tokens[0].replace(/^.*[\\/]/, '').replace(/\.exe$/i, '').toLowerCase()
+    return LIVE_SESSION_NAMES.has(program) ? program : null
 }
 
 export function readProcessTable({ exec = execFileSync, platform = process.platform } = {}) {

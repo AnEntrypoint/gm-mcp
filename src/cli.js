@@ -7,6 +7,7 @@ import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, selfUpdateStatus } from './self-update.js'
 import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
 import { reapReport, formatFindings } from './leak-reaper.js'
+import { formatLeakWatchLine, leakWatchReport } from './leak-watch.js'
 import { attributePid, globalLedgerPath } from './child-ledger.js'
 
 function repeatedFlag(name) {
@@ -261,6 +262,23 @@ const COMMANDS = {
         }
         return 0
     },
+    'leak-watch': async () => {
+        const apply = process.argv.includes('--apply')
+        const roots = repeatedFlag('root')
+        const report = await leakWatchReport({ roots: roots.length > 0 ? roots.map((root) => path.resolve(root)) : null, apply })
+        if (process.argv.includes('--json')) {
+            console.log(JSON.stringify(report, null, 2))
+        } else {
+            console.log(formatLeakWatchLine(report))
+            for (const entry of report.auto_apply.skipped) {
+                console.log(`  SKIPPED pid ${entry.pid} -- blocked by ${entry.blocked_by.join(', ')}`)
+            }
+            if (!apply && report.population.retireable > 0) {
+                console.log(`\n(report only: nothing was signalled -- re-run with --apply, or set GM_MCP_LEAK_AUTO_APPLY=1 to let the hourly pass retire them)`)
+            }
+        }
+        return 0
+    },
     'attribute': async () => {
         const pid = Number(flagValue('pid'))
         if (!Number.isInteger(pid) || pid <= 0) {
@@ -307,6 +325,10 @@ usage:
                                    report leaked processes and leases; without --apply it only
                                    prints what it WOULD retire, and it never signals a pid it
                                    cannot attribute or a record whose death it cannot measure
+  gm-mcp-server.js leak-watch [--apply] [--root <dir>]... [--json]
+                                   the same pass the server runs hourly: how many gm-mcp
+                                   processes are alive, how many are unattributed or
+                                   retireable, and how many duplicate supervisors a port has
   gm-mcp-server.js attribute --pid N [--root <dir>]...
                                    print which dispatch spawned pid N (exit 1 if unattributed)
   gm-mcp-server.js port-pool [--preferred N]

@@ -7,6 +7,7 @@ import { serveStdioRelay } from './stdio-relay.js'
 import { adoptHandedOverHandle, handOverStdioToRefreshedBundle, handOverToRefreshedBundle, handoverRequested, HANDOVER_LISTEN_RETRY_MS } from './bundle-refresh.js'
 import { bundleHealthBlock, bundleStalenessAnnouncement, startBundleDriftWatch } from './bundle-drift.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
+import { runLeakWatchPass } from './leak-watch.js'
 import { runReleaseBridgeInBackground } from './release-bridge.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { installSpoolPort } from './spool-port.js'
@@ -66,7 +67,7 @@ export async function main() {
         const supervision = ensureHttpSupervisor({ port })
         recordHttpInstance({ port, host, supervisorPid: supervision?.pid ?? null })
         watchForStaleBundle({ transportKind: 'http', handOver: (state) => handOverToRefreshedBundle({ host, port, server, state }) })
-        scheduleStaleDeployedBundleChecks((result) => handOverToRefreshedBundle({ host, port, server, result }))
+        scheduleStaleDeployedBundleChecks((result) => handOverToRefreshedBundle({ host, port, server, result }), runLeakWatchPass)
         runReleaseBridgeInBackground()
         return
     }
@@ -83,7 +84,7 @@ export async function main() {
     console.error('gm-mcp: connected, serving on stdio')
     seedHttpSingletonInBackground()
     watchForStaleBundle({ transportKind: 'stdio', handOver: (state) => handOverStdioToRefreshedBundle({ transport, state }) })
-    scheduleStaleDeployedBundleChecks()
+    scheduleStaleDeployedBundleChecks(null, runLeakWatchPass)
     runReleaseBridgeInBackground()
 }
 
