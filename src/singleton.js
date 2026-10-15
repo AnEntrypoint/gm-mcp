@@ -1,3 +1,4 @@
+import { isPlainObject } from './plain-object.js';
 import { agentplugDir } from './paths.js'
 import { execFileSync, spawn } from './process-port.js'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
@@ -71,7 +72,7 @@ function readStateFile(filePath, port = null) {
         if (error?.code !== 'ENOENT') appendDiagnostic('singleton-state-corrupt', { file: filePath, error: describeError(error) })
         return null
     }
-    if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    if (!isPlainObject(state)) {
         appendDiagnostic('singleton-state-corrupt', { file: filePath, error: 'not a JSON object' })
         return null
     }

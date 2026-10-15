@@ -259,6 +259,13 @@ const CODESEARCH_BODY = {
         no_ignore: { type: 'boolean', aliases: ['include_ignored', 'exhaustive'], description: 'Includes ignored paths.' },
     },
 }
+const GREP_BODY = {
+    required: CODESEARCH_BODY.required,
+    fields: {
+        ...CODESEARCH_BODY.fields,
+        output_mode: { type: 'string', aliases: ['outputMode'], enum: ['content', 'files_with_matches', 'count'], description: 'grep output shape: "content" (default) is path:line: text per hit, "files_with_matches" each matching path once, "count" path:count.' },
+    },
+}
 const FS_READ_BODY = {
     required: ['path'],
     fields: {
@@ -606,7 +613,7 @@ const ROWS = [
     { canonical: 'callers', body: CODEINSIGHT_BODY },
     { canonical: 'callees', body: CODEINSIGHT_BODY },
     { canonical: 'impact', body: CODEINSIGHT_BODY },
-    { canonical: 'grep', body: CODESEARCH_BODY },
+    { canonical: 'grep', body: GREP_BODY },
     { canonical: 'ci_status', hyphen: true },
     { canonical: 'ci_log', hyphen: true, body: CI_LOG_BODY },
     { canonical: 'prd_status', hyphen: true },
