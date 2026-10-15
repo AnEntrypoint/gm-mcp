@@ -1,6 +1,8 @@
 import { isPlainObject } from './plain-object.js';
 import { agentplugDir } from './paths.js'
 import { execFileSync, spawn } from './process-port.js'
+import { classifyGmServerCommand } from './gm-cmdline.js'
+import { readProcessTable } from './process-table.js'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -497,12 +499,88 @@ export function allocateHttpPort({ preferred = null, from = PORT_POOL_FROM, to =
     return null
 }
 
+// Nothing ever retired a superseded supervisor: `ensureHttpSupervisor` only refuses to spawn while
+// a claim reads fresh, and the claim file is dropped by the very sweeps that reap a dead port, so
+// the next arm spawns a second supervisor beside the one still probing that port. N live
+// supervisors on one port are one supervisor plus N-1 leaks, so the sweep keeps the freshest claim
+// and retires the rest. A port whose newest claim cannot be named is left alone: retiring the
+// wrong one would leave the port unsupervised rather than duplicated.
+export function listHttpSupervisors({ processes = null, platform = process.platform, exec = execFileSync } = {}) {
+    const table = Array.isArray(processes) ? processes : readProcessTable({ platform, exec })
+    const rows = []
+    for (const row of table) {
+        const info = classifyGmServerCommand(row.command, { entryPath: launchedEntryPath() })
+        if (info === null || info.transport !== 'supervisor' || info.port === null) continue
+        const pid = Number(row.pid)
+        if (!Number.isInteger(pid) || pid <= 0) continue
+        const ppid = Number(row.ppid)
+        rows.push({
+            pid,
+            ppid: Number.isInteger(ppid) && ppid > 0 ? ppid : null,
+            port: info.port,
+            started_at: Number.isFinite(Number(row.started_at)) ? Number(row.started_at) : null,
+            command: row.command,
+        })
+    }
+    return rows
+}
+
+export function supervisorToKeep(group, state = null, now = Date.now()) {
+    const statePid = Number(state?.pid)
+    // the claim file is written by the supervisor that owns the port, so a fresh claim names the
+    // keeper outright; a stale one is worth no more than the start times below it
+    if (Number.isInteger(statePid) && statePid > 0 && supervisorRunning(state, now) && group.some((row) => row.pid === statePid)) return statePid
+    const timed = group.filter((row) => Number.isFinite(row.started_at)).sort((left, right) => right.started_at - left.started_at)
+    if (timed.length === 0) return null
+    // ps start times resolve to the second, so two sharing one are neither newer nor older
+    if (timed.length > 1 && timed[1].started_at === timed[0].started_at) return null
+    return timed[0].pid
+}
+
+function signalSupervisorPid(pid) {
+    try {
+        process.kill(Number(pid))
+        return true
+    } catch {
+        return false
+    }
+}
+
+function dupeReapEnabled() {
+    const value = envValue('GM_MCP_HTTP_SUPERVISOR_DUPE_REAP')
+    return !(value !== null && OFF_VALUES.has(value))
+}
+
+export function retireDuplicateHttpSupervisors({ processes = null, now = Date.now(), signalPid = signalSupervisorPid, dryRun = false, platform = process.platform, exec = execFileSync } = {}) {
+    if (!dupeReapEnabled()) return []
+    const rows = listHttpSupervisors({ processes, platform, exec })
+    const retired = []
+    for (const port of [...new Set(rows.map((row) => row.port))].sort((left, right) => left - right)) {
+        const group = rows.filter((row) => row.port === port)
+        if (group.length < 2) continue
+        const state = readStateFile(supervisorStateFilePath(port), port)
+        const keepPid = supervisorToKeep(group, state, now)
+        if (keepPid === null) {
+            appendDiagnostic('http-supervisor-dupe-unresolved', { port, pids: group.map((row) => row.pid), reason: 'no live claim is measurably fresher than the others' })
+            continue
+        }
+        for (const row of group) {
+            if (row.pid === keepPid || row.pid === process.pid) continue
+            const signalled = dryRun ? true : signalPid(row.pid)
+            appendDiagnostic('http-supervisor-retired-dupe', { port, pid: row.pid, kept_pid: keepPid, started_at: row.started_at, signalled, dry_run: dryRun })
+            retired.push({ port, pid: row.pid, kept_pid: keepPid, signalled, reason: 'duplicate-supervisor' })
+        }
+    }
+    return retired
+}
+
 export async function sweepHttpInstances(options = {}) {
+    const duplicate_supervisors = retireDuplicateHttpSupervisors(options)
     const reclaimed = await reclaimDeadPortRegistries()
     const orphaned = await reapOrphanedHttpInstances(options)
     const dead = await reapDeadHttpInstances()
     const replaced = await replaceBehindHttpInstances(options)
-    return { dead, replaced, orphaned, reclaimed }
+    return { dead, replaced, orphaned, reclaimed, duplicate_supervisors }
 }
 
 export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs = STARTUP_WAIT_MS, wait = true, sweep = true } = {}) {
