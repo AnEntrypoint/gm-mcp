@@ -66,12 +66,12 @@ function replyMaxChars(maxChars) {
     return DEFAULT_REPLY_MAX_CHARS
 }
 
-const FS_READ_RANGE_PAIRS = [['startLine', 'endLine', false], ['start', 'end', false], ['from', 'to', false], ['offset', 'limit', true], ['line', 'lines', true]]
+const FS_READ_RANGE_PAIRS = [['startLine', 'endLine', false], ['start_line', 'end_line', false], ['start', 'end', false], ['from', 'to', false], ['offset', 'limit', true], ['line', 'lines', true]]
 const FS_READ_COUNT_KEYS = ['count', 'limit', 'lines']
-const FS_READ_END_KEYS = ['endLine', 'end', 'to']
+const FS_READ_END_KEYS = ['endLine', 'end_line', 'end', 'to']
 const FS_READ_RANGE_BASIS = '1-based, inclusive on both ends'
 const FS_READ_ACCEPTED_KEYS = tableRow('fs_read').aliases
-const FS_READ_ACCEPTED_PAIRS = 'startLine/endLine, start/end, start/count, from/to, offset/limit, line/lines'
+const FS_READ_ACCEPTED_PAIRS = 'startLine/endLine (or start_line/end_line), start/end, start/count, from/to, offset/limit, line/lines'
 const FS_READ_KNOWN_NON_RANGE_KEYS = new Set(['path', 'file', 'allowOutsideRoot', 'allow_outside_root', 'session_id', 'max_bytes', 'maxBytes', 'encoding', 'verbose'])
 const FS_READ_RANGE_LOOKING_PATTERNS = [
     /^(start|begin|first|from|head|offset)(_?(line|lines|row|rows|index|idx|number|num|no|n))?$/,
