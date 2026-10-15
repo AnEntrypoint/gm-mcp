@@ -1,7 +1,7 @@
 import { isPlainObject } from './plain-object.js';
 import { agentplugDir } from './paths.js'
 import { execFileSync, spawn } from './process-port.js'
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -589,10 +589,46 @@ function supervisorRunning(state, now = Date.now()) {
     return typeof state.ts === 'number' && now - state.ts < staleAfter
 }
 
+const SPAWN_CLAIM_STALE_MS = 20_000
+
+function spawnClaimPath(name, port) {
+    return path.join(agentplugDir(), `gm-mcp-${name}-${port}.claim`)
+}
+
+// Atomic single-writer guard: 'wx' create wins for exactly one caller. A claim older than
+// SPAWN_CLAIM_STALE_MS is moved aside with rename (one winner) before a fresh create.
+export function claimSpawn(name, port) {
+    const file = spawnClaimPath(name, port)
+    mkdirSync(agentplugDir(), { recursive: true })
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            writeFileSync(file, String(Date.now()), { flag: 'wx' })
+            return true
+        } catch (error) {
+            if (error?.code !== 'EEXIST') throw error
+            const claimedAt = Number(readFileSyncSafe(file))
+            if (Number.isFinite(claimedAt) && Date.now() - claimedAt < SPAWN_CLAIM_STALE_MS) return false
+            try { renameSync(file, `${file}.${process.pid}.stale`) } catch {}
+        }
+    }
+    return false
+}
+
+function readFileSyncSafe(file) {
+    try { return readFileSync(file, 'utf8') } catch { return '' }
+}
+
+export function releaseSpawnClaim(name, port) {
+    try { unlinkSync(spawnClaimPath(name, port)) } catch {}
+}
+
 export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs(), force = false } = {}) {
     if (!force && !supervisorEnabled()) return { port, pid: null, started: false, reason: 'disabled' }
     const recorded = readSupervisorState(port)
     if (supervisorRunning(recorded)) return { port, pid: recorded.pid, started: false, reason: 'already-running' }
+    if (!claimSpawn('supervisor', port)) return { port, pid: null, started: false, reason: 'claim-held' }
+    const afterClaim = readSupervisorState(port)
+    if (supervisorRunning(afterClaim)) return { port, pid: afterClaim.pid, started: false, reason: 'already-running' }
 
     const entry = launchedEntryPath()
     const { stdio, fd } = childStdio()

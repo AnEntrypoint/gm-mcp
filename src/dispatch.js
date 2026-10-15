@@ -54,12 +54,26 @@ function resolveDispatchRoot(cwd) {
     }
 }
 
-function inlineMaxForVerb({ verb, isPlainText, fullResponse, maxChars }) {
+const FETCH_PAGE_KEYS = ['offset', 'length', 'len', 'start_line', 'startLine', 'end_line', 'endLine', 'lines', 'line_count', 'lineCount']
+
+// A fetch that asked for one bounded page wants to read that page, so the document field is inlined
+// to the file-read budget instead of the 400-character one every other long text field gets: at 400
+// characters a page would come back as a pointer to the spill file, and a document could not be read
+// through the port at all, which is what paging exists to fix. Only a call carrying a page key pays
+// it, so an ordinary fetch keeps its 6000-character default and its small inline window.
+function fetchPageRequested(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return false
+    if (typeof body.url !== 'string' || body.url === '') return false
+    return FETCH_PAGE_KEYS.some((key) => body[key] !== undefined && body[key] !== null && body[key] !== '')
+}
+
+function inlineMaxForVerb({ verb, isPlainText, fullResponse, maxChars, body }) {
     const requested = Number(maxChars)
     if (Number.isFinite(requested) && requested > 0) return Math.min(Math.floor(requested), LONG_TEXT_INLINE_MAX_CEILING)
     if (fullResponse) return LONG_TEXT_INLINE_MAX_CEILING
     if (isPlainText) return PLAIN_TEXT_OUTPUT_INLINE_MAX
     if (verb === 'fs_read') return FILE_READ_INLINE_MAX
+    if (verb === 'fetch' && fetchPageRequested(body)) return FILE_READ_INLINE_MAX
     return undefined
 }
 
@@ -72,12 +86,12 @@ function replyMaxChars(maxChars) {
     return DEFAULT_REPLY_MAX_CHARS
 }
 
-const FS_READ_RANGE_PAIRS = [['startLine', 'endLine', false], ['start', 'end', false], ['from', 'to', false], ['offset', 'limit', true], ['line', 'lines', true]]
+const FS_READ_RANGE_PAIRS = [['startLine', 'endLine', false], ['start_line', 'end_line', false], ['start', 'end', false], ['from', 'to', false], ['offset', 'limit', true], ['line', 'lines', true]]
 const FS_READ_COUNT_KEYS = ['count', 'limit', 'lines']
-const FS_READ_END_KEYS = ['endLine', 'end', 'to']
+const FS_READ_END_KEYS = ['endLine', 'end_line', 'end', 'to']
 const FS_READ_RANGE_BASIS = '1-based, inclusive on both ends'
 const FS_READ_ACCEPTED_KEYS = tableRow('fs_read').aliases
-const FS_READ_ACCEPTED_PAIRS = 'startLine/endLine, start/end, start/count, from/to, offset/limit, line/lines'
+const FS_READ_ACCEPTED_PAIRS = 'startLine/endLine (or start_line/end_line), start/end, start/count, from/to, offset/limit, line/lines'
 const FS_READ_KNOWN_NON_RANGE_KEYS = new Set(['path', 'file', 'allowOutsideRoot', 'allow_outside_root', 'session_id', 'max_bytes', 'maxBytes', 'encoding', 'verbose'])
 const FS_READ_RANGE_LOOKING_PATTERNS = [
     /^(start|begin|first|from|head|offset)(_?(line|lines|row|rows|index|idx|number|num|no|n))?$/,
@@ -2200,7 +2214,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
             const ranged = full_response ? parsed : applyFsReadRangeFallback(verb, normalizedBody, parsed)
             const named = withSearchIncompleteness(ranged)
-            const cleaned = full_response ? named : cleanResponse(named, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars }))
+            const cleaned = full_response ? named : cleanResponse(named, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars, body: normalizedBody }))
             let out = cleaned
             if (!full_response && isPlainObject(cleaned) && isPlainObject(cleaned.data)) {
                 const { data, ...rest } = cleaned
