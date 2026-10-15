@@ -213,10 +213,14 @@ node C:\Users\user\.gm-tools\gm-mcp-server.mjs http-status          # is it answ
 node C:\Users\user\.gm-tools\gm-mcp-server.mjs --http --port 8787   # run it in the foreground
 ```
 
-Every entry point seeds it: a stdio server, an HTTP server started on another
-port and a `dispatch` run all health-probe the port and spawn the shared server
-detached when nothing answers, so the durable transport is up before any client
-asks for it and comes back by itself after a crash. `GM_MCP_NO_HTTP_SINGLETON=1`
+Every stdio start is a relay: it forwards each MCP frame to the shared server
+over HTTP and writes the reply to stdout, and starts no watchers of its own. A
+stdio start, an HTTP server started on another port and a `dispatch` run all
+health-probe the port and spawn the shared server detached when nothing answers
+(one spawner per port, see `claimSpawn` in `gm-mcp/AGENTS.md`), so the durable
+transport is up before any client asks for it and comes back by itself after a
+crash. A stdio start runs a local server with its watchers only when the
+singleton is opted out or unreachable. `GM_MCP_NO_HTTP_SINGLETON=1`
 (or `GM_MCP_NO_HTTP_SINGLETON=1`) opts out, `GM_MCP_HTTP_PORT` moves the port.
 Because no state is carried between requests, a restart of the HTTP server
 never loses an in-flight dispatch.
