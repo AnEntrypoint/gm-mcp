@@ -122,7 +122,7 @@ export async function handOverStdioToRefreshedBundle({ transport = null, state =
             cwd: process.cwd(),
             windowsHide: true,
             stdio: ['pipe', 'pipe', 'pipe'],
-            env: { ...process.env, GM_MCP_TRANSPORT: 'stdio' },
+            env: { ...process.env, GM_MCP_TRANSPORT: 'stdio', GM_MCP_NO_HTTP_SINGLETON: '1' },
         })
     } catch (error) {
         appendDiagnostic('bundle-stdio-handover-spawn-failed', { ...detail, entry, error: describeError(error) })
