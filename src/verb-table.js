@@ -30,11 +30,13 @@ function topLevelDescription(verb, keys, defaultsOf) {
     return ` ${keys.join(', ')} ${keys.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${keys[0]}":"<${defaultsOf.sample}>"} and body:{"${keys[0]}":"<${defaultsOf.sample}>"} are the same call; a key named in both takes its value from body. Without one of them ${verb} takes its own default: ${defaultsOf.text}.`
 }
 
-const FS_READ_RANGE_ALIASES = ['startLine', 'endLine', 'start', 'end', 'count', 'from', 'to', 'offset', 'limit', 'line', 'lines']
-const FS_READ_RANGE_PAIR_HELP = 'Pairs are resolved in this order: startLine/endLine, then start/end (start/count also works), then from/to, then offset/limit, then line/lines. endLine/end/to is the last line to return; limit/count/lines is a number of lines, not an end line.'
+const FS_READ_RANGE_ALIASES = ['startLine', 'endLine', 'start_line', 'end_line', 'start', 'end', 'count', 'from', 'to', 'offset', 'limit', 'line', 'lines']
+const FS_READ_RANGE_PAIR_HELP = 'Pairs are resolved in this order: startLine/endLine (snake_case start_line/end_line is the same pair), then start/end (start/count also works), then from/to, then offset/limit, then line/lines. endLine/end/to is the last line to return; limit/count/lines is a number of lines, not an end line.'
 const FS_READ_RANGE_LINE_HELP = {
     startLine: 'First line to return (1-based).',
     endLine: 'Last line to return (1-based, inclusive).',
+    start_line: 'First line to return (1-based). Snake_case alias of startLine.',
+    end_line: 'Last line to return (1-based, inclusive). Snake_case alias of endLine.',
     start: 'First line to return (1-based).',
     end: 'Last line to return (1-based, inclusive).',
     count: 'Number of lines to return.',
@@ -246,8 +248,8 @@ const FS_READ_BODY = {
     fields: {
         path: { type: 'string', description: 'Project-relative path. An absolute path is refused even inside the root, and so is any path carrying "..".' },
         allowOutsideRoot: { type: 'boolean', aliases: ['allow_outside_root', 'allowAbsolute'], description: 'Widens the read to another root; never applies to fs_write.' },
-        startLine: { type: 'integer', description: 'First line to return, 1-based.' },
-        endLine: { type: 'integer', description: 'Last line to return, 1-based and inclusive.' },
+        startLine: { type: 'integer', aliases: ['start_line'], description: 'First line to return, 1-based. start_line is accepted as an alias.' },
+        endLine: { type: 'integer', aliases: ['end_line'], description: 'Last line to return, 1-based and inclusive. end_line is accepted as an alias.' },
         limit: { type: 'integer', description: 'Number of lines to return, not an end line.' },
         max_bytes: { type: 'integer', aliases: ['maxBytes'], description: 'Byte cap on the read.' },
     },
