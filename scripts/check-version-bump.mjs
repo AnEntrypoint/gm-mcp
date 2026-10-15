@@ -1,8 +1,4 @@
 #!/usr/bin/env node
-// A src/ change that ships without a BUNDLE_VERSION bump never reaches a running server: the
-// deployed bundle self-updates only when the candidate version is strictly newer, so a new verb
-// added to src/verb-table.js and committed under the same version stays absent from every
-// installed copy until some later commit happens to bump it. This check makes that impossible.
 import { spawnSync } from 'node:child_process'
 
 const NULL_SHA = /^0{40}$/
@@ -17,18 +13,15 @@ if (NULL_SHA.test(base)) {
     process.exit(0)
 }
 
-// The pushed range is the whole change, but a checkout that only fetched the head cannot resolve
-// it; the single-commit range still catches a src/ edit pushed on its own, which is the common
-// case, and a checkout with no history at all is skipped rather than failed.
 function changedPaths(base, head) {
-    const ranges = [`${base}..${head}`, `${head}^..${head}`]
-    for (const range of ranges) {
+    const rangesWidestFirst = [`${base}..${head}`, `${head}^..${head}`]
+    for (const range of rangesWidestFirst) {
         const diff = spawnSync('git', ['diff', '--name-only', range], { encoding: 'utf8' })
         if (diff.status === 0) {
             return diff.stdout.split('\n').map((line) => line.trim()).filter(Boolean)
         }
     }
-    console.log(`check-version-bump: neither ${ranges.join(' nor ')} resolves in this checkout -- skipping`)
+    console.log(`check-version-bump: neither ${rangesWidestFirst.join(' nor ')} resolves in this checkout -- skipping`)
     return null
 }
 

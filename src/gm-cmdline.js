@@ -1,6 +1,3 @@
-// Every gm-mcp process shares one command shape: <node> <entry> [transport args]. The reaper and
-// the http sweep both need to read that shape off a foreign command line, and both must refuse a
-// command they cannot read whole -- a half-classified process is a process neither may retire.
 const NODE_NAMES = new Set(['node', 'node.exe'])
 const SERVER_ENTRY_PATTERN = /(^|[\\/])gm-mcp-server\.(mjs|cjs|js)$/i
 

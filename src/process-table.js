@@ -1,22 +1,13 @@
-// One enumeration of the host process table is the only view that sees a gm-mcp server the child
-// ledger never recorded: a stdio server is spawned by the MCP client, not by a dispatch, so
-// attributePid answers "unattributed" for it and every ledger-only sweep is blind to it. The
-// table is read once per sweep and handed to the callers, so a sweep never pays for two `ps`
-// runs and the tests can inject a table instead of reading the host.
 import { execFileSync } from 'node:child_process'
 
 const TABLE_TIMEOUT_MS = 15_000
 
-// `ps -eo pid=,ppid=,lstart=,args=` is the one spelling that carries pid, ppid, a start time and
-// the full command on both procps and BSD ps. A ps that refuses lstart still answers the shorter
-// form, so the start time is optional rather than a reason to see no processes at all.
-const POSIX_ARGS = ['-eo', 'pid=,ppid=,lstart=,args=']
+const POSIX_ARGS_WITH_START = ['-eo', 'pid=,ppid=,lstart=,args=']
 const POSIX_ARGS_NO_START = ['-eo', 'pid=,ppid=,args=']
 const POSIX_LINE = /^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/
 const POSIX_LINE_NO_START = /^\s*(\d+)\s+(\d+)\s+(.*)$/
 
-// Win32_Process.CreationDate is a WMI datetime: YYYYMMDDHHMMSS.ffffff<offset minutes from UTC>.
-const WMI_DATE = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.\d+(?:([+-]\d{1,4}))?$/
+const WMI_CREATION_DATE = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.\d+(?:([+-]\d{1,4}))?$/
 
 const WINDOWS_SCRIPT = [
     'Get-CimInstance Win32_Process | ForEach-Object {',
@@ -32,13 +23,12 @@ function startedAtFrom(text) {
 }
 
 function wmiStartedAt(text) {
-    const match = WMI_DATE.exec((text ?? '').trim())
+    const match = WMI_CREATION_DATE.exec((text ?? '').trim())
     if (match === null) return null
-    const [, year, month, day, hour, minute, second, offset] = match
+    const [, year, month, day, hour, minute, second, utcOffsetMinutes] = match
     const asUtc = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second))
     if (!Number.isFinite(asUtc)) return null
-    // local = UTC + offset, so the instant is the printed wall clock minus the offset.
-    return asUtc - Number(offset ?? 0) * 60_000
+    return asUtc - Number(utcOffsetMinutes ?? 0) * 60_000
 }
 
 function run(exec, file, args) {
@@ -54,7 +44,7 @@ function posixRows({ exec }) {
     let text = ''
     let withStart = true
     try {
-        text = run(exec, 'ps', POSIX_ARGS)
+        text = run(exec, 'ps', POSIX_ARGS_WITH_START)
     } catch {
         try {
             text = run(exec, 'ps', POSIX_ARGS_NO_START)

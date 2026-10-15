@@ -104,7 +104,6 @@ await new Promise((resolve, reject) => {
     client.once('error', reject)
 })
 
-// the unattributed pass enumerates the host process table, which no assertion here is about
 const first = await reapReport({ roots: [root], apply: false, liveSessionIds: new Set(), unattributed: false })
 const findingA = first.findings.find((entry) => entry.pid === leakA.pid)
 const findingB = first.findings.find((entry) => entry.pid === leakB.pid)

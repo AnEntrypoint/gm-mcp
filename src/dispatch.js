@@ -56,12 +56,7 @@ function resolveDispatchRoot(cwd) {
 
 const FETCH_PAGE_KEYS = ['offset', 'length', 'len', 'start_line', 'startLine', 'end_line', 'endLine', 'lines', 'line_count', 'lineCount']
 
-// A fetch that asked for one bounded page wants to read that page, so the document field is inlined
-// to the file-read budget instead of the 400-character one every other long text field gets: at 400
-// characters a page would come back as a pointer to the spill file, and a document could not be read
-// through the port at all, which is what paging exists to fix. Only a call carrying a page key pays
-// it, so an ordinary fetch keeps its 6000-character default and its small inline window.
-function fetchPageRequested(body) {
+function isBoundedPageFetch(body) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return false
     if (typeof body.url !== 'string' || body.url === '') return false
     return FETCH_PAGE_KEYS.some((key) => body[key] !== undefined && body[key] !== null && body[key] !== '')
@@ -73,7 +68,7 @@ function inlineMaxForVerb({ verb, isPlainText, fullResponse, maxChars, body }) {
     if (fullResponse) return LONG_TEXT_INLINE_MAX_CEILING
     if (isPlainText) return PLAIN_TEXT_OUTPUT_INLINE_MAX
     if (verb === 'fs_read') return FILE_READ_INLINE_MAX
-    if (verb === 'fetch' && fetchPageRequested(body)) return FILE_READ_INLINE_MAX
+    if (verb === 'fetch' && isBoundedPageFetch(body)) return FILE_READ_INLINE_MAX
     return undefined
 }
 
@@ -1298,8 +1293,6 @@ const SPOOL_RESPONSE_MAX_AGE_MS = 60 * 60 * 1000
 const SPOOL_PRUNE_EVERY_MS = 10 * 60 * 1000
 const spoolPrunedAt = new Map()
 
-// Response files are read once by the dispatch that asked for them. Anything older than an hour
-// is dead weight; pruning at most every 10 minutes per spool keeps readdir off the hot path.
 function pruneSpoolResponsesOnce(outDir) {
     const now = Date.now()
     if (now - (spoolPrunedAt.get(outDir) ?? 0) < SPOOL_PRUNE_EVERY_MS) return
@@ -1315,7 +1308,6 @@ function pruneSpoolResponsesOnce(outDir) {
         try {
             if (now - fs.statSync(file).mtimeMs > SPOOL_RESPONSE_MAX_AGE_MS) fs.unlinkSync(file)
         } catch {
-            // a file another dispatch is removing is already gone
         }
     }
 }
@@ -1427,9 +1419,6 @@ function timeoutInputDiagnostic(verb, raw_body, timeout_seconds) {
     return undefined
 }
 
-// The typed timeoutMs field of an exec-family body is the same budget as the leading
-// timeoutMs= line of its raw body: it is folded into that line here, so the daemon and
-// timeoutInputDiagnostic see one spelling. Both spellings at once are refused.
 function foldTypedTimeoutMs(timeoutMs, raw_body) {
     const milliseconds = Number(timeoutMs)
     if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0) return { error: 'timeoutMs must be a positive integer number of milliseconds' }
@@ -1997,9 +1986,6 @@ function spoolDiagnostics(spoolDir, verb, requestNumber, outPath) {
     }
 }
 
-// The timeout reply is the only record that a dispatch is still outstanding and resumable, so it is
-// built from the fields that cannot fail and every diagnostic is read on its own: a diagnostic that
-// throws drops that diagnostic, never the reply, and never the task that resumes the dispatch.
 export function timeoutReply({ spoolDir, verb, requestNumber, inPath, outPath, timeoutMs, requestedPollTimeoutMs, pollCeilingMs, execMs, resumeTask, callStartedAtMs }) {
     const truth = {
         timed_out: true,

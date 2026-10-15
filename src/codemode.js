@@ -164,11 +164,11 @@ function bindings(tools, { session_id, cwd }, extra) {
         return tools.has(hyphenated) ? hyphenated : null
     }
 
-    // gm.<verb>({...}) takes one object, and the envelope keys (cwd, max_chars, ...) are top-level
-    // keys of it, so gm.git_status({cwd: "<root>"}) repoints the dispatch. Callers routinely write
-    // the envelope as a second argument instead; the generated function used to take one argument,
-    // so that object was dropped silently and the dispatch ran against the ambient project. It is
-    // folded in now, and a second argument that is not an object is refused rather than dropped.
+    const defaultCwdFor = (merged, ambientCwd) => {
+        const pinned = typeof merged.git_root_override === 'string' ? merged.git_root_override.trim() : ''
+        return pinned !== '' ? pinned : ambientCwd
+    }
+
     const mergeEnvelope = (name, args, envelope) => {
         if (envelope === undefined) return args
         if (!isPlainObject(envelope) || !isPlainObject(args)) {
@@ -185,11 +185,8 @@ function bindings(tools, { session_id, cwd }, extra) {
         refuseUndeclaredBodyKeys(name, tool.verb, folded)
         if ('session_id' in tool.inputSchema && folded.session_id === undefined) defaults.session_id = session_id
         if ('cwd' in tool.inputSchema && folded.cwd === undefined) {
-            // git_root_override pins the root for any verb when the call names no cwd of its own,
-            // the same rule the per-verb MCP tools apply (cwd || git_root_override).
-            const pinned = typeof merged.git_root_override === 'string' ? merged.git_root_override.trim() : ''
-            if (pinned !== '') defaults.cwd = pinned
-            else if (cwd !== undefined) defaults.cwd = cwd
+            const defaultCwd = defaultCwdFor(merged, cwd)
+            if (defaultCwd !== undefined) defaults.cwd = defaultCwd
         }
         return tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then(replyText)
     }
