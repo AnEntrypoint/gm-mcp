@@ -1,3 +1,4 @@
+import { isPlainObject } from './plain-object.js';
 import process from 'node:process'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { inflightDispatchCount } from './dispatch.js'
@@ -11,7 +12,7 @@ function isJsonRpcFrame(chunk) {
     const text = buffer.toString('utf8')
     try {
         const parsed = JSON.parse(text)
-        return Boolean(parsed) && typeof parsed === 'object' && !Array.isArray(parsed)
+        return isPlainObject(parsed)
     } catch {
         return false
     }

@@ -5,17 +5,20 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { agentplugDir, toolsDir } from './paths.js'
-import { appendDiagnostic } from './server-log.js'
+import { appendDiagnostic, describeError } from './server-log.js'
 import { inflightDispatchCount } from './dispatch.js'
 
 const DEPLOYED_BUNDLE_FILE_NAME = 'gm-mcp-server.mjs'
 const DEFAULT_BUNDLE_URL = 'https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js'
 const DEFAULT_CHECK_INTERVAL_MS = 10 * 60 * 1000
+const DEFER_RETRY_DELAY_MS = 20_000
+const MAX_DEFER_RETRIES_PER_TRIGGER = 4
 const FETCH_TIMEOUT_MS = 20_000
 const MIN_PLAUSIBLE_BUNDLE_BYTES = 100_000
 const BUNDLE_SHEBANG = '#!/usr/bin/env node'
 
 const NO_SELF_UPDATE_ENV = 'GM_MCP_NO_SELF_UPDATE'
+const DEPLOYED_ONLY_ENV = 'GM_MCP_SELF_UPDATE_DEPLOYED_ONLY'
 const NO_SELF_UPDATE_FILE = 'gm-mcp-server.no-self-update'
 const LOCAL_BUILD_PIN_FILE = 'gm-mcp-server.local-build.json'
 const SELF_UPDATE_OFF_VALUES = new Set(['0', 'false', 'no', 'off'])
@@ -48,6 +51,13 @@ export function noSelfUpdateReason() {
     const marker = noSelfUpdateFilePath()
     if (existsSync(marker)) return `${marker} exists, which suppresses self-update of the deployed bundle (delete that file to allow updates again)`
     return null
+}
+
+export function deployedOnlySelfUpdateReason() {
+    const envValue = process.env[DEPLOYED_ONLY_ENV]
+    if (envValue === undefined) return null
+    if (SELF_UPDATE_OFF_VALUES.has(envValue.trim().toLowerCase())) return null
+    return `${DEPLOYED_ONLY_ENV}=${JSON.stringify(envValue)} limits the release channel to the deployed bundle's own process (set it to 0 to let any running copy keep the deployed bundle current)`
 }
 
 export function readLocalBuildPin() {
@@ -180,6 +190,13 @@ function checkedRecently(stampPath) {
     return Date.now() - statSync(stampPath).mtimeMs < checkIntervalMs()
 }
 
+function deferRetryDelayMs() {
+    // A retry finishes the trigger that deferred, so it is not a second poll loop -- but it must
+    // still never fetch faster than the interval the operator asked for, so an operator who
+    // shortened that interval below the default retry delay gets retries no faster than it.
+    return Math.min(DEFER_RETRY_DELAY_MS, checkIntervalMs())
+}
+
 function touch(stampPath) {
     if (!existsSync(stampPath)) writeFileSync(stampPath, '')
     const now = new Date()
@@ -213,20 +230,24 @@ function replaceDeployedBundle(deployedPath, bytes) {
     }
 }
 
-export async function refreshStaleDeployedBundle() {
+export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedPath(), options = {}) {
+    const countInflightDispatches = options.countInflightDispatches ?? inflightDispatchCount
     if (process.env.GM_MCP_SELF_UPDATE === '0') return { outcome: 'disabled' }
-    const deployedPath = defaultDeployedPath()
-    if (!isRunningFromDeployedBundle(deployedPath)) return { outcome: 'not-deployed-copy' }
+    const self = isRunningFromDeployedBundle(deployedPath)
+    const deployedOnly = deployedOnlySelfUpdateReason()
+    if (deployedOnly && !self) return { outcome: 'not-deployed-copy', self, reason: deployedOnly }
+    if (!existsSync(deployedPath)) return { outcome: 'no-deployed-copy', self, deployed_bundle: deployedPath }
     const refuse = (code, reason) => {
         console.error(`gm-mcp: refusing deployed bundle self-update (${code}) -- ${reason}`)
-        appendDiagnostic('self-update-refused', { code, reason, deployed_bundle: deployedPath })
-        return { outcome: 'refused', code, reason, deployed_bundle: deployedPath }
+        appendDiagnostic('self-update-refused', { code, reason, self, deployed_bundle: deployedPath })
+        return { outcome: 'refused', code, reason, self, deployed_bundle: deployedPath }
     }
     const suppressed = noSelfUpdateReason()
     if (suppressed) return refuse('frozen', suppressed)
 
     const stampPath = `${deployedPath}.checked`
-    if (checkedRecently(stampPath)) return { outcome: 'checked-recently' }
+    const ignoreStamp = options.ignoreStamp === true || options.force === true
+    if (!ignoreStamp && checkedRecently(stampPath)) return { outcome: 'checked-recently', self }
 
     const { bytes: deployedBytes, sha256: deployedHash } = readDigest(deployedPath)
     const pinned = localBuildPinReason(deployedHash)
@@ -237,28 +258,131 @@ export async function refreshStaleDeployedBundle() {
     const freshHash = sha256(freshBytes)
     if (freshHash === deployedHash) {
         touch(stampPath)
-        return { outcome: 'current', hash: freshHash }
+        return { outcome: 'current', self, hash: freshHash }
     }
     const version = versionGuardReason(freshBytes, deployedBytes)
     if (version.code) return refuse(version.code, version.reason)
 
-    if (inflightDispatchCount() > 0) return { outcome: 'deferred-dispatch-inflight', dispatches_inflight: inflightDispatchCount() }
+    // Swapping the bundle under a dispatch that is running would cut that dispatch's reply off
+    // mid-write, so the swap waits -- and the wait is retried soon instead of an interval later.
+    const dispatchesInflight = countInflightDispatches()
+    if (dispatchesInflight > 0) return { outcome: 'deferred-dispatch-inflight', self, dispatches_inflight: dispatchesInflight }
 
     replaceDeployedBundle(deployedPath, freshBytes)
     touch(stampPath)
-    return { outcome: 'refreshed', from: deployedHash, to: freshHash, url, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
+    return { outcome: 'refreshed', self, from: deployedHash, to: freshHash, url, deployed_bundle: deployedPath, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
 }
 
-export function refreshStaleDeployedBundleInBackground(onRefreshed = null) {
-    refreshStaleDeployedBundle()
+// A fix pushed upstream reaches a running server only when the hourly stamp lets it, so an operator
+// (or an agent that just pushed one and needs it NOW) has to be able to ask for the check without
+// waiting out the interval. This skips ONLY the stamp-freshness deferral: the freeze file, the
+// local-build pin, the no-downgrade guard, the loadability check and the inflight-dispatch wait all
+// still hold, and it reloads nothing -- a forced check is the same file swap the hourly tick does.
+export async function refreshDeployedBundleNow(deployedPath = defaultDeployedPath(), options = {}) {
+    const result = await refreshStaleDeployedBundle(deployedPath, { ...options, ignoreStamp: true })
+    const forced = { ...result, forced: true }
+    appendDiagnostic('self-update-check', forced)
+    return forced
+}
+
+export function deployedBundleVersion(deployedPath = defaultDeployedPath()) {
+    try {
+        return parseBundleVersion(readFileSync(deployedPath))
+    } catch {
+        return null
+    }
+}
+
+export function describeSelfUpdateOutcome(result) {
+    switch (result?.outcome) {
+        case 'refreshed':
+            return `refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} from ${result.url}`
+        case 'current':
+            return `already the release-channel build${result.hash ? ` (sha ${shortHash(result.hash)})` : ''}`
+        case 'checked-recently':
+            return `checked within the last ${Math.round(checkIntervalMs() / 1000)}s, so the stamp was honoured`
+        case 'deferred-dispatch-inflight':
+            return `waiting on ${result.dispatches_inflight} dispatch(es) inflight -- the swap waits rather than cutting a reply mid-write`
+        case 'disabled':
+            return 'GM_MCP_SELF_UPDATE=0 disables the release channel'
+        case 'no-deployed-copy':
+            return `no deployed bundle at ${result.deployed_bundle}, and one is never created behind the operator`
+        case 'not-deployed-copy':
+            return result.reason
+        case 'refused':
+            return `refused (${result.code}) -- ${result.reason}`
+        default:
+            return `no outcome to report (${JSON.stringify(result ?? null)})`
+    }
+}
+
+let deferRetriesLeft = MAX_DEFER_RETRIES_PER_TRIGGER
+let deferRetriesScheduled = 0
+let deferRetriesExhausted = 0
+let pendingDeferRetryPromise = null
+
+export function pendingDeferRetry() {
+    return pendingDeferRetryPromise
+}
+
+export function deferRetryState() {
+    return {
+        max_retries_per_trigger: MAX_DEFER_RETRIES_PER_TRIGGER,
+        retries_left: deferRetriesLeft,
+        scheduled: deferRetriesScheduled,
+        exhausted: deferRetriesExhausted,
+        pending: pendingDeferRetryPromise !== null,
+        delay_ms: deferRetryDelayMs(),
+    }
+}
+
+function armDeferRetry(onRefreshed, options, deferred) {
+    if (deferRetriesLeft <= 0) {
+        deferRetriesLeft = MAX_DEFER_RETRIES_PER_TRIGGER
+        deferRetriesExhausted += 1
+        appendDiagnostic('self-update-defer-retry-exhausted', {
+            dispatches_inflight: deferred.dispatches_inflight,
+            retries: MAX_DEFER_RETRIES_PER_TRIGGER,
+            next_check_in_ms: checkIntervalMs(),
+        })
+        return null
+    }
+    deferRetriesLeft -= 1
+    const delayMs = options.deferRetryDelayMs ?? deferRetryDelayMs()
+    appendDiagnostic('self-update-defer-retry', {
+        delay_ms: delayMs,
+        retries_left: deferRetriesLeft,
+        dispatches_inflight: deferred.dispatches_inflight,
+    })
+    deferRetriesScheduled += 1
+    pendingDeferRetryPromise = new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            pendingDeferRetryPromise = null
+            refreshStaleDeployedBundleInBackground(onRefreshed, options).finally(resolve)
+        }, delayMs)
+        timer.unref()
+    })
+    return pendingDeferRetryPromise
+}
+
+export function refreshStaleDeployedBundleInBackground(onRefreshed = null, options = {}) {
+    return refreshStaleDeployedBundle(undefined, options)
         .then(async (result) => {
             appendDiagnostic('self-update-check', result)
+            if (result.outcome === 'deferred-dispatch-inflight') {
+                armDeferRetry(onRefreshed, options, result)
+                return
+            }
+            deferRetriesLeft = MAX_DEFER_RETRIES_PER_TRIGGER
             if (result.outcome !== 'refreshed') return
-            if (onRefreshed) {
+            // Only the deployed copy may hand its listen handle over: a repo-build process that
+            // refreshed a foreign deployment would otherwise reload into a bundle it is not running.
+            if (onRefreshed && result.self === true) {
                 await onRefreshed(result)
                 return
             }
-            console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} (${result.version}) from ${result.url}; takes effect on next connect (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`)
+            const takesEffect = result.self === true ? 'takes effect on next connect' : 'takes effect for whoever launches the deployed copy next'
+            console.error(`gm-mcp: deployed bundle was stale -- refreshed ${shortHash(result.from)} -> ${shortHash(result.to)} (${result.version}) from ${result.url}; ${takesEffect} (previous kept as ${DEPLOYED_BUNDLE_FILE_NAME}.prev)`)
         })
         .catch((error) => {
             appendDiagnostic('self-update-failed', { error: error?.message ? String(error.message) : String(error) })
@@ -266,9 +390,16 @@ export function refreshStaleDeployedBundleInBackground(onRefreshed = null) {
         })
 }
 
-export function scheduleStaleDeployedBundleChecks(onRefreshed = null) {
-    refreshStaleDeployedBundleInBackground(onRefreshed)
-    const timer = setInterval(() => refreshStaleDeployedBundleInBackground(onRefreshed), checkIntervalMs())
+export function scheduleStaleDeployedBundleChecks(onRefreshed = null, hourlyPass = null) {
+    const pass = () => {
+        refreshStaleDeployedBundleInBackground(onRefreshed)
+        if (typeof hourlyPass !== 'function') return
+        Promise.resolve()
+            .then(hourlyPass)
+            .catch((error) => appendDiagnostic('hourly-pass-failed', { error: describeError(error) }))
+    }
+    pass()
+    const timer = setInterval(pass, checkIntervalMs())
     timer.unref()
     return timer
 }
