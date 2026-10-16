@@ -520,7 +520,6 @@ const REGISTRY_ROWS = [
     { canonical: 'codeinsight_index' },
     { canonical: 'codeinsight', body: CODEINSIGHT_BODY },
     { canonical: 'codesearch', body: CODESEARCH_BODY },
-    { canonical: 'forget' },
     { canonical: 'discipline' },
     { canonical: 'exec_js', body: EXEC_JS_BODY },
     { canonical: 'lang', body: LANG_BODY },
