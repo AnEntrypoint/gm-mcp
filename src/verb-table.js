@@ -593,6 +593,7 @@ const REGISTRY_ROWS = [
     { canonical: 'cache_stats' },
     { canonical: 'learn' },
     { canonical: 'chrome' },
+    { canonical: 'crawl' },
     { canonical: 'scan_deps' },
     { canonical: 'code_index' },
     { canonical: 'callers', body: CODEINSIGHT_BODY },
