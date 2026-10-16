@@ -29,11 +29,7 @@ if (committed === fresh) {
     process.exit(1)
 }
 
-// A reply a dispatch only reaches on its rare paths (a poll timeout, a resumed task) is the one a
-// broken build never runs in anger, so the gate builds every one from the committed bundle and
-// fails when any of them could not be built: an undeclared identifier in a shipped bundle is a
-// build failure here, not a ReferenceError a caller meets at runtime.
-const REPLY_KEYS = ['timed_out', 'task', 'poll_timeout_ms', 'in_path', 'out_path', 'resume_task_supported', 'dispatch_state', 'dispatch_wait', 'daemon']
+const REQUIRED_REPLY_KEYS = ['timed_out', 'task', 'poll_timeout_ms', 'in_path', 'out_path', 'resume_task_supported', 'dispatch_state', 'dispatch_wait', 'daemon']
 
 const selfCheck = spawnSync(process.execPath, [committedPath, 'self-check'], { encoding: 'utf8' })
 if (selfCheck.error) {
@@ -61,7 +57,7 @@ for (const [name, reply] of Object.entries(envelopes)) {
         problems.push(`${name} is not a reply object`)
         continue
     }
-    for (const key of REPLY_KEYS) if (!(key in reply)) problems.push(`${name} carries no ${key}`)
+    for (const key of REQUIRED_REPLY_KEYS) if (!(key in reply)) problems.push(`${name} carries no ${key}`)
     if (reply.timed_out !== true) problems.push(`${name} does not report timed_out: true`)
     if (reply.diagnostics_failed !== undefined) problems.push(`${name} fell back to its minimal reply: ${reply.diagnostics_failed}`)
     if (reply.requested_poll_timeout_ms === undefined) problems.push(`${name} never reached its own diagnostics`)

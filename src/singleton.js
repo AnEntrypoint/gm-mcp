@@ -1,6 +1,9 @@
+import { isPlainObject } from './plain-object.js';
 import { agentplugDir } from './paths.js'
 import { execFileSync, spawn } from './process-port.js'
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { classifyGmServerCommand } from './gm-cmdline.js'
+import { readProcessTable } from './process-table.js'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,6 +16,7 @@ import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { DEFAULT_HOST, DEFAULT_PORT, HEALTH_PATH, MCP_PATH } from './http-transport.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { compareVersions } from './self-update.js'
+import { measuredMs } from './timestamp.js'
 
 const STATE_FILE_NAME = 'gm-mcp-http.json'
 const INSTANCE_FILE_PREFIX = 'gm-mcp-http-instance-'
@@ -71,7 +75,7 @@ function readStateFile(filePath, port = null) {
         if (error?.code !== 'ENOENT') appendDiagnostic('singleton-state-corrupt', { file: filePath, error: describeError(error) })
         return null
     }
-    if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    if (!isPlainObject(state)) {
         appendDiagnostic('singleton-state-corrupt', { file: filePath, error: 'not a JSON object' })
         return null
     }
@@ -100,7 +104,12 @@ function dropFile(filePath) {
     }
 }
 
+function isSharedRecordPort(port) {
+    return Number(port) === DEFAULT_PORT
+}
+
 function writeSingletonState(state) {
+    if (!isSharedRecordPort(state?.port)) return
     writeStateFile(stateFilePath(), state)
 }
 
@@ -496,12 +505,80 @@ export function allocateHttpPort({ preferred = null, from = PORT_POOL_FROM, to =
     return null
 }
 
+export function listHttpSupervisors({ processes = null, platform = process.platform, exec = execFileSync } = {}) {
+    const table = Array.isArray(processes) ? processes : readProcessTable({ platform, exec })
+    const rows = []
+    for (const row of table) {
+        const info = classifyGmServerCommand(row.command, { entryPath: launchedEntryPath() })
+        if (info === null || info.transport !== 'supervisor' || info.port === null) continue
+        const pid = Number(row.pid)
+        if (!Number.isInteger(pid) || pid <= 0) continue
+        const ppid = Number(row.ppid)
+        rows.push({
+            pid,
+            ppid: Number.isInteger(ppid) && ppid > 0 ? ppid : null,
+            port: info.port,
+            started_at: measuredMs(row.started_at),
+            command: row.command,
+        })
+    }
+    return rows
+}
+
+export function supervisorToKeep(group, state = null, now = Date.now()) {
+    const freshClaimPid = Number(state?.pid)
+    if (Number.isInteger(freshClaimPid) && freshClaimPid > 0 && supervisorRunning(state, now) && group.some((row) => row.pid === freshClaimPid)) return freshClaimPid
+    const timed = group.filter((row) => Number.isFinite(row.started_at)).sort((left, right) => right.started_at - left.started_at)
+    if (timed.length === 0) return null
+    const tiedAtSecond = timed.length > 1 && timed[1].started_at === timed[0].started_at
+    if (tiedAtSecond) return null
+    return timed[0].pid
+}
+
+function signalSupervisorPid(pid) {
+    try {
+        process.kill(Number(pid))
+        return true
+    } catch {
+        return false
+    }
+}
+
+function dupeReapEnabled() {
+    const value = envValue('GM_MCP_HTTP_SUPERVISOR_DUPE_REAP')
+    return !(value !== null && OFF_VALUES.has(value))
+}
+
+export function retireDuplicateHttpSupervisors({ processes = null, now = Date.now(), signalPid = signalSupervisorPid, dryRun = false, platform = process.platform, exec = execFileSync } = {}) {
+    if (!dupeReapEnabled()) return []
+    const rows = listHttpSupervisors({ processes, platform, exec })
+    const retired = []
+    for (const port of [...new Set(rows.map((row) => row.port))].sort((left, right) => left - right)) {
+        const group = rows.filter((row) => row.port === port)
+        if (group.length < 2) continue
+        const state = readStateFile(supervisorStateFilePath(port), port)
+        const keepPid = supervisorToKeep(group, state, now)
+        if (keepPid === null) {
+            appendDiagnostic('http-supervisor-dupe-unresolved', { port, pids: group.map((row) => row.pid), reason: 'no live claim is measurably fresher than the others' })
+            continue
+        }
+        for (const row of group) {
+            if (row.pid === keepPid || row.pid === process.pid) continue
+            const signalled = dryRun ? true : signalPid(row.pid)
+            appendDiagnostic('http-supervisor-retired-dupe', { port, pid: row.pid, kept_pid: keepPid, started_at: row.started_at, signalled, dry_run: dryRun })
+            retired.push({ port, pid: row.pid, kept_pid: keepPid, signalled, reason: 'duplicate-supervisor' })
+        }
+    }
+    return retired
+}
+
 export async function sweepHttpInstances(options = {}) {
+    const duplicate_supervisors = retireDuplicateHttpSupervisors(options)
     const reclaimed = await reclaimDeadPortRegistries()
     const orphaned = await reapOrphanedHttpInstances(options)
     const dead = await reapDeadHttpInstances()
     const replaced = await replaceBehindHttpInstances(options)
-    return { dead, replaced, orphaned, reclaimed }
+    return { dead, replaced, orphaned, reclaimed, duplicate_supervisors }
 }
 
 export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs = STARTUP_WAIT_MS, wait = true, sweep = true } = {}) {
@@ -545,7 +622,12 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
             note: 'a live pid holds the port but answers no health check',
         })
     }
-    dropSingletonState()
+    if (!claimSpawn('singleton', port)) {
+        const peer = await waitForHealth(port, timeoutMs)
+        if (peer) return { url: httpMcpUrl(port), port, pid: peer.pid ?? null, reused: true, version: peer.version ?? null }
+        return { url: null, port, pid: null, reused: false, spawned: false, error: `another starter holds the spawn claim for port ${port}` }
+    }
+    if (isSharedRecordPort(port)) dropSingletonState()
 
     const pid = spawnServerProcess({ port })
     if (!wait) {
@@ -554,6 +636,7 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
     }
 
     const health = await waitForHealth(port, timeoutMs)
+    releaseSpawnClaim('singleton', port)
     if (!health) {
         appendDiagnostic('http-singleton-start-failed', { port, spawned_pid: pid, entry: launchedEntryPath() })
         return { url: null, port, pid, reused: false, spawned: Boolean(pid), error: `no healthy gm-mcp HTTP server on port ${port} after ${timeoutMs} ms` }
@@ -588,10 +671,49 @@ function supervisorRunning(state, now = Date.now()) {
     return typeof state.ts === 'number' && now - state.ts < staleAfter
 }
 
+const SPAWN_CLAIM_STALE_MS = 20_000
+const EXCLUSIVE_CREATE_FLAG = 'wx'
+
+function spawnClaimPath(name, port) {
+    return path.join(agentplugDir(), `gm-mcp-${name}-${port}.claim`)
+}
+
+export function claimSpawn(name, port) {
+    const file = spawnClaimPath(name, port)
+    mkdirSync(agentplugDir(), { recursive: true })
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            writeFileSync(file, String(Date.now()), { flag: EXCLUSIVE_CREATE_FLAG })
+            return true
+        } catch (error) {
+            if (error?.code !== 'EEXIST') throw error
+            const claimedAt = Number(readFileSyncSafe(file))
+            if (Number.isFinite(claimedAt) && Date.now() - claimedAt < SPAWN_CLAIM_STALE_MS) return false
+            moveStaleClaimAside(file)
+        }
+    }
+    return false
+}
+
+function readFileSyncSafe(file) {
+    try { return readFileSync(file, 'utf8') } catch { return '' }
+}
+
+function moveStaleClaimAside(file) {
+    try { renameSync(file, `${file}.${process.pid}.stale`) } catch {}
+}
+
+export function releaseSpawnClaim(name, port) {
+    try { unlinkSync(spawnClaimPath(name, port)) } catch {}
+}
+
 export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs(), force = false } = {}) {
     if (!force && !supervisorEnabled()) return { port, pid: null, started: false, reason: 'disabled' }
     const recorded = readSupervisorState(port)
     if (supervisorRunning(recorded)) return { port, pid: recorded.pid, started: false, reason: 'already-running' }
+    if (!claimSpawn('supervisor', port)) return { port, pid: null, started: false, reason: 'claim-held' }
+    const afterClaim = readSupervisorState(port)
+    if (supervisorRunning(afterClaim)) return { port, pid: afterClaim.pid, started: false, reason: 'already-running' }
 
     const entry = launchedEntryPath()
     const { stdio, fd } = childStdio()
