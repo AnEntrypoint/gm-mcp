@@ -55,8 +55,10 @@ const GIT_COMMIT_TYPES = {
     commit: z.string(),
     stat: booleanLike,
     path: z.string(),
+    author_name: z.string(),
+    author_email: z.string(),
 }
-const GIT_COMMIT_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'recover_remote_moved', 'source_ref', 'rev']
+const GIT_COMMIT_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'recover_remote_moved', 'source_ref', 'rev', 'author_name', 'author_email']
 const GIT_COMMIT_FIELDS = aliasFields('git_finalize/git_commit', GIT_COMMIT_TYPES, GIT_COMMIT_KEYS)
 const GIT_COMMIT_DESCRIPTION = ` ${GIT_COMMIT_KEYS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body.`
 
