@@ -65,5 +65,5 @@ export function serveStdioRelay({ url }) {
         finishIfDone()
     })
     appendDiagnostic('stdio-relay-start', { url, pid: process.pid })
-    console.error(`gm-mcp: relaying stdio to ${url}`)
+    console.error(`gm-mcp: connected, serving on stdio, relaying to ${url}`)
 }
