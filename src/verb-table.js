@@ -166,6 +166,12 @@ const INSTRUCTION_BODY = {
         full: { type: 'boolean', aliases: ['prd_full_detail'], description: 'Expands the PRD block.' },
     },
 }
+const SESSION_HANDOVER_BODY = {
+    required: ['session_id'],
+    fields: {
+        session_id: { type: 'string', aliases: ['SESSION_ID', 'sessionId'], description: 'Session that takes ownership. Required in the body: the envelope session id is not used, so a body without it is refused and the owner is unchanged.' },
+    },
+}
 const PRD_ADD_BODY = {
     required: [],
     fields: {
@@ -557,6 +563,7 @@ const REGISTRY_ROWS = [
     { canonical: 'codeinsight_namespace_audit', hyphen: true },
     { canonical: 'calculus_model_check', hyphen: true },
     { canonical: 'phase_status', hyphen: true },
+    { canonical: 'session_handover', hyphen: true, body: SESSION_HANDOVER_BODY },
     { canonical: 'wait' },
     { canonical: 'sleep' },
     { canonical: 'residual_scan', hyphen: true },
