@@ -1,7 +1,7 @@
-import { appendFileSync, closeSync, mkdirSync, openSync, readSync, renameSync, rmSync, statSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
 
-import { agentplugDir, spoolDirOf } from './paths.js'
+import { agentplugDir, leasesDir, spoolDirOf } from './paths.js'
 import { ageMsSince } from './timestamp.js'
 
 export const LEDGER_NAME = '.child-pids.jsonl'
@@ -22,6 +22,29 @@ export function ledgerPaths(root = null) {
     const paths = [globalLedgerPath()]
     if (root) paths.push(projectLedgerPath(root))
     return paths
+}
+
+// The project roots gm has dispatched into. dispatch.js ensureAgentLease writes one lease file per
+// (project, gm-mcp pid) whose content is the project root; a lease whose directory is gone names nothing.
+export function leaseRoots() {
+    let names
+    try {
+        names = readdirSync(leasesDir())
+    } catch {
+        return []
+    }
+    const roots = new Set()
+    for (const name of names) {
+        if (!name.endsWith('.lease')) continue
+        let root = ''
+        try {
+            root = readFileSync(path.join(leasesDir(), name), 'utf8').trim()
+        } catch {
+            continue
+        }
+        if (path.isAbsolute(root) && existsSync(root)) roots.add(path.resolve(root))
+    }
+    return [...roots]
 }
 
 function writeLine(file, entry) {
