@@ -5,6 +5,8 @@ import { canonicalToolName, nearestNames } from './verbs.js'
 import { verbDescriptionLead } from './verb-table.js'
 import { verbBodySchema } from './verb-bodies.js'
 import { NOTICES } from './notices.js'
+import { createRequire } from 'node:module'
+import { resolve as resolvePath } from 'node:path'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
@@ -289,7 +291,8 @@ export function registerCodeMode(server, tools) {
             const session_id = args.session_id || `mcp-codemode-${process.pid}-${Date.now()}`
             try {
                 const gm = bindings(tools, { session_id, cwd: args.cwd }, extra)
-                const value = await withCodemodeDeadline(new AsyncFunction('gm', 'console', args.code)(gm, logger), codemodeTimeoutMs())
+                const require = createRequire(resolvePath(args.cwd || process.cwd(), 'gm-codemode.js'))
+                const value = await withCodemodeDeadline(new AsyncFunction('gm', 'console', 'require', args.code)(gm, logger, require), codemodeTimeoutMs())
                 const joined = [...logs, formatValue(value)].filter((line) => line !== '').join('\n')
                 const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
                 return { content: [{ type: 'text', text: capCodemodeText(joined, cap) }] }
