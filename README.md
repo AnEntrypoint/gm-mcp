@@ -423,9 +423,6 @@ against the source version, and fails on committed-bundle byte drift.
 (`core.hooksPath`, local to this checkout, never committed) so `pre-push` runs
 it automatically and blocks a push carrying a stale bundle.
 
-`npm test` runs `test/response-compact.test.mjs`, which covers the payload
-cleaner and the wire compactor in `src/response-compact.js`.
-
 Bundling exists because `npx github:...` installs have been observed to
 produce a corrupted transitive-dependency install (a `node_modules/ajv`
 directory present but missing its `package.json`) on some npm/npx versions,
