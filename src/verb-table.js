@@ -346,26 +346,6 @@ const CI_LOG_BODY = {
         max_chars: { type: 'integer', description: 'Character cap, 1 through 40000, default 8000.' },
     },
 }
-const RECALL_BODY = {
-    required: [],
-    fields: {
-        query: { type: 'string', description: 'Non-empty recall query; required unless key is given.' },
-        key: { type: 'string', description: 'Exact memory key, 1-128 chars of [A-Za-z0-9_-].' },
-        namespace: { type: 'string', description: 'Namespace to recall from; defaults to the configured one.' },
-        limit: { type: 'integer', description: 'Maximum hits.' },
-        full: { type: 'boolean', description: 'Returns whole entries instead of excerpts.' },
-    },
-}
-const MEMORIZE_BODY = {
-    required: ['text'],
-    fields: {
-        text: { type: 'string', description: 'Text to store; a bare string body carries it too.' },
-        namespace: { type: 'string', description: 'Defaults to "default".' },
-        kind: { type: 'string', description: 'Defaults to l0; honoured on routed namespaces only.' },
-        discipline: { type: 'string', description: 'Discipline the entry belongs to; checked against the namespace.' },
-    },
-}
-
 const FETCH_TYPES = {
     url: z.string(),
     query: z.string(),
@@ -537,9 +517,6 @@ const REGISTRY_ROWS = [
     { canonical: 'sql_smoke' },
     { canonical: 'sql_serialize' },
     { canonical: 'sql_deserialize' },
-    { canonical: 'memorize', body: MEMORIZE_BODY },
-    { canonical: 'memorize_prune', hyphen: true },
-    { canonical: 'recall', body: RECALL_BODY },
     { canonical: 'codeinsight_index' },
     { canonical: 'codeinsight', body: CODEINSIGHT_BODY },
     { canonical: 'codesearch', body: CODESEARCH_BODY },
@@ -571,13 +548,10 @@ const REGISTRY_ROWS = [
     { canonical: 'dream_round', hyphen: true },
     { canonical: 'dream_replay', hyphen: true },
     { canonical: 'dream_replay_cycle', hyphen: true },
-    { canonical: 'memorize_fire', hyphen: true },
-    { canonical: 'memorize_backfill', hyphen: true },
     { canonical: 'discipline_note', hyphen: true },
     { canonical: 'discipline_check_removal', hyphen: true },
     { canonical: 'discipline_audit', hyphen: true },
     { canonical: 'capability_resolve', hyphen: true },
-    { canonical: 'memory_namespace_audit', hyphen: true },
     { canonical: 'codeinsight_namespace_audit', hyphen: true },
     { canonical: 'calculus_model_check', hyphen: true },
     { canonical: 'phase_status', hyphen: true },
@@ -589,7 +563,6 @@ const REGISTRY_ROWS = [
     { canonical: 'submodule_check', hyphen: true },
     { canonical: 'component_loader_reconcile', hyphen: true },
     { canonical: 'component_loader_hmr', hyphen: true },
-    { canonical: 'auto_recall', hyphen: true },
     { canonical: 'instruction', body: INSTRUCTION_BODY },
     { canonical: 'prd_add', hyphen: true, body: PRD_ADD_BODY },
     { canonical: 'prd_resolve', hyphen: true, body: PRD_RESOLVE_BODY },
@@ -632,10 +605,6 @@ const REGISTRY_ROWS = [
     { canonical: 'pool_observe', hyphen: true, body: POOL_OBSERVE_BODY },
     { canonical: 'subagent_start', hyphen: true },
     { canonical: 'subagent_end', hyphen: true },
-    { canonical: 'memorize_vacuum', hyphen: true },
-    { canonical: 'memorize_retention', hyphen: true },
-    { canonical: 'tencentdb_compat_probe', hyphen: true },
-    { canonical: 'tencentdb_memory_import', hyphen: true },
     { canonical: 'browser_lease_acquire' },
     { canonical: 'browser_lease_release' },
     { canonical: 'browser_lease_status' },
