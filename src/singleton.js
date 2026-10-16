@@ -67,6 +67,15 @@ export function launchedEntryPath() {
     return fileURLToPath(import.meta.url)
 }
 
+// The entry the HTTP singleton and its supervisor are spawned from. The deployed bundle is the release-channel
+// copy whose check keeps it current and hands over to the newer build, so a singleton is started from it whenever
+// it exists. A singleton started from a repo checkout would never receive a release.
+export function serverEntryPath() {
+    const deployed = path.join(homedir(), '.gm-tools', 'gm-mcp-server.mjs')
+    if (existsSync(deployed)) return deployed
+    return launchedEntryPath()
+}
+
 function readStateFile(filePath, port = null) {
     let state
     try {
@@ -163,7 +172,7 @@ function childStdio() {
 }
 
 export function spawnServerProcess({ port = defaultHttpPort(), host = DEFAULT_HOST } = {}) {
-    const entry = launchedEntryPath()
+    const entry = serverEntryPath()
     const { stdio, fd } = childStdio()
     const child = spawn(process.execPath, [entry, '--http', '--port', String(port), '--host', String(host)], {
         cwd: homedir(),
@@ -719,7 +728,7 @@ export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = su
     const afterClaim = readSupervisorState(port)
     if (supervisorRunning(afterClaim)) return { port, pid: afterClaim.pid, started: false, reason: 'already-running' }
 
-    const entry = launchedEntryPath()
+    const entry = serverEntryPath()
     const { stdio, fd } = childStdio()
     const child = spawn(process.execPath, [entry, 'http-supervise', '--port', String(port), '--interval', String(Math.round(intervalMs / 1000))], {
         ...hiddenDetachedOptions({ stdio }),
