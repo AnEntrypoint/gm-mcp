@@ -8,6 +8,21 @@ import { NOTICES } from './notices.js'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
+const DEFAULT_CODEMODE_TIMEOUT_MS = 600000
+
+function codemodeTimeoutMs() {
+    const configured = Number(process.env.GM_CODEMODE_TIMEOUT_MS)
+    return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_CODEMODE_TIMEOUT_MS
+}
+
+function withCodemodeDeadline(pending, timeoutMs) {
+    let timer
+    const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`gm_codemode code did not finish within ${timeoutMs} ms. A gm call it awaited never returned, or a loop of calls outlived the budget. Calls already dispatched keep running in the spool: resume one with resume_task, bound the loop, or raise GM_CODEMODE_TIMEOUT_MS.`)), timeoutMs)
+    })
+    return Promise.race([pending, deadline]).finally(() => clearTimeout(timer))
+}
+
 const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A second object argument is folded into the first, so gm.<verb>({...}, {cwd: "<root>", max_chars: 800}) is the same call; a second argument that is not an object is refused rather than dropped, because a dropped cwd silently runs the dispatch against another project. A verb that names a field `body` of its own (the row prose of prd-add) follows the same rule: a top-level `body` is the dispatch body only when it is an object or JSON object text, so gm.prd_add({id, subject, body}) reaches the verb as body:{id, subject, body}. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns one entry per verb as {name, aliases?, description?}: the description is the verb text cut to 80 chars, without the boilerplate every runner verb shares, and it is omitted when the verb has none; `gm.describe(name)` gives the runner spelling of the verb, its input schema and its body schema. `gm.list({filter, names_only, max_desc})` narrows it (max_desc 0 gives full descriptions). `gm.help()` returns the notice codes that replies carry. The reply is capped at max_chars (default 24000). `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
 
 function replyText(result) {
@@ -274,7 +289,7 @@ export function registerCodeMode(server, tools) {
             const session_id = args.session_id || `mcp-codemode-${process.pid}-${Date.now()}`
             try {
                 const gm = bindings(tools, { session_id, cwd: args.cwd }, extra)
-                const value = await new AsyncFunction('gm', 'console', args.code)(gm, logger)
+                const value = await withCodemodeDeadline(new AsyncFunction('gm', 'console', args.code)(gm, logger), codemodeTimeoutMs())
                 const joined = [...logs, formatValue(value)].filter((line) => line !== '').join('\n')
                 const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
                 return { content: [{ type: 'text', text: capCodemodeText(joined, cap) }] }
