@@ -23,6 +23,13 @@ const WINDOWS_SCRIPT = [
     '  Write-Output ($_.ProcessId.ToString() + "|" + $_.ParentProcessId.ToString() + "|" + [string]$_.CreationDate + "|" + $line)',
     '}',
 ].join(' ')
+const WINDOWS_ENCODED_SCRIPT = Buffer.from(WINDOWS_SCRIPT, 'utf16le').toString('base64')
+
+let lastError = null
+
+export function lastTableError() {
+    return lastError
+}
 
 function startedAtFrom(text) {
     if (typeof text !== 'string' || text === '') return null
@@ -82,9 +89,10 @@ function posixRows({ exec }) {
 function windowsRows({ exec }) {
     let text = ''
     try {
-        text = run(exec, 'powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SCRIPT])
-    } catch {
-        return []
+        text = run(exec, 'powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', WINDOWS_ENCODED_SCRIPT])
+    } catch (error) {
+        lastError = error?.message ?? String(error)
+        text = typeof error?.stdout === 'string' ? error.stdout : ''
     }
     const rows = []
     for (const line of text.split('\n')) {
@@ -113,9 +121,11 @@ export function liveSessionNameOf(command) {
 }
 
 export function readProcessTable({ exec = execFileSync, platform = process.platform } = {}) {
+    lastError = null
     try {
         return platform === 'win32' ? windowsRows({ exec }) : posixRows({ exec })
-    } catch {
+    } catch (error) {
+        lastError = error?.message ?? String(error)
         return []
     }
 }
