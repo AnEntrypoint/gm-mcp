@@ -7,7 +7,7 @@ import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, deployedBundleVersion, describeSelfUpdateOutcome, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, refreshDeployedBundleNow, selfUpdateStatus } from './self-update.js'
 import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
 import { reapReport, formatFindings } from './leak-reaper.js'
-import { formatLeakWatchLine, formatOrphanLine, leakWatchReport } from './leak-watch.js'
+import { formatLeakWatchLine, formatOrphanLine, formatOrphanTreeLine, leakWatchReport } from './leak-watch.js'
 import { attributePid, globalLedgerPath } from './child-ledger.js'
 
 function repeatedFlag(name) {
@@ -291,6 +291,7 @@ const COMMANDS = {
             }
             if (report.orphans?.count > 0) {
                 for (const item of report.orphans.items) console.log(formatOrphanLine(item))
+                for (const tree of report.orphans.trees) if (tree.member_count > 0) console.log(formatOrphanTreeLine(tree))
                 console.log(`\n(report only: an orphan is a process gm never spawned, so nothing here retires it -- classify pid(s) ${report.orphans.items.map((item) => item.pid).join(',')} by hand, thresholds ${JSON.stringify(report.orphans.thresholds)})`)
             }
             if (!apply && report.population.retireable > 0) {

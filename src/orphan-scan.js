@@ -5,9 +5,13 @@
 // The duty ratio is what separates a leaked process from a busy one, so it is the discriminator
 // here, not age alone.
 //
+// A leaked root is rarely the only leaked process: its children keep the root's ppid chain, so
+// each orphan root also gets a tree pass that walks its descendants through /proc ppid links and
+// reports the whole subtree as one finding.
+//
 // Nothing in this module signals a pid. It reports; retiring an unattributed heavyweight is a
 // decision for a human, because a wrong kill is worse than a missed one.
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 
 import { attributeRows } from './child-ledger.js'
 import { classifyGmServerCommand } from './gm-cmdline.js'
@@ -17,10 +21,13 @@ export const DEFAULT_ORPHAN_RSS_MB = 150
 export const DEFAULT_ORPHAN_DUTY = 0.02
 export const DEFAULT_ORPHAN_MIN_AGE_MS = 900_000
 export const DEFAULT_CMDLINE_CHARS = 160
+export const DEFAULT_TREE_MAX_DEPTH = 16
+export const DEFAULT_TREE_MAX_MEMBERS = 512
 
 // /proc/<pid>/stat counts CPU in clock ticks; 100 Hz is the Linux default and every value read
 // here is a ratio, so a box running another CLK_TCK scales both sides the same way.
 const DEFAULT_CLOCK_TICKS = 100
+const MAX_LINEAGE_HOPS = 64
 
 const RSS_ENV = 'GM_MCP_LEAK_ORPHAN_RSS_MB'
 const DUTY_ENV = 'GM_MCP_LEAK_ORPHAN_DUTY'
@@ -58,13 +65,19 @@ export function orphanMinAgeMs() {
 }
 
 // `comm` is wrapped in parentheses and may itself hold spaces and parentheses, so the numeric
-// fields are counted from the LAST ')' -- after it, index 0 is field 3 (state), which puts utime
-// (field 14) at index 11, stime (field 15) at 12 and starttime (field 22) at 19.
-export function parseProcStat(text, { clockTicks = DEFAULT_CLOCK_TICKS } = {}) {
+// fields are counted from the LAST ')' -- after it, index 0 is field 3 (state), which puts ppid
+// (field 4) at index 1, utime (field 14) at index 11, stime (field 15) at 12 and starttime
+// (field 22) at 19.
+function statFields(text) {
     if (typeof text !== 'string' || text === '') return null
     const afterComm = text.lastIndexOf(')')
     if (afterComm < 0) return null
-    const fields = text.slice(afterComm + 1).trim().split(/\s+/)
+    return text.slice(afterComm + 1).trim().split(/\s+/)
+}
+
+export function parseProcStat(text, { clockTicks = DEFAULT_CLOCK_TICKS } = {}) {
+    const fields = statFields(text)
+    if (fields === null) return null
     const utime = Number(fields[11])
     const stime = Number(fields[12])
     if (!Number.isFinite(utime) || !Number.isFinite(stime)) return null
@@ -73,6 +86,13 @@ export function parseProcStat(text, { clockTicks = DEFAULT_CLOCK_TICKS } = {}) {
         cpu_seconds: (utime + stime) / clockTicks,
         starttime_ticks: Number.isFinite(ticks) ? ticks : null,
     }
+}
+
+export function parseProcStatPpid(text) {
+    const fields = statFields(text)
+    if (fields === null) return null
+    const ppid = Number(fields[1])
+    return Number.isInteger(ppid) && ppid >= 0 ? ppid : null
 }
 
 export function parseProcStatus(text) {
@@ -124,6 +144,111 @@ export function readProcProcess(pid, { readFile = readFileSync, clockTicks = DEF
     }
 }
 
+// One /proc walk gives every live pid's ppid. Only an orphan root needs it, so the caller reads
+// it lazily and a box with no orphans never pays for the walk.
+export function readProcPpidIndex({ procRoot = '/proc', readFile = readFileSync, listDir = readdirSync } = {}) {
+    const ppids = new Map()
+    let names = []
+    try {
+        names = listDir(procRoot)
+    } catch {
+        return ppids
+    }
+    for (const name of names) {
+        if (!/^\d+$/.test(name)) continue
+        let text
+        try {
+            text = readFile(`${procRoot}/${name}/stat`, 'utf8')
+        } catch {
+            continue
+        }
+        const ppid = parseProcStatPpid(text)
+        if (ppid !== null) ppids.set(Number(name), ppid)
+    }
+    return ppids
+}
+
+function childIndexOf(ppids) {
+    const children = new Map()
+    for (const [pid, ppid] of ppids) {
+        if (ppid <= 0 || pid === ppid) continue
+        if (!children.has(ppid)) children.set(ppid, [])
+        children.get(ppid).push(pid)
+    }
+    return children
+}
+
+// The scanning process and its ancestors are never a tree member: a scan that walked into
+// its own lineage would report the process that is doing the reporting.
+function lineageOf(pid, ppids) {
+    const lineage = new Set()
+    let current = pid
+    while (current !== null && current > 0 && !lineage.has(current) && lineage.size < MAX_LINEAGE_HOPS) {
+        lineage.add(current)
+        const next = ppids.get(current)
+        current = next === undefined ? null : next
+    }
+    return lineage
+}
+
+export function orphanTree(rootPid, {
+    children,
+    lineage = new Set(),
+    readProc = readProcProcess,
+    rootRssMb = 0,
+    maxDepth = DEFAULT_TREE_MAX_DEPTH,
+    maxMembers = DEFAULT_TREE_MAX_MEMBERS,
+} = {}) {
+    const seen = new Set([rootPid])
+    const members = []
+    let frontier = [rootPid]
+    let depth = 0
+    let truncated = null
+    let skippedLineage = 0
+    let unmeasured = 0
+    let rssMb = Number(rootRssMb) || 0
+    walk: while (frontier.length > 0) {
+        if (depth + 1 > maxDepth) {
+            if (frontier.some((pid) => (children.get(pid) ?? []).length > 0)) truncated = 'depth'
+            break
+        }
+        const next = []
+        for (const parent of frontier) {
+            for (const child of children.get(parent) ?? []) {
+                if (seen.has(child)) continue
+                seen.add(child)
+                if (lineage.has(child)) {
+                    skippedLineage += 1
+                    continue
+                }
+                if (members.length >= maxMembers) {
+                    truncated = 'count'
+                    break walk
+                }
+                const proc = readProc(child)
+                const rssKb = Number(proc?.rss_kb)
+                const memberRssMb = Number.isFinite(rssKb) && rssKb > 0 ? rssKb / 1024 : null
+                if (memberRssMb === null) unmeasured += 1
+                else rssMb += memberRssMb
+                members.push({ pid: child, ppid: parent, depth: depth + 1, rss_mb: memberRssMb === null ? null : round(memberRssMb, 1) })
+                next.push(child)
+            }
+        }
+        frontier = next
+        depth += 1
+    }
+    return {
+        root_pid: rootPid,
+        member_count: members.length,
+        rss_mb: round(rssMb, 1),
+        max_depth: members.reduce((deepest, member) => Math.max(deepest, member.depth), 0),
+        unmeasured_members: unmeasured,
+        skipped_lineage: skippedLineage,
+        truncated,
+        members,
+    }
+}
+
 function ledgerPids(roots) {
     const owned = new Set()
     const wanted = [...new Set([...(Array.isArray(roots) ? roots : []), null])]
@@ -146,9 +271,12 @@ export function orphanFindings({
     minAgeMs = orphanMinAgeMs(),
     maxCmdlineChars = DEFAULT_CMDLINE_CHARS,
     enabled = orphanScanEnabled(),
+    ppidMap = null,
+    treeMaxDepth = DEFAULT_TREE_MAX_DEPTH,
+    treeMaxMembers = DEFAULT_TREE_MAX_MEMBERS,
 } = {}) {
     const thresholds = { rss_mb: rssMb, duty, min_age_ms: minAgeMs }
-    if (enabled !== true || !Array.isArray(table)) return { enabled: false, thresholds, count: 0, items: [] }
+    if (enabled !== true || !Array.isArray(table)) return { enabled: false, thresholds, count: 0, items: [], trees: [] }
     const owned = ledgerPids(roots)
     const items = []
     for (const row of table) {
@@ -186,7 +314,16 @@ export function orphanFindings({
         })
     }
     items.sort((left, right) => right.rss_mb - left.rss_mb)
-    return { enabled: true, thresholds, count: items.length, items }
+    const trees = []
+    if (items.length > 0) {
+        const ppids = ppidMap instanceof Map ? ppidMap : readProcPpidIndex()
+        const children = childIndexOf(ppids)
+        const lineage = lineageOf(process.pid, ppids)
+        for (const item of items) {
+            trees.push(orphanTree(item.pid, { children, lineage, readProc, rootRssMb: item.rss_mb, maxDepth: treeMaxDepth, maxMembers: treeMaxMembers }))
+        }
+    }
+    return { enabled: true, thresholds, count: items.length, items, trees }
 }
 
 export function orphanRssTotalMb(orphans) {
