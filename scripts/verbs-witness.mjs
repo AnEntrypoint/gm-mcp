@@ -12,7 +12,7 @@ const REQUIRED_VERBS = [
     'instruction', 'phase-status', 'transition', 'prd-add', 'prd-list', 'prd-resolve',
     'codesearch', 'codeinsight', 'codeinsight_index', 'exec_js', 'fs_read', 'fs_readdir',
     'git_status', 'git_log', 'git_diff', 'git_show', 'git_push', 'git_finalize',
-    'task-spawn', 'task-list', 'recall', 'memorize', 'wait', 'health', 'status',
+    'task-spawn', 'task-list', 'wait', 'health', 'status',
 ]
 const TOOL_NAME_CASES = [
     ['prd-add', 'prd_add'],
