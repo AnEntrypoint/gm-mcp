@@ -167,10 +167,11 @@ function listSummary(row, maxDesc) {
     return clipDescription(own, maxDesc)
 }
 
-function capCodemodeText(text, cap) {
-    if (text.length <= cap) return text
+function capCodemodeText(text, cap, reserve = 0) {
+    const room = Math.max(1, cap - reserve)
+    if (text.length <= room) return text
     const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${cap}\n`
-    return `${text.slice(0, Math.max(0, cap - notice.length))}${notice}`
+    return `${text.slice(0, Math.max(0, room - notice.length))}${notice}`
 }
 
 function bindings(tools, { session_id, cwd }, extra) {
@@ -298,8 +299,7 @@ export function registerCodeMode(server, tools) {
                 const value = await withCodemodeDeadline(new AsyncFunction('gm', 'console', 'require', args.code)(gm, logger, require), codemodeTimeoutMs())
                 const joined = [...logs, formatValue(value)].filter((line) => line !== '').join('\n')
                 const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
-                const bodyCap = Math.max(cap - CONTINUATION_RESERVE_CHARS, 1)
-                return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(joined, bodyCap)) }] }
+                return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(joined, cap, CONTINUATION_RESERVE_CHARS)) }] }
             } catch (error) {
                 const detail = describeError(error)
                 appendDiagnostic('codemode-threw', { error: detail })
