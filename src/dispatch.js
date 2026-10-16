@@ -14,6 +14,7 @@ import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { tableRow } from './verb-table.js'
+import { execFileSync } from './process-port.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withCodesearchCompleteness, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 
 let inflightDispatches = 0
@@ -389,6 +390,35 @@ export function shapeGitDiffReply(verb, body, out) {
         return seen <= limit
     })
     return { ...out, diff: kept.join(''), files_omitted: files - limit }
+}
+
+const GIT_SHOW_CAPTURE_LIMIT = /output exceeded the host capture limit/
+const GIT_SHOW_INLINE_MAX = 60000
+
+function gitShowCaptureFallback(verb, body, out, root) {
+    if (verb !== 'git_show' || !isPlainObject(out) || out.error_code !== 'git_show_rev_unresolved') return out
+    if (!GIT_SHOW_CAPTURE_LIMIT.test(String(out.error ?? ''))) return out
+    const rev = typeof out.rev === 'string' && out.rev ? out.rev : 'HEAD'
+    const repo = typeof out.repo === 'string' && out.repo ? out.repo : root
+    const scoped = Array.isArray(body?.paths) ? body.paths : Array.isArray(body?.files) ? body.files : []
+    const argv = ['show', '--no-color', '--stat', rev, ...(scoped.length ? ['--', ...scoped] : [])]
+    let stat
+    try {
+        stat = execFileSync('git', argv, { cwd: repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000, windowsHide: true })
+    } catch (error) {
+        const detail = String(error?.stderr ?? error?.message ?? '').trim()
+        return { ...out, error_code: 'git_show_failed', error: `git show ${rev} failed in ${repo}: ${detail}` }
+    }
+    const truncated = stat.length > GIT_SHOW_INLINE_MAX
+    return {
+        ok: true,
+        verb: 'git_show',
+        rev,
+        output: truncated ? stat.slice(0, GIT_SHOW_INLINE_MAX) : stat,
+        truncated: true,
+        truncated_reason: 'the full diff exceeded the host capture limit; output is the commit header and the per-file stat',
+        paging: `read one file's diff with git_show {"rev":"${rev}","paths":["<path from the stat>"]}`,
+    }
 }
 
 function withCheckoutCreateHint(verb, body, out) {
@@ -2258,7 +2288,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
-            out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, out)))
+            out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, gitShowCaptureFallback(verb, normalizedBody, out, root))))
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs))
             else out = withDispatchWait(out, Date.now() - callStartedAtMs)
