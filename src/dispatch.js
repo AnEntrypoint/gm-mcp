@@ -32,14 +32,19 @@ function projectRootFor(dir) {
 
 const DEFAULT_CWD_ENV_VARS = ['GM_MCP_DEFAULT_CWD', 'CLAUDE_PROJECT_DIR']
 
+function gitRootAt(dir) {
+    return gitToplevel(dir) === dir ? dir : null
+}
+
 function resolveDispatchRoot(cwd) {
     if (typeof cwd === 'string' && cwd.trim()) return { root: projectRootFor(cwd.trim()), root_source: 'cwd' }
     for (const name of DEFAULT_CWD_ENV_VARS) {
         const value = process.env[name]
-        if (typeof value === 'string' && value.trim()) return { root: projectRootFor(value.trim()), root_source: `env:${name}` }
+        if (typeof value !== 'string' || !value.trim()) continue
+        const root = gitRootAt(path.resolve(value.trim()))
+        if (root) return { root, root_source: `env:${name}` }
     }
     const launched = path.resolve(process.cwd())
-    if (process.env.GM_MCP_ALLOW_PROCESS_CWD === '1') return { root: projectRootFor(launched), root_source: 'process_cwd' }
     const top = gitToplevel(launched)
     if (top && top === launched) return { root: launched, root_source: 'process_cwd' }
     return {
@@ -49,7 +54,7 @@ function resolveDispatchRoot(cwd) {
         refused_reason: top
             ? `process.cwd() is ${launched}, inside git repository ${top} but not at its root`
             : `process.cwd() is ${launched}, which is not inside a git repository`,
-        note: `this dispatch named no project, and this gm-mcp server is a shared one whose own cwd is not a project root, so the old behaviour would have run it in ${launched}/.gm -- the wrong project, with its instruction state, PRD rows and spool files written there and nothing appearing in yours. Pass cwd (the project root containing .gm/exec-spool) on every dispatch, or set GM_MCP_DEFAULT_CWD to one explicit root for cwd-less calls. GM_MCP_ALLOW_PROCESS_CWD=1 restores the silent fallback.`,
+        note: `no cwd was passed, and the server process cwd ${launched} (refused_root) is not a git project root, so this dispatch was refused rather than run in ${launched}/.gm, which would write instruction state, PRD rows and spool files into the wrong project. Pass cwd (the project root containing .gm/exec-spool) on every dispatch, or set GM_MCP_DEFAULT_CWD to one explicit git root for cwd-less calls.`,
         accepted_fields: ['cwd'],
     }
 }
