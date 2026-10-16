@@ -2,8 +2,9 @@ import fs from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
-import { execFileSync, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { readProcessTable } from '../src/process-table.js'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const BUILT_BUNDLE = path.join(repoRoot, 'bin', 'gm-mcp-server.js')
@@ -116,19 +117,18 @@ async function roundTrip(client, id, method) {
 }
 
 function gmProcesses(bundleDir) {
-    let text = ''
+    let table = []
     try {
-        text = execFileSync('ps', ['-eww', '-o', 'pid=,args='], { encoding: 'utf8' })
+        table = readProcessTable()
     } catch {
         return []
     }
     const rows = []
-    for (const line of text.split('\n')) {
-        const match = /^\s*(\d+)\s+(.*)$/.exec(line)
-        if (!match || !match[2].includes(bundleDir)) continue
-        const args = match[2]
+    for (const row of table) {
+        const args = String(row.command || '')
+        if (!args.includes(bundleDir)) continue
         const kind = args.includes(' http-supervise') ? 'supervisor' : args.includes(' --http') ? 'server' : 'client'
-        rows.push({ pid: Number(match[1]), kind })
+        rows.push({ pid: Number(row.pid), kind })
     }
     return rows
 }
@@ -240,7 +240,10 @@ async function refusalScenario(scratch, expect) {
     const client = startClient(sc.bundlePath, scenarioEnv(sc.dir, port, {}), sc.dir)
     try {
         const exited = await waitFor(async () => client.exit, STARTUP_BUDGET_MS + 20000, 200)
-        expect('refusal: the client exits when no singleton answers and none can start', Boolean(exited) && exited.code !== 0, exited ? 'exit code ' + exited.code : 'still running')
+        const tail = (text) => String(text).slice(-400).split('\n').join(' | ')
+        const logPath = path.join(sc.dir, 'diagnostics.log')
+        const log = fs.existsSync(logPath) ? tail(fs.readFileSync(logPath, 'utf8')) : 'no log'
+        expect('refusal: the client exits when no singleton answers and none can start', Boolean(exited) && exited.code !== 0, (exited ? 'exit code ' + exited.code : 'still running') + ' stderr: ' + tail(client.stderr) + ' log: ' + log)
         expect('refusal: stderr says it refused to start a second standalone server', client.stderr.includes(REFUSAL))
         expect('refusal: no standalone stdio server was started', !standaloneStderr(client))
     } finally {
