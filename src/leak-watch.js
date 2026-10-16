@@ -225,7 +225,7 @@ function findingSummary(finding) {
     }
 }
 
-export async function leakWatchReport({ roots = null, processes = null, now = Date.now(), apply = false, httpPorts = null, signalPid = signalPidByDefault, minAgeMs = DEFAULT_MIN_RETIRE_AGE_MS, maxPerPass = DEFAULT_MAX_AUTO_RETIRE_PER_PASS, warnAt = populationWarnAt(), readProc = undefined } = {}) {
+export async function leakWatchReport({ roots = null, processes = null, now = Date.now(), apply = false, httpPorts = null, signalPid = signalPidByDefault, minAgeMs = DEFAULT_MIN_RETIRE_AGE_MS, maxPerPass = DEFAULT_MAX_AUTO_RETIRE_PER_PASS, warnAt = populationWarnAt(), readProc = undefined, ppidMap = null } = {}) {
     const table = Array.isArray(processes) ? processes : readProcessTable()
     const scanRoots = Array.isArray(roots) && roots.length > 0 ? roots : ledgerRoots()
     const reap = await reapReport({ roots: scanRoots, apply: false, now, unattributed: table })
@@ -234,7 +234,7 @@ export async function leakWatchReport({ roots = null, processes = null, now = Da
     const sharedPids = await sharedHttpPids(Array.isArray(httpPorts) ? httpPorts : registeredHttpPorts())
     // Orphans are processes gm does not own at all, so they never appear in the ledger the reap
     // above reads: they are found by walking the process table itself. Report only.
-    const orphans = orphanFindings({ table, roots: scanRoots, now, readProc })
+    const orphans = orphanFindings({ table, roots: scanRoots, now, readProc, ppidMap })
 
     const retireable = reap.findings.filter((finding) => finding.verdict === VERDICT.RETIRE)
     const unattributedServers = reap.findings.filter((finding) => finding.source === 'unattributed-server')
@@ -298,12 +298,22 @@ export function formatLeakWatchLine(report) {
     if (orphans?.count > 0) {
         line += `; ${orphans.count} orphaned heavyweight process(es) (ppid 1, >=${orphans.thresholds.rss_mb} MB RSS, duty <${orphans.thresholds.duty}) holding ${Math.round(orphanRssTotalMb(orphans))} MB: ${orphans.items.map((item) => item.pid).join(',')}`
     }
+    const treed = (orphans?.trees ?? []).filter((tree) => tree.member_count > 0)
+    if (treed.length > 0) {
+        line += `; ${treed.length} orphan tree(s) with descendants: ${treed.map((tree) => `${tree.root_pid} (+${tree.member_count}, ${tree.rss_mb} MB)`).join(', ')}`
+    }
     return line
 }
 
 export function formatOrphanLine(item) {
     const cmdline = typeof item.cmdline === 'string' && item.cmdline !== '' ? item.cmdline : '<cmdline unreadable>'
     return `  ORPHAN pid ${item.pid} -- ${item.rss_mb} MB RSS, ${Math.round(item.age_ms / 1000)}s alive, ${item.cpu_seconds}s cpu (duty ${item.duty}) -- ${cmdline}`
+}
+
+export function formatOrphanTreeLine(tree) {
+    const members = tree.members.map((member) => member.pid).join(',')
+    const truncated = tree.truncated === null ? '' : `, truncated (${tree.truncated})`
+    return `  TREE root ${tree.root_pid} -- ${tree.member_count} descendant(s), ${tree.rss_mb} MB RSS with root, depth ${tree.max_depth}${truncated} -- pids ${members}`
 }
 
 export async function runLeakWatchPass(options = {}) {
@@ -329,6 +339,7 @@ export async function runLeakWatchPass(options = {}) {
         retireable: report.population.retireable,
         orphans: report.orphans.count,
         orphan_pids: report.orphans.items.map((item) => item.pid),
+        orphan_trees: report.orphans.trees.filter((tree) => tree.member_count > 0).map((tree) => ({ root: tree.root_pid, members: tree.member_count, rss_mb: tree.rss_mb })),
         duplicate_supervisors: report.duplicate_supervisor_count,
         duplicate_ports: report.duplicate_supervisors.map((entry) => entry.port),
         reap_counts: report.reap_counts,
