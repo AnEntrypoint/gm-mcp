@@ -46,6 +46,14 @@ function wmiStartedAt(text) {
     return asUtc - Number(utcOffsetMinutes ?? 0) * 60_000
 }
 
+function failureReason(error) {
+    if (error?.status != null) {
+        const stderr = typeof error.stderr === 'string' ? error.stderr.trim().slice(0, 300) : ''
+        return `powershell exit ${error.status}${stderr ? `: ${stderr}` : ''}`
+    }
+    return error?.code ?? error?.message ?? String(error)
+}
+
 function run(exec, file, args) {
     return exec(file, args, {
         encoding: 'utf8',
@@ -91,7 +99,7 @@ function windowsRows({ exec }) {
     try {
         text = run(exec, 'powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', WINDOWS_ENCODED_SCRIPT])
     } catch (error) {
-        lastError = error?.message ?? String(error)
+        lastError = failureReason(error)
         text = typeof error?.stdout === 'string' ? error.stdout : ''
     }
     const rows = []
@@ -125,7 +133,7 @@ export function readProcessTable({ exec = execFileSync, platform = process.platf
     try {
         return platform === 'win32' ? windowsRows({ exec }) : posixRows({ exec })
     } catch (error) {
-        lastError = error?.message ?? String(error)
+        lastError = failureReason(error)
         return []
     }
 }
