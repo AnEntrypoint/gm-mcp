@@ -1,5 +1,6 @@
 import { createInterface } from 'node:readline'
 import { appendDiagnostic, describeError } from './server-log.js'
+import { CONTINUATION_LOGGER, observeRelayedReply, startContinuationMonitor } from './continuation.js'
 
 const RELAY_ERROR_CODE = -32000
 const PARSE_ERROR_CODE = -32700
@@ -20,6 +21,22 @@ function framesFromResponse(contentType, text) {
     return text.split('\n').filter((line) => line.startsWith(SSE_DATA_PREFIX)).map((line) => line.slice(SSE_DATA_PREFIX.length).trim()).filter(Boolean)
 }
 
+function observeFrame(frame) {
+    let message
+    try {
+        message = JSON.parse(frame)
+    } catch {
+        return
+    }
+    for (const item of message?.result?.content ?? []) {
+        if (item?.type === 'text') observeRelayedReply(item.text)
+    }
+}
+
+function emitContinuation(params) {
+    writeFrame(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/message', params }))
+}
+
 async function forwardLine(url, line) {
     let request
     try {
@@ -38,7 +55,10 @@ async function forwardLine(url, line) {
         const contentType = response.headers.get('content-type') || ''
         const text = await response.text()
         if (!expectsReply) return
-        for (const frame of framesFromResponse(contentType, text)) writeFrame(frame)
+        for (const frame of framesFromResponse(contentType, text)) {
+            observeFrame(frame)
+            writeFrame(frame)
+        }
     } catch (error) {
         appendDiagnostic('stdio-relay-forward-failed', { url, method: request?.method ?? null, error: describeError(error) })
         if (expectsReply) writeFrame(errorFrame(request.id, RELAY_ERROR_CODE, `gm-mcp relay: HTTP server at ${url} unreachable: ${describeError(error)}`))
@@ -64,6 +84,7 @@ export function serveStdioRelay({ url }) {
         inputClosed = true
         finishIfDone()
     })
-    appendDiagnostic('stdio-relay-start', { url, pid: process.pid })
+    startContinuationMonitor(emitContinuation)
+    appendDiagnostic('stdio-relay-start', { url, pid: process.pid, logger: CONTINUATION_LOGGER })
     console.error(`gm-mcp: connected, serving on stdio, relaying to ${url}`)
 }

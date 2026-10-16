@@ -82,10 +82,11 @@ guards stand between the channel and the deployed file:
   must be strictly greater than the installed one; equal or older is refused,
   and so is a candidate whose version cannot be read at all.
 
-The check runs every `GM_MCP_SELF_UPDATE_INTERVAL_MS` (default 60 seconds). It is a
-conditional request: the server answers 304 with no body while the bundle is
-unchanged, so an idle check moves no bundle bytes, and a fix pushed upstream
-reaches this machine within one interval. `gm-mcp
+The check runs every `GM_MCP_SELF_UPDATE_INTERVAL_MS` (default 60 seconds). It
+probes the GitHub API for the `main` head: a 304 with no body while the head is
+unchanged, so an idle check moves no bundle bytes. A changed head is fetched by
+its commit-addressed raw URL, and a fix pushed upstream reaches this machine
+within one interval. `gm-mcp
 self-update-now` runs the same check at once, skipping only that stamp: it
 starts no server, binds no port, signals nothing and never hands this process
 over to the bundle it installs, and every guard above still stands.
@@ -194,6 +195,14 @@ daemon that will never claim it. A project with no `.status.json` at all is
 the registration path rather than a dead daemon and still dispatches, as does
 one mid-handoff (`daemonBootGraceActive`, `runner_update_in_progress`). Opt
 out with `GM_MCP_DAEMON_PREFLIGHT=0`.
+
+## Continuation channel
+
+Every dispatch reply ends with a `continuation` block: `state` (`running` or `stopped`), `pending_rows` (from the reply's `prd_pending_count`, `null` until one is seen), `idle_ms` since the previous reply on that session, and `action`. `action` is `continue` while rows are pending (with `max_concurrency`, the pending count capped at 4 workers), `stop` when no rows are pending or the session was stopped, and `none` when the pending count is unknown. A JSON object reply gets `continuation` as a field, a JSON array reply carries none, and file-content replies (`fs_read`, `result`, `gm_result`) stay byte for byte.
+
+`continuation-stop` (dispatched through `gm` with `verb: "continuation-stop"`, or on the session body) marks the session stopped. The next `instruction` dispatch with a non-empty `prompt` resumes it.
+
+Push is stdio only, and the server declares `logging`. When pending rows exist and no reply has arrived for `GM_MCP_IDLE_NOTIFY_MS` (default 300000), a `notifications/message` at level `warning` with logger `gm.continuation` carries the same object as `data`, once per idle period. A standalone stdio server emits it through its SDK server. The default stdio registration relays to the singleton and emits from the relay, which observes the continuation blocks in the replies it forwards. Streamable HTTP cannot push, so HTTP clients read `continuation` from the reply.
 
 ## Transport: stdio (default) and streamable HTTP
 
