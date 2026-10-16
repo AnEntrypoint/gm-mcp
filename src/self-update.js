@@ -10,7 +10,7 @@ import { inflightDispatchCount } from './dispatch.js'
 
 const DEPLOYED_BUNDLE_FILE_NAME = 'gm-mcp-server.mjs'
 const DEFAULT_BUNDLE_URL = 'https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js'
-const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000
+const DEFAULT_CHECK_INTERVAL_MS = 10 * 60 * 1000
 const DEFER_RETRY_DELAY_MS = 20_000
 const MAX_DEFER_RETRIES_PER_TRIGGER = 4
 const FETCH_TIMEOUT_MS = 20_000
