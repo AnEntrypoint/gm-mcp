@@ -5,6 +5,9 @@ import { canonicalToolName, nearestNames } from './verbs.js'
 import { verbDescriptionLead } from './verb-table.js'
 import { verbBodySchema } from './verb-bodies.js'
 import { NOTICES } from './notices.js'
+import { continuedReply } from './continuation.js'
+
+const PROCESS_CODEMODE_SESSION_ID = `mcp-codemode-${process.pid}-${Date.now()}`
 import { createRequire } from 'node:module'
 import { resolve as resolvePath } from 'node:path'
 
@@ -288,19 +291,19 @@ export function registerCodeMode(server, tools) {
         async (args = {}, extra) => {
             const logs = []
             const logger = { log: (...parts) => logs.push(parts.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' ')) }
-            const session_id = args.session_id || `mcp-codemode-${process.pid}-${Date.now()}`
+            const session_id = args.session_id || PROCESS_CODEMODE_SESSION_ID
             try {
                 const gm = bindings(tools, { session_id, cwd: args.cwd }, extra)
                 const require = createRequire(resolvePath(args.cwd || process.cwd(), 'gm-codemode.js'))
                 const value = await withCodemodeDeadline(new AsyncFunction('gm', 'console', 'require', args.code)(gm, logger, require), codemodeTimeoutMs())
                 const joined = [...logs, formatValue(value)].filter((line) => line !== '').join('\n')
                 const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
-                return { content: [{ type: 'text', text: capCodemodeText(joined, cap) }] }
+                return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(joined, cap)) }] }
             } catch (error) {
                 const detail = describeError(error)
                 appendDiagnostic('codemode-threw', { error: detail })
                 const text = [...logs, `gm-mcp: gm_codemode code threw -- ${detail}`].join('\n')
-                return { content: [{ type: 'text', text }], isError: true }
+                return { content: [{ type: 'text', text: continuedReply(session_id, text) }], isError: true }
             }
         }
     )
