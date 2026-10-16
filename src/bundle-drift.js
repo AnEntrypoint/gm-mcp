@@ -168,6 +168,7 @@ export function bundleHealthBlock(state = bundleDrift()) {
 }
 
 export function startBundleDriftWatch(onDrift, { intervalMs = bundleDriftIntervalMs(), transport } = {}) {
+    runningBundle()
     let checking = false
     const tick = async () => {
         if (checking) return

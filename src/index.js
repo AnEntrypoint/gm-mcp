@@ -2,14 +2,14 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createServer } from './mcp-server.js'
 import { installStdioGuards } from './transport-guard.js'
 import { startHttpServer, httpListenOptions, setHealthExtras } from './http-transport.js'
-import { defaultHttpPort, ensureHttpSingleton, ensureHttpSingletonInBackground, ensureHttpSupervisor, httpSingletonEnabled, recordHttpInstance } from './singleton.js'
+import { defaultHttpPort, ensureHttpSingleton, ensureHttpSingletonInBackground, ensureHttpSupervisor, httpMcpUrl, httpSingletonEnabled, probeHealth, recordHttpInstance } from './singleton.js'
 import { serveStdioRelay } from './stdio-relay.js'
-import { adoptHandedOverHandle, handOverStdioToRefreshedBundle, handOverToRefreshedBundle, handoverRequested, HANDOVER_LISTEN_RETRY_MS } from './bundle-refresh.js'
+import { adoptHandedOverHandle, handOverToRefreshedBundle, handoverRequested, HANDOVER_LISTEN_RETRY_MS } from './bundle-refresh.js'
 import { bundleHealthBlock, bundleStalenessAnnouncement, startBundleDriftWatch } from './bundle-drift.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runLeakWatchPass } from './leak-watch.js'
 import { runReleaseBridgeInBackground } from './release-bridge.js'
-import { appendDiagnostic, describeError } from './server-log.js'
+import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { installSpoolPort } from './spool-port.js'
 import { flagValue } from './argv.js'
 import { nodeSpoolPort } from './spool-port-node.js'
@@ -40,19 +40,30 @@ function seedHttpSingletonInBackground({ skipPort = null } = {}) {
 
 async function stdioRelayTarget() {
     if (!httpSingletonEnabled()) return null
-    const started = await ensureHttpSingleton({ port: defaultHttpPort(), wait: true, sweep: false }).catch((error) => {
+    const port = defaultHttpPort()
+    const started = await ensureHttpSingleton({ port, wait: true, sweep: false }).catch((error) => {
         appendDiagnostic('stdio-relay-singleton-failed', { error: describeError(error) })
         return null
     })
-    return started?.url ?? null
+    if (started?.url) return started.url
+    const live = await probeHealth(port)
+    if (live) {
+        appendDiagnostic('stdio-relay-reused-live-singleton', { port, pid: live.pid ?? null })
+        return httpMcpUrl(port)
+    }
+    const reason = started?.error ?? 'singleton start threw'
+    appendDiagnostic('stdio-relay-no-singleton', { port, reason })
+    console.error('gm-mcp: no gm-mcp HTTP server answers on port ' + port + ' and none could start (' + reason + '); refusing to start a second standalone server -- see ' + logFilePath())
+    process.exit(1)
 }
 
 function watchForStaleBundle({ handOver = null, transportKind = 'stdio' } = {}) {
     return startBundleDriftWatch((state) => {
-        const line = bundleStalenessAnnouncement(state)
+        const honest = handOver ? state : { ...state, reloadable: false, refusal_code: 'no-handover', refusal_reason: 'a ' + transportKind + ' server cannot replace itself without dropping its client, so a relaunch serves the installed bundle' }
+        const line = bundleStalenessAnnouncement(honest)
         if (line) console.error(line)
         if (handOver && state?.reloadable === true) return handOver(state)
-        appendDiagnostic('bundle-stale-no-handover', { ...state, transport: transportKind })
+        appendDiagnostic('bundle-stale-no-handover', { ...honest, transport: transportKind })
         return null
     }, { transport: transportKind })
 }
@@ -75,6 +86,7 @@ export async function main() {
     installStdioGuards()
     const relayUrl = await stdioRelayTarget()
     if (relayUrl) return serveStdioRelay({ url: relayUrl })
+    appendDiagnostic('stdio-standalone-start', { pid: process.pid })
     const server = createServer()
     const transport = new StdioServerTransport()
 
@@ -83,7 +95,7 @@ export async function main() {
     await server.connect(transport)
     console.error('gm-mcp: connected, serving on stdio')
     seedHttpSingletonInBackground()
-    watchForStaleBundle({ transportKind: 'stdio', handOver: (state) => handOverStdioToRefreshedBundle({ transport, state }) })
+    watchForStaleBundle({ transportKind: 'stdio' })
     scheduleStaleDeployedBundleChecks(null, runLeakWatchPass)
     runReleaseBridgeInBackground()
 }
