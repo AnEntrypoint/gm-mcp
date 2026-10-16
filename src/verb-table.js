@@ -485,6 +485,7 @@ const REGISTRY_ROWS = [
     { canonical: 'git_add' },
     { canonical: 'git_commit', aliases: GIT_COMMIT_KEYS, fields: GIT_COMMIT_FIELDS, description: GIT_COMMIT_DESCRIPTION, body: GIT_COMMIT_BODY },
     { canonical: 'git_amend' },
+    { canonical: 'git_rewrite_authors' },
     { canonical: 'git_finalize', aliases: GIT_COMMIT_KEYS, fields: GIT_COMMIT_FIELDS, description: GIT_COMMIT_DESCRIPTION, body: GIT_FINALIZE_BODY },
     { canonical: 'git_log', ...scopedGitRow('git_log') },
     { canonical: 'git_diff', ...scopedGitRow('git_diff') },
