@@ -82,9 +82,10 @@ guards stand between the channel and the deployed file:
   must be strictly greater than the installed one; equal or older is refused,
   and so is a candidate whose version cannot be read at all.
 
-The check runs on an hourly tick that defers while `<deployed bundle>.checked`
-is fresher than `GM_MCP_SELF_UPDATE_INTERVAL_MS` (default one hour), so a fix
-pushed upstream reaches this machine up to an hour later. `gm-mcp
+The check runs every `GM_MCP_SELF_UPDATE_INTERVAL_MS` (default 60 seconds). It is a
+conditional request: the server answers 304 with no body while the bundle is
+unchanged, so an idle check moves no bundle bytes, and a fix pushed upstream
+reaches this machine within one interval. `gm-mcp
 self-update-now` runs the same check at once, skipping only that stamp: it
 starts no server, binds no port, signals nothing and never hands this process
 over to the bundle it installs, and every guard above still stands.
@@ -309,7 +310,7 @@ invocations is back within five minutes even when nothing else runs gm.
 
 No CI job can see what is running on a developer machine, so the runtime is the
 only place a process leak can be caught. Every server runs one leak pass on the
-hourly scheduler it already had (`scheduleStaleDeployedBundleChecks`) and once at
+hourly pass of the scheduler it already had (`scheduleStaleDeployedBundleChecks`) and once at
 startup, sharing a single host process-table read across the census, the reaper's
 unattributed pass and the duplicate-supervisor count:
 
