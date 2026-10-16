@@ -211,6 +211,9 @@ export async function assessAttributedChildren({ roots = [], liveSessionIds = nu
             const pid = Number(row.pid)
             if (seen.has(pid)) continue
             seen.add(pid)
+            // A dead pid has nothing left to retire: its row is history. Assessing it re-reads every
+            // ledger and spawns ps per row, so the hourly pass over many projects would take minutes.
+            if (pidAlive(pid) !== true) continue
             const attributed = attributePid(pid, { root })
             const parentPid = parentPidOf(pid)
             const port = Number.isInteger(Number(row.port)) && Number(row.port) > 0 ? Number(row.port) : null

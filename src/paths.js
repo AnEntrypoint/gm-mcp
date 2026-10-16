@@ -9,6 +9,10 @@ export function agentplugDir() {
     return path.resolve(process.env.AGENTPLUG_HOME?.trim() || path.join(homedir(), '.agentplug'))
 }
 
+export function leasesDir() {
+    return path.join(agentplugDir(), 'leases')
+}
+
 export function spoolDirOf(root) {
     return path.join(root, '.gm', 'exec-spool')
 }
