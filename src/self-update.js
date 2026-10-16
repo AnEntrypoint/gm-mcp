@@ -10,7 +10,7 @@ import { inflightDispatchCount } from './dispatch.js'
 
 const DEPLOYED_BUNDLE_FILE_NAME = 'gm-mcp-server.mjs'
 const DEFAULT_BUNDLE_URL = 'https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js'
-const DEFAULT_CHECK_INTERVAL_MS = 10 * 60 * 1000
+const DEFAULT_CHECK_INTERVAL_MS = 60 * 1000
 const DEFER_RETRY_DELAY_MS = 20_000
 const MAX_DEFER_RETRIES_PER_TRIGGER = 4
 const FETCH_TIMEOUT_MS = 20_000
@@ -203,11 +203,31 @@ function touch(stampPath) {
     utimesSync(stampPath, now, now)
 }
 
-async function fetchBundleBytes(url) {
-    if (url.startsWith('file:')) return readFileSync(fileURLToPath(url))
-    const response = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
+function bundleCachePath(deployedPath) {
+    return `${deployedPath}.fetched.json`
+}
+
+function readBundleCache(deployedPath) {
+    try {
+        return JSON.parse(readFileSync(bundleCachePath(deployedPath), 'utf8'))
+    } catch {
+        return null
+    }
+}
+
+function writeBundleCache(deployedPath, record) {
+    writeFileSync(bundleCachePath(deployedPath), JSON.stringify(record))
+}
+
+// A conditional request costs headers only when the bundle is unchanged: the server answers 304 to
+// an If-None-Match that still matches, so a check that finds nothing new moves no bundle bytes.
+async function fetchBundle(url, cached) {
+    if (url.startsWith('file:')) return { bytes: readFileSync(fileURLToPath(url)), etag: null, notModified: false }
+    const headers = cached?.etag ? { 'if-none-match': cached.etag } : {}
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
+    if (response.status === 304 && cached?.etag) return { bytes: null, etag: cached.etag, notModified: true }
     if (!response.ok) throw new Error(`HTTP ${response.status} from ${url}`)
-    return Buffer.from(await response.arrayBuffer())
+    return { bytes: Buffer.from(await response.arrayBuffer()), etag: response.headers.get('etag'), notModified: false }
 }
 
 function assertLoadableBundle(bytes, candidatePath) {
@@ -254,9 +274,17 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     if (pinned) return refuse(pinned.code, pinned.reason)
 
     const url = process.env.GM_MCP_BUNDLE_URL || DEFAULT_BUNDLE_URL
-    const freshBytes = await fetchBundleBytes(url)
+    const cached = readBundleCache(deployedPath)
+    const reuse = cached && cached.sha === deployedHash ? cached : null
+    const fetched = await fetchBundle(url, reuse)
+    if (fetched.notModified) {
+        touch(stampPath)
+        return { outcome: 'current', self, hash: deployedHash, not_modified: true }
+    }
+    const freshBytes = fetched.bytes
     const freshHash = sha256(freshBytes)
     if (freshHash === deployedHash) {
+        writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash })
         touch(stampPath)
         return { outcome: 'current', self, hash: freshHash }
     }
@@ -269,13 +297,13 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     if (dispatchesInflight > 0) return { outcome: 'deferred-dispatch-inflight', self, dispatches_inflight: dispatchesInflight }
 
     replaceDeployedBundle(deployedPath, freshBytes)
+    writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash })
     touch(stampPath)
     return { outcome: 'refreshed', self, from: deployedHash, to: freshHash, url, deployed_bundle: deployedPath, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
 }
 
-// A fix pushed upstream reaches a running server only when the hourly stamp lets it, so an operator
-// (or an agent that just pushed one and needs it NOW) has to be able to ask for the check without
-// waiting out the interval. This skips ONLY the stamp-freshness deferral: the freeze file, the
+// A fix pushed upstream reaches a running server within one check interval. An operator (or an agent
+// that just pushed one and wants it now) can ask for the check without waiting out the stamp. This skips ONLY the stamp-freshness deferral: the freeze file, the
 // local-build pin, the no-downgrade guard, the loadability check and the inflight-dispatch wait all
 // still hold, and it reloads nothing -- a forced check is the same file swap the hourly tick does.
 export async function refreshDeployedBundleNow(deployedPath = defaultDeployedPath(), options = {}) {
@@ -390,10 +418,16 @@ export function refreshStaleDeployedBundleInBackground(onRefreshed = null, optio
         })
 }
 
+const HOURLY_PASS_INTERVAL_MS = 60 * 60 * 1000
+
 export function scheduleStaleDeployedBundleChecks(onRefreshed = null, hourlyPass = null) {
+    const everyTicks = Math.max(1, Math.round(HOURLY_PASS_INTERVAL_MS / checkIntervalMs()))
+    let tick = 0
     const pass = () => {
+        const runHourly = tick % everyTicks === 0
+        tick += 1
         refreshStaleDeployedBundleInBackground(onRefreshed)
-        if (typeof hourlyPass !== 'function') return
+        if (!runHourly || typeof hourlyPass !== 'function') return
         Promise.resolve()
             .then(hourlyPass)
             .catch((error) => appendDiagnostic('hourly-pass-failed', { error: describeError(error) }))
