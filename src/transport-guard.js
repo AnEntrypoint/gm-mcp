@@ -4,7 +4,10 @@ import { BUNDLE_VERSION } from './bundle-version.js'
 import { inflightDispatchCount } from './dispatch.js'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 
-const CLIENT_GONE_EXIT_RECHECK_MS = 15_000
+const CLIENT_GONE_EXIT_RECHECK_MS = 1_000
+const CLIENT_GONE_MAX_WAIT_MS = 120_000
+const PARENT_WATCH_INTERVAL_MS = 1_000
+const CLIENT_GONE_STREAM_CODES = new Set(['EPIPE', 'ECONNRESET', 'ERR_STREAM_DESTROYED'])
 
 function isJsonRpcFrame(chunk) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8')
@@ -63,17 +66,30 @@ export function logSignalExits() {
     }
 }
 
-let clientGoneCheckPending = false
+let clientGoneSince = null
 
-function exitWhenClientStaysGone(reason) {
-    if (clientGoneCheckPending) return
-    clientGoneCheckPending = true
+export function exitWhenIdle(reason) {
+    if (clientGoneSince !== null) return
+    clientGoneSince = Date.now()
     const recheck = () => {
-        if (inflightDispatchCount() > 0) return setTimeout(recheck, CLIENT_GONE_EXIT_RECHECK_MS)
-        appendDiagnostic('exit', { reason, dispatches_inflight: 0 })
+        const inflight = inflightDispatchCount()
+        const waitedMs = Date.now() - clientGoneSince
+        if (inflight > 0 && waitedMs < CLIENT_GONE_MAX_WAIT_MS) return setTimeout(recheck, CLIENT_GONE_EXIT_RECHECK_MS)
+        appendDiagnostic('exit', { reason, dispatches_inflight: inflight, waited_ms: waitedMs })
         process.exit(0)
     }
     setTimeout(recheck, CLIENT_GONE_EXIT_RECHECK_MS)
+}
+
+function exitWhenParentGone() {
+    const parentAtStart = process.ppid
+    const watch = setInterval(() => {
+        if (process.ppid === parentAtStart) return
+        clearInterval(watch)
+        appendDiagnostic('parent-gone', { parent_pid_at_start: parentAtStart, ppid: process.ppid })
+        exitWhenIdle('parent-gone')
+    }, PARENT_WATCH_INTERVAL_MS)
+    watch.unref()
 }
 
 function surviveClientGone() {
@@ -85,15 +101,18 @@ function surviveClientGone() {
             appendDiagnostic('stdout-pipe-gone', {
                 code,
                 error: describeError(error),
-                note: 'client stopped reading -- exits after a recheck unless dispatches are in flight',
+                note: 'client stopped reading -- server stays up for one recheck unless dispatches are in flight',
                 dispatches_inflight: inflightDispatchCount(),
             })
         }
-        exitWhenClientStaysGone('client-gone')
+        exitWhenIdle('client-gone')
+    })
+    process.stderr.on('error', (error) => {
+        if (CLIENT_GONE_STREAM_CODES.has(error?.code)) exitWhenIdle('stderr-gone')
     })
     process.stdin.on('end', () => {
-        appendDiagnostic('stdin-ended', { note: 'client disconnected -- exits after a recheck unless dispatches are in flight' })
-        exitWhenClientStaysGone('client-gone')
+        appendDiagnostic('stdin-ended', { note: 'client disconnected -- server stays up for one recheck unless dispatches are in flight' })
+        exitWhenIdle('client-gone')
     })
 }
 
@@ -102,6 +121,7 @@ export function installStdioGuards() {
     logSignalExits()
     reserveStdoutForJsonRpc()
     surviveClientGone()
+    exitWhenParentGone()
     appendDiagnostic('start', {
         bundle_version: BUNDLE_VERSION,
         argv: process.argv.slice(1),
