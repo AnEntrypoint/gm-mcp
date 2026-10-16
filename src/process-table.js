@@ -20,7 +20,8 @@ const WMI_CREATION_DATE = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.\d+(?:([
 const WINDOWS_SCRIPT = [
     'Get-CimInstance Win32_Process | ForEach-Object {',
     '  $line = ($_.CommandLine -replace "[\\r\\n\\t]+", " ")',
-    '  Write-Output ($_.ProcessId.ToString() + "|" + $_.ParentProcessId.ToString() + "|" + [string]$_.CreationDate + "|" + $line)',
+    '  $started = if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString("o") } else { "" }',
+    '  Write-Output ($_.ProcessId.ToString() + "|" + $_.ParentProcessId.ToString() + "|" + $started + "|" + $line)',
     '}',
 ].join('\n')
 const WINDOWS_ENCODED_SCRIPT = Buffer.from(WINDOWS_SCRIPT, 'utf16le').toString('base64')
@@ -31,10 +32,17 @@ export function lastTableError() {
     return lastError
 }
 
+const ISO_UTC = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
+
 function startedAtFrom(text) {
     if (typeof text !== 'string' || text === '') return null
-    const parsed = Date.parse(text)
+    const iso = ISO_UTC.exec(text.trim())
+    const parsed = Date.parse(iso === null ? text : `${iso[1]}${iso[2] ? `.${iso[2].slice(1, 4).padEnd(3, '0')}` : ''}${iso[3]}`)
     return Number.isFinite(parsed) ? parsed : null
+}
+
+function windowsStartedAt(text) {
+    return startedAtFrom(text) ?? wmiStartedAt(text)
 }
 
 function wmiStartedAt(text) {
@@ -113,7 +121,7 @@ function windowsRows({ exec }) {
         rows.push({
             pid,
             ppid: Number.isInteger(ppid) && ppid > 0 ? ppid : null,
-            started_at: wmiStartedAt(fields[2]),
+            started_at: windowsStartedAt(fields[2]),
             command: fields.slice(3).join('|').trim(),
         })
     }
