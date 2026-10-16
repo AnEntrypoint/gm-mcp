@@ -3,6 +3,7 @@ import * as yaml from 'js-yaml'
 export const CONTINUATION_STOP_VERB = 'continuation-stop'
 export const CONTINUATION_LOGGER = 'gm.continuation'
 const MAX_WORKERS = 4
+export const CONTINUATION_RESERVE_CHARS = 256
 const DEFAULT_IDLE_NOTIFY_MS = 300000
 const MONITOR_TICK_MS = 15000
 const RELAY_KEY = 'relay'
@@ -43,13 +44,26 @@ export function setContinuationStopped(key, stopped) {
     entryFor(key).stopped = stopped
 }
 
+function parsedJsonOf(text) {
+    if (!/^\s*[{[]/.test(text)) return null
+    try {
+        return { value: JSON.parse(text) }
+    } catch {
+        return null
+    }
+}
+
 export function continuedReply(key, text, now = Date.now()) {
     if (typeof text !== 'string') return text
     const entry = entryFor(key)
     const seen = PENDING_LINE.exec(text)
     if (seen) entry.pending_rows = Number(seen[1])
-    const block = yaml.dump({ continuation: continuationSnapshot(key, now) }, { lineWidth: 100 })
+    const snapshot = continuationSnapshot(key, now)
     entry.last_ms = now
+    const json = parsedJsonOf(text)
+    if (json && json.value && typeof json.value === 'object' && !Array.isArray(json.value)) return JSON.stringify({ ...json.value, continuation: snapshot })
+    if (json) return text
+    const block = yaml.dump({ continuation: snapshot }, { lineWidth: 100 })
     const separator = text === '' || text.endsWith('\n') ? '' : '\n'
     return `${text}${separator}${block}`
 }

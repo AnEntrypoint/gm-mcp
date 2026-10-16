@@ -9,7 +9,7 @@ import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
 import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
-import { CONTINUATION_STOP_VERB, continuedReply, setContinuationStopped } from './continuation.js'
+import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuedReply, setContinuationStopped } from './continuation.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
@@ -2084,6 +2084,7 @@ function continuationKeyOf(args) {
 }
 
 export async function gmDispatch(args, signal, responseValueObserver) {
+    if (typeof args?.max_chars === 'number' && args.max_chars > 2 * CONTINUATION_RESERVE_CHARS) args = { ...args, max_chars: args.max_chars - CONTINUATION_RESERVE_CHARS }
     if (args?.verb === CONTINUATION_STOP_VERB) {
         const key = continuationKeyOf(args)
         setContinuationStopped(key, true)
