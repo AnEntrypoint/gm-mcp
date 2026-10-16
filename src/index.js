@@ -4,6 +4,7 @@ import { installStdioGuards } from './transport-guard.js'
 import { startHttpServer, httpListenOptions, setHealthExtras } from './http-transport.js'
 import { defaultHttpPort, ensureHttpSingleton, ensureHttpSingletonInBackground, ensureHttpSupervisor, httpMcpUrl, httpSingletonEnabled, probeHealth, recordHttpInstance } from './singleton.js'
 import { serveStdioRelay } from './stdio-relay.js'
+import { startContinuationMonitor } from './continuation.js'
 import { adoptHandedOverHandle, handOverToRefreshedBundle, handoverRequested, HANDOVER_LISTEN_RETRY_MS } from './bundle-refresh.js'
 import { bundleHealthBlock, bundleStalenessAnnouncement, runningBundle, startBundleDriftWatch } from './bundle-drift.js'
 import { recordRunningImage } from './running-images.js'
@@ -100,6 +101,7 @@ export async function main() {
 
     await server.connect(transport)
     console.error('gm-mcp: connected, serving on stdio')
+    startContinuationMonitor((params) => server.server.sendLoggingMessage(params).catch((error) => appendDiagnostic('continuation-notify-failed', { error: describeError(error) })))
     recordRunningImage('stdio', runningBundle())
     seedHttpSingletonInBackground()
     watchForStaleBundle({ transportKind: 'stdio' })

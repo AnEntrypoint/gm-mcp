@@ -89,7 +89,8 @@ await testAsync('gm.<verb>({...}) reaches the tool handler as the verb body', as
         },
     }]])
     const result = await runCodemode(tools, "return await gm.codesearch({query: 'createWorkerRenderer', mode: 'literal', max_matches: 20})")
-    assert.equal(result.content[0].text, 'matches: 1')
+    assert.match(result.content[0].text, /^matches: 1\n/)
+    assert.match(result.content[0].text, /\ncontinuation:\n/)
     assert.equal(seen.length, 1)
     assert.deepEqual(seen[0].body, { query: 'createWorkerRenderer', mode: 'literal', max_matches: 20 })
     assert.equal(seen[0].session_id, 'SESSION')

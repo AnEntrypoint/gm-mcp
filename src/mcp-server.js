@@ -115,7 +115,7 @@ const SURFACE_INSTRUCTIONS = 'gm-mcp serves one tool, gm_codemode. Every gm verb
 const PROCESS_INSTRUCTION_SESSION_ID = `mcp-instruction-${process.pid}-${Date.now()}`
 
 export function createServer() {
-    const server = new McpServer({ name: 'gm-mcp', version: BUNDLE_VERSION }, { instructions: SURFACE_INSTRUCTIONS })
+    const server = new McpServer({ name: 'gm-mcp', version: BUNDLE_VERSION }, { instructions: SURFACE_INSTRUCTIONS, capabilities: { logging: {}, tools: { listChanged: true } } })
     const instructionSessionId = PROCESS_INSTRUCTION_SESSION_ID
     const tools = new Map()
     const define = (name, config, handler, verb = null) => tools.set(name, { ...config, verb, handler })
