@@ -10,7 +10,7 @@ import { inflightDispatchCount } from './dispatch.js'
 
 const DEPLOYED_BUNDLE_FILE_NAME = 'gm-mcp-server.mjs'
 const DEFAULT_BUNDLE_URL = 'https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js'
-const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000
+const DEFAULT_CHECK_INTERVAL_MS = 10 * 60 * 1000
 const FETCH_TIMEOUT_MS = 20_000
 const MIN_PLAUSIBLE_BUNDLE_BYTES = 100_000
 const BUNDLE_SHEBANG = '#!/usr/bin/env node'
