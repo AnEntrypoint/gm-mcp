@@ -195,6 +195,14 @@ the registration path rather than a dead daemon and still dispatches, as does
 one mid-handoff (`daemonBootGraceActive`, `runner_update_in_progress`). Opt
 out with `GM_MCP_DAEMON_PREFLIGHT=0`.
 
+## Continuation channel
+
+Every dispatch reply ends with a `continuation` block: `state` (`running` or `stopped`), `pending_rows` (from the reply's `prd_pending_count`, `null` until one is seen), `idle_ms` since the previous reply on that session, and `action`. `action` is `continue` while rows are pending (with `max_concurrency`, the pending count capped at 4 workers), `stop` when no rows are pending or the session was stopped, and `none` when the pending count is unknown. File-content replies (`fs_read`, `result`, `gm_result`) stay byte for byte and carry no block.
+
+`continuation-stop` (dispatched through `gm` with `verb: "continuation-stop"`, or on the session body) marks the session stopped. The next `instruction` dispatch with a non-empty `prompt` resumes it.
+
+Push is stdio only, and the server declares `logging`. When pending rows exist and no reply has arrived for `GM_MCP_IDLE_NOTIFY_MS` (default 300000), a `notifications/message` at level `warning` with logger `gm.continuation` carries the same object as `data`, once per idle period. A standalone stdio server emits it through its SDK server. The default stdio registration relays to the singleton and emits from the relay, which observes the continuation blocks in the replies it forwards. Streamable HTTP cannot push, so HTTP clients read `continuation` from the reply.
+
 ## Transport: stdio (default) and streamable HTTP
 
 `gm` is registered in `~/.claude.json` as a user-scope MCP server:
