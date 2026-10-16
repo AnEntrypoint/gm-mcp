@@ -127,13 +127,17 @@ function dropSingletonStateForPort(port) {
 }
 
 export async function probeHealth(port, timeoutMs = PROBE_TIMEOUT_MS) {
+    const controller = new AbortController()
+    const deadline = setTimeout(() => controller.abort(), timeoutMs)
     try {
-        const response = await fetch(healthUrl(port), { signal: AbortSignal.timeout(timeoutMs) })
+        const response = await fetch(healthUrl(port), { signal: controller.signal })
         if (!response.ok) return null
         const payload = await response.json()
         return payload?.ok === true ? payload : null
     } catch {
         return null
+    } finally {
+        clearTimeout(deadline)
     }
 }
 
