@@ -82,10 +82,11 @@ guards stand between the channel and the deployed file:
   must be strictly greater than the installed one; equal or older is refused,
   and so is a candidate whose version cannot be read at all.
 
-The check runs every `GM_MCP_SELF_UPDATE_INTERVAL_MS` (default 60 seconds). It is a
-conditional request: the server answers 304 with no body while the bundle is
-unchanged, so an idle check moves no bundle bytes, and a fix pushed upstream
-reaches this machine within one interval. `gm-mcp
+The check runs every `GM_MCP_SELF_UPDATE_INTERVAL_MS` (default 60 seconds). It
+probes the GitHub API for the `main` head: a 304 with no body while the head is
+unchanged, so an idle check moves no bundle bytes. A changed head is fetched by
+its commit-addressed raw URL, and a fix pushed upstream reaches this machine
+within one interval. `gm-mcp
 self-update-now` runs the same check at once, skipping only that stamp: it
 starts no server, binds no port, signals nothing and never hands this process
 over to the bundle it installs, and every guard above still stands.
