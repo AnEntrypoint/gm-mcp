@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 
-import { attributeRows } from './child-ledger.js'
+import { attributeRows, leaseRoots } from './child-ledger.js'
 import { classifyGmServerCommand } from './gm-cmdline.js'
 import { MCP_CLIENT_PATTERNS, reapReport, VERDICT } from './leak-reaper.js'
 import { listeningPidOf } from './ports.js'
@@ -207,8 +207,10 @@ export function autoApplyDecision({ finding, ancestors, sharedPids = new Set(), 
     return { pid, eligible: blockedBy.length === 0, guards, blocked_by: blockedBy }
 }
 
-function ledgerRoots() {
-    const roots = new Set()
+// Every project gm has dispatched into (its lease records) plus any root the global ledger names,
+// so the hourly pass reads each project's own ledger and assesses its attributed exec runners.
+function knownProjectRoots() {
+    const roots = new Set(leaseRoots())
     for (const row of attributeRows({ root: null })) {
         if (typeof row.root === 'string' && row.root !== '') roots.add(row.root)
     }
@@ -227,7 +229,7 @@ function findingSummary(finding) {
 
 export async function leakWatchReport({ roots = null, processes = null, now = Date.now(), apply = false, httpPorts = null, signalPid = signalPidByDefault, minAgeMs = DEFAULT_MIN_RETIRE_AGE_MS, maxPerPass = DEFAULT_MAX_AUTO_RETIRE_PER_PASS, warnAt = populationWarnAt(), readProc = undefined, ppidMap = null } = {}) {
     const table = Array.isArray(processes) ? processes : readProcessTable()
-    const scanRoots = Array.isArray(roots) && roots.length > 0 ? roots : ledgerRoots()
+    const scanRoots = Array.isArray(roots) && roots.length > 0 ? roots : knownProjectRoots()
     const reap = await reapReport({ roots: scanRoots, apply: false, now, unattributed: table })
     const census = censusGmProcesses(table)
     const duplicates = duplicateSupervisorFindings({ processes: table, now })
@@ -267,6 +269,7 @@ export async function leakWatchReport({ roots = null, processes = null, now = Da
     return {
         generated_at: new Date(now).toISOString(),
         scanned_processes: table.length,
+        scanned_roots: scanRoots,
         population,
         duplicate_supervisors: duplicates,
         duplicate_supervisor_count: duplicateSupervisorCount,
