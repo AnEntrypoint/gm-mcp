@@ -4,6 +4,8 @@ import { main, flagValue } from './index.js'
 import { gmDispatch, replyEnvelopeSelfCheck } from './dispatch.js'
 import { runDevSync } from './dev-sync.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
+import { runningBundle } from './bundle-drift.js'
+import { recordRunningImage } from './running-images.js'
 import { clearLocalBuildPin, deployedBundleVersion, describeSelfUpdateOutcome, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, refreshDeployedBundleNow, selfUpdateStatus } from './self-update.js'
 import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
 import { reapReport, formatFindings } from './leak-reaper.js'
@@ -253,6 +255,7 @@ const COMMANDS = {
         const port = Number.isInteger(portFlag) && portFlag > 0 ? portFlag : defaultHttpPort()
         const seconds = Number(flagValue('interval'))
         const intervalMs = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : supervisorIntervalMs()
+        recordRunningImage('supervisor', runningBundle())
         const result = await runHttpSupervisor({ port, intervalMs })
         console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.reason}`)
         return result.supervised === false ? 1 : 0
