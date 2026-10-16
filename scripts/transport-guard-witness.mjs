@@ -11,7 +11,7 @@ const flags = Object.fromEntries(process.argv.slice(2).map(arg => {
 }))
 const srcDir = path.resolve(flags.src ?? path.join(path.dirname(SCRIPT), '..', 'src'))
 const moduleFile = path.join(srcDir, 'transport-guard.js')
-const INSTALLERS = ['installStdioGuards', 'keepServingOnAsyncFailure', 'logSignalExits']
+const INSTALLERS = ['exitWhenIdle', 'installStdioGuards', 'keepServingOnAsyncFailure', 'logSignalExits']
 const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']
 const DIVERTED_TEXT_CAP = 400
 const STDOUT_FIXTURES = [
@@ -122,7 +122,7 @@ const runParent = async () => {
         const { inflightDispatchCount } = await import(pathToFileURL(path.join(srcDir, 'dispatch.js')).href)
         const { BUNDLE_VERSION } = await import(pathToFileURL(path.join(srcDir, 'bundle-version.js')).href)
 
-        expect('exports: the module exports exactly the three installers', Object.keys(guard).sort(), [...INSTALLERS].sort())
+        expect('exports: the module exports exactly the installers and the idle exit', Object.keys(guard).sort(), [...INSTALLERS].sort())
         expect('exports: every installer is a function', INSTALLERS.map(name => typeof guard[name]), INSTALLERS.map(() => 'function'))
         expect('import: the dispatch.js inflight counter reads 0 when no dispatch runs', inflightDispatchCount(), 0)
         expect('import: the bundle version is a dotted version string', /^\d+\.\d+\.\d+$/.test(BUNDLE_VERSION), true)
