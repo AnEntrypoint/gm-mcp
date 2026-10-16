@@ -9,6 +9,7 @@ import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { launchedEntryPath, recordSingletonState, waitForHealth } from './singleton.js'
 import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
+import { exitWhenIdle } from './transport-guard.js'
 
 const HANDOVER_READY_TIMEOUT_MS = 30_000
 export const HANDOVER_LISTEN_RETRY_MS = 60_000
@@ -170,6 +171,7 @@ export async function handOverStdioToRefreshedBundle({ transport = null, state =
         appendDiagnostic('bundle-stdio-handover-child-exit', { ...detail, to_pid: child.pid ?? null, code, signal })
         try { process.stdin.unpipe(child.stdin) } catch { }
         if (stdioRelay === child) stdioRelay = null
+        exitWhenIdle('relay-child-exited')
     })
     appendDiagnostic('bundle-stdio-handover', { ...detail, to_pid: child.pid ?? null, entry, relaying: true })
     console.error(`gm-mcp: stdio handed to pid ${child.pid} running ${drift.installed_version ?? 'the installed bundle'} -- this process stays up and relays`)
