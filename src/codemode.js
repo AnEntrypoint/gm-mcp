@@ -5,7 +5,7 @@ import { canonicalToolName, nearestNames } from './verbs.js'
 import { verbDescriptionLead } from './verb-table.js'
 import { verbBodySchema } from './verb-bodies.js'
 import { NOTICES } from './notices.js'
-import { continuedReply } from './continuation.js'
+import { CONTINUATION_RESERVE_CHARS, continuedReply } from './continuation.js'
 
 const PROCESS_CODEMODE_SESSION_ID = `mcp-codemode-${process.pid}-${Date.now()}`
 import { createRequire } from 'node:module'
@@ -298,7 +298,8 @@ export function registerCodeMode(server, tools) {
                 const value = await withCodemodeDeadline(new AsyncFunction('gm', 'console', 'require', args.code)(gm, logger, require), codemodeTimeoutMs())
                 const joined = [...logs, formatValue(value)].filter((line) => line !== '').join('\n')
                 const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
-                return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(joined, cap)) }] }
+                const bodyCap = Math.max(cap - CONTINUATION_RESERVE_CHARS, 1)
+                return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(joined, bodyCap)) }] }
             } catch (error) {
                 const detail = describeError(error)
                 appendDiagnostic('codemode-threw', { error: detail })
