@@ -9,6 +9,7 @@ import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
 import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
+import { CONTINUATION_STOP_VERB, continuedReply, setContinuationStopped } from './continuation.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
@@ -2078,12 +2079,26 @@ export function replyEnvelopeSelfCheck() {
     }
 }
 
+function continuationKeyOf(args) {
+    return explicitBodySessionId(args?.body) || args?.session_id || ''
+}
+
 export async function gmDispatch(args, signal, responseValueObserver) {
+    if (args?.verb === CONTINUATION_STOP_VERB) {
+        const key = continuationKeyOf(args)
+        setContinuationStopped(key, true)
+        return continuedReply(key, yaml.dump({ ok: true, verb: CONTINUATION_STOP_VERB, session_id: key || null }, { lineWidth: 100 }))
+    }
+    if (args?.verb === 'instruction' && typeof args?.body?.prompt === 'string' && args.body.prompt.trim() !== '') {
+        setContinuationStopped(continuationKeyOf(args), false)
+    }
     inflightDispatches += 1
     const startedAtMs = Date.now()
     appendDiagnostic('dispatch-start', { verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
     try {
-        return withStaleBundleNotice(args?.verb, await runDispatch(args, signal, responseValueObserver))
+        const reply = withStaleBundleNotice(args?.verb, await runDispatch(args, signal, responseValueObserver))
+        if (VERBATIM_REPLY_VERBS.has(args?.verb)) return reply
+        return continuedReply(continuationKeyOf(args), reply)
     } catch (error) {
         appendDiagnostic('dispatch-error', { verb: args?.verb ?? null, error: error?.message ? String(error.message) : String(error) })
         throw error
