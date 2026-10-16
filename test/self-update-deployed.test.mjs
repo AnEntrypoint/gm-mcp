@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -371,6 +372,65 @@ await test('no test in this file wrote to the deployed bundle of this machine', 
     const real = readFileSync(REAL_DEPLOYED_PATH, 'utf8')
     assert.ok(real.startsWith('#!/usr/bin/env node'), 'the real deployed bundle is no longer a node bundle')
     assert.ok(/BUNDLE_VERSION\s*=\s*["'][^"']+["']/.test(real), 'the real deployed bundle carries no version any more')
+})
+
+// A stored ETag is only a validator for the copy it came from: a stale edge that still holds that copy
+// answers 304 to it, and the upstream bytes may be newer. The fake upstream here does exactly that.
+async function serveBundleBehindStaleEdge(candidateBytes, staleEtag) {
+    const seen = []
+    const server = createServer((req, res) => {
+        const conditional = req.headers['if-none-match'] ?? null
+        seen.push(conditional)
+        if (conditional === staleEtag) {
+            res.writeHead(304, { etag: staleEtag })
+            res.end()
+            return
+        }
+        res.writeHead(200, { etag: '"fresh-upstream"', 'content-type': 'text/plain; charset=utf-8' })
+        res.end(candidateBytes)
+    })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    return {
+        url: `http://127.0.0.1:${server.address().port}/gm-mcp-server.js`,
+        seen,
+        close: () => new Promise((resolve) => server.close(resolve)),
+    }
+}
+
+await test('a forced check refreshes past a stored ETag that a stale edge answers 304 to', async () => {
+    const s = scenario()
+    const staleEtag = 'W/"stale-edge-copy"'
+    const upstream = await serveBundleBehindStaleEdge(readFileSync(s.candidatePath), staleEtag)
+    try {
+        process.env.GM_MCP_BUNDLE_URL = upstream.url
+        const deployedHash = createHash('sha256').update(readFileSync(s.deployedPath)).digest('hex')
+        writeFileSync(`${s.deployedPath}.fetched.json`, JSON.stringify({ etag: staleEtag, sha: deployedHash }))
+        writeFileSync(stampOf(s.deployedPath), '')
+        const forced = await refreshDeployedBundleNow(s.deployedPath)
+        assert.notEqual(forced.outcome, 'current', 'a stored ETag answered 304 and the forced check reported the bundle current while the upstream bytes differ')
+        assert.equal(forced.outcome, 'refreshed')
+        assert.equal(readFileSync(s.deployedPath, 'utf8'), s.candidateText, 'the forced check did not install the newer upstream bundle')
+    } finally {
+        await upstream.close()
+        s.restore()
+    }
+})
+
+await test('a forced check never sends a conditional request', async () => {
+    const s = scenario()
+    const staleEtag = 'W/"stale-edge-copy"'
+    const upstream = await serveBundleBehindStaleEdge(readFileSync(s.candidatePath), staleEtag)
+    try {
+        process.env.GM_MCP_BUNDLE_URL = upstream.url
+        const deployedHash = createHash('sha256').update(readFileSync(s.deployedPath)).digest('hex')
+        writeFileSync(`${s.deployedPath}.fetched.json`, JSON.stringify({ etag: staleEtag, sha: deployedHash }))
+        writeFileSync(stampOf(s.deployedPath), '')
+        await refreshDeployedBundleNow(s.deployedPath)
+        assert.deepEqual(upstream.seen, [null], `the forced check sent conditional headers: ${JSON.stringify(upstream.seen)}`)
+    } finally {
+        await upstream.close()
+        s.restore()
+    }
 })
 
 console.log(`\n${passed} passed, ${process.exitCode ? 'FAILED' : '0 failed'}`)
