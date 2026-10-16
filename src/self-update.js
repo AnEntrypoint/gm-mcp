@@ -276,7 +276,9 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     const url = process.env.GM_MCP_BUNDLE_URL || DEFAULT_BUNDLE_URL
     const cached = readBundleCache(deployedPath)
     const reuse = cached && cached.sha === deployedHash ? cached : null
-    const fetched = await fetchBundle(url, reuse)
+    // An unconditional check (the on-demand verb) never sends a stored validator: a stale edge that still
+    // holds the copy that validator names answers 304, and that would report the bundle current.
+    const fetched = await fetchBundle(url, options.unconditional ? null : reuse)
     if (fetched.notModified) {
         touch(stampPath)
         return { outcome: 'current', self, hash: deployedHash, not_modified: true }
@@ -307,7 +309,7 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
 // local-build pin, the no-downgrade guard, the loadability check and the inflight-dispatch wait all
 // still hold, and it reloads nothing -- a forced check is the same file swap the hourly tick does.
 export async function refreshDeployedBundleNow(deployedPath = defaultDeployedPath(), options = {}) {
-    const result = await refreshStaleDeployedBundle(deployedPath, { ...options, ignoreStamp: true })
+    const result = await refreshStaleDeployedBundle(deployedPath, { ...options, ignoreStamp: true, unconditional: true })
     const forced = { ...result, forced: true }
     appendDiagnostic('self-update-check', forced)
     return forced
