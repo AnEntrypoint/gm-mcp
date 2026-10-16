@@ -657,4 +657,9 @@ export function tableRow(spelling) {
     return BY_CANONICAL.get(canonicalName(spelling)) ?? null
 }
 
+export function wireVerb(spelling) {
+    const row = tableRow(spelling)
+    return row ? runnerVerb(row) : String(spelling)
+}
+
 export const RUNNER_REGISTRY_VERBS = VERB_TABLE.map(runnerVerb)

@@ -4,7 +4,7 @@ import { gmDispatch, gmResult } from './dispatch.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { RUNNER_REGISTRY_VERBS, editDistance, verbToolName } from './verbs.js'
-import { VERB_TABLE, runnerVerb, tableRow, verbDescriptionLead } from './verb-table.js'
+import { VERB_TABLE, runnerVerb, tableRow, verbDescriptionLead, wireVerb } from './verb-table.js'
 import { registerCodeMode } from './codemode.js'
 import { renderBodyHint, bodyShapeLine } from './verb-bodies.js'
 
@@ -213,7 +213,7 @@ export function createServer() {
                 ...DISPATCH_FIELDS,
             },
         },
-        async (args = {}, extra) => verbDispatch(args?.verb ?? 'unknown', args, extra)
+        async (args = {}, extra) => verbDispatch(wireVerb(args?.verb ?? 'unknown'), args, extra)
     )
 
     for (const row of VERB_TABLE) {
