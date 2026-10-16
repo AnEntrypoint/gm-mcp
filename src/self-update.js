@@ -12,6 +12,8 @@ import { liveRunningImages } from './running-images.js'
 const DEPLOYED_BUNDLE_FILE_NAME = 'gm-mcp-server.mjs'
 const DEFAULT_BUNDLE_URL = 'https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js'
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 1000
+// A stored validator is sent only within this long of the last unconditional fetch (see refreshStaleDeployedBundle).
+const FULL_FETCH_INTERVAL_MS = 10 * 60 * 1000
 const DEFER_RETRY_DELAY_MS = 20_000
 const MAX_DEFER_RETRIES_PER_TRIGGER = 4
 const FETCH_TIMEOUT_MS = 20_000
@@ -178,6 +180,7 @@ export function selfUpdateStatus() {
         frozen_by: noSelfUpdateReason(),
         no_self_update_file: noSelfUpdateFilePath(),
         no_self_update_file_present: existsSync(noSelfUpdateFilePath()),
+        channel_cache: readBundleCache(deployedPath),
         local_build_pin_path: localBuildPinPath(),
         local_build_pin: pin,
     }
@@ -288,18 +291,22 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
 
     const url = process.env.GM_MCP_BUNDLE_URL || DEFAULT_BUNDLE_URL
     const cached = readBundleCache(deployedPath)
-    const reuse = cached && cached.sha === deployedHash ? cached : null
-    // An unconditional check (the on-demand verb) never sends a stored validator: a stale edge that still
-    // holds the copy that validator names answers 304, and that would report the bundle current.
-    const fetched = await fetchBundle(url, options.unconditional ? null : reuse)
+    // A stored validator is sent only within FULL_FETCH_INTERVAL_MS of the last unconditional fetch. A 304 can
+    // come from a stale edge that still holds the copy the validator names, so the unconditional fetch bounds
+    // how long such an edge can keep a changed bundle looking current. The on-demand verb is always unconditional.
+    const fullDue = options.unconditional === true || !cached || cached.sha !== deployedHash ||
+        Date.now() - (cached.full_at || 0) >= FULL_FETCH_INTERVAL_MS
+    const fetched = await fetchBundle(url, fullDue ? null : cached)
+    const fullAt = fullDue ? Date.now() : cached.full_at
     if (fetched.notModified) {
+        writeBundleCache(deployedPath, { etag: fetched.etag, sha: deployedHash, full_at: fullAt, checked_at: Date.now(), outcome: 'not_modified' })
         touch(stampPath)
         return { outcome: 'current', self, hash: deployedHash, not_modified: true }
     }
     const freshBytes = fetched.bytes
     const freshHash = sha256(freshBytes)
     if (freshHash === deployedHash) {
-        writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash })
+        writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash, full_at: fullAt, checked_at: Date.now(), outcome: 'current' })
         touch(stampPath)
         return { outcome: 'current', self, hash: freshHash }
     }
@@ -312,7 +319,7 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     if (dispatchesInflight > 0) return { outcome: 'deferred-dispatch-inflight', self, dispatches_inflight: dispatchesInflight }
 
     replaceDeployedBundle(deployedPath, freshBytes)
-    writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash })
+    writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash, full_at: fullAt, checked_at: Date.now(), outcome: 'refreshed' })
     touch(stampPath)
     return { outcome: 'refreshed', self, from: deployedHash, to: freshHash, url, deployed_bundle: deployedPath, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
 }
