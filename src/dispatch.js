@@ -366,6 +366,30 @@ function shapeGitStatusReply(verb, body, out) {
     return out
 }
 
+export function shapeGitDiffReply(verb, body, out) {
+    if (verb !== 'git_diff' || !isPlainObject(out) || typeof out.diff !== 'string') return out
+    const limit = Number(body?.limit)
+    if (body?.limit === undefined || !Number.isInteger(limit) || limit < 0) return out
+    const lines = out.diff.split('\n')
+    const hasPatch = lines.some((line) => line.startsWith('diff --git '))
+    if (!hasPatch) {
+        const rows = lines.filter((line) => / \| /.test(line))
+        if (rows.length <= limit) return out
+        const kept = new Set(rows.slice(0, limit))
+        return { ...out, diff: lines.filter((line) => !/ \| /.test(line) || kept.has(line)).join('\n'), files_omitted: rows.length - limit }
+    }
+    const sections = out.diff.split(/^(?=diff --git )/m)
+    const files = sections.filter((section) => section.startsWith('diff --git ')).length
+    if (files <= limit) return out
+    let seen = 0
+    const kept = sections.filter((section) => {
+        if (!section.startsWith('diff --git ')) return true
+        seen += 1
+        return seen <= limit
+    })
+    return { ...out, diff: kept.join(''), files_omitted: files - limit }
+}
+
 function withCheckoutCreateHint(verb, body, out) {
     if (verb !== 'git_checkout' || body?.create !== true || !out || typeof out !== 'object' || out.ok !== false) return out
     const branch = typeof body.ref === 'string' ? body.ref : ''
@@ -2218,7 +2242,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
-            out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, out))
+            out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, out)))
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs))
             else out = withDispatchWait(out, Date.now() - callStartedAtMs)
