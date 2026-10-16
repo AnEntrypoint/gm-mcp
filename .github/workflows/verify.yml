@@ -25,9 +25,9 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - name: checkout with full history for the version-bump guard
+        uses: actions/checkout@v4
         with:
-          # the version-bump guard diffs the pushed range, so it needs more than the head commit
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:

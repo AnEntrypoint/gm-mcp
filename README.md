@@ -45,14 +45,20 @@ trips Claude Code's 30s connect timeout under load.
 
 ### Self-updating deployed copy
 
-A bundle running from `~/.gm-tools/gm-mcp-server.mjs` (or `$GM_TOOLS_DIR`) checks
-itself against `bin/gm-mcp-server.js` on `main` in the background after it
-connects, at most once per hour. On a sha256 mismatch it validates the fresh
+Any running copy checks the deployed `~/.gm-tools/gm-mcp-server.mjs` (or
+`$GM_TOOLS_DIR`) against `bin/gm-mcp-server.js` on `main` in the background
+after it connects, at most once per hour — not only a process started from that
+file, so a server launched from a repo build keeps the deployment current
+instead of leaving it behind upstream. A process that refreshed a deployment it
+is not does not hand its own transport over to it; only the deployed copy's own
+process reloads into what it installed. On a sha256 mismatch it validates the fresh
 bundle (size, shebang, `node --check`), keeps the old one as
 `gm-mcp-server.mjs.prev`, atomically swaps the new one in, and prints one
 stderr line (`deployed bundle was stale -- refreshed <old> -> <new> ...`); the
 refreshed tool schema is served from the next connect, or sooner when the transport hands over in-process (see gm-mcp/AGENTS.md "Bundle drift and handover"). A failed check keeps the
 deployed copy and prints one line. Env: `GM_MCP_SELF_UPDATE=0` disables,
+`GM_MCP_SELF_UPDATE_DEPLOYED_ONLY` set to anything but `0`/`false`/`no`/`off`
+limits refreshing to the deployed copy's own process,
 `GM_MCP_BUNDLE_URL` (http(s) or `file:`) overrides the source,
 `GM_MCP_SELF_UPDATE_INTERVAL_MS` overrides the throttle. A bundle from before
 this feature cannot update itself: run `npx github:AnEntrypoint/gm --mcp-only`
@@ -75,6 +81,13 @@ guards stand between the channel and the deployed file:
 - **No downgrade.** The candidate's version (its `BUNDLE_VERSION` assignment)
   must be strictly greater than the installed one; equal or older is refused,
   and so is a candidate whose version cannot be read at all.
+
+The check runs on an hourly tick that defers while `<deployed bundle>.checked`
+is fresher than `GM_MCP_SELF_UPDATE_INTERVAL_MS` (default one hour), so a fix
+pushed upstream reaches this machine up to an hour later. `gm-mcp
+self-update-now` runs the same check at once, skipping only that stamp: it
+starts no server, binds no port, signals nothing and never hands this process
+over to the bundle it installs, and every guard above still stands.
 
 Every refusal goes to stderr with its reason (`refusing deployed bundle
 self-update (<code>) -- <reason>`), so it lands in the daemon log instead of
@@ -213,10 +226,14 @@ node C:\Users\user\.gm-tools\gm-mcp-server.mjs http-status          # is it answ
 node C:\Users\user\.gm-tools\gm-mcp-server.mjs --http --port 8787   # run it in the foreground
 ```
 
-Every entry point seeds it: a stdio server, an HTTP server started on another
-port and a `dispatch` run all health-probe the port and spawn the shared server
-detached when nothing answers, so the durable transport is up before any client
-asks for it and comes back by itself after a crash. `GM_MCP_NO_HTTP_SINGLETON=1`
+Every stdio start is a relay: it forwards each MCP frame to the shared server
+over HTTP and writes the reply to stdout, and starts no watchers of its own. A
+stdio start, an HTTP server started on another port and a `dispatch` run all
+health-probe the port and spawn the shared server detached when nothing answers
+(one spawner per port, see `claimSpawn` in `gm-mcp/AGENTS.md`), so the durable
+transport is up before any client asks for it and comes back by itself after a
+crash. A stdio start runs a local server with its watchers only when the
+singleton is opted out or unreachable. `GM_MCP_NO_HTTP_SINGLETON=1`
 (or `GM_MCP_NO_HTTP_SINGLETON=1`) opts out, `GM_MCP_HTTP_PORT` moves the port.
 Because no state is carried between requests, a restart of the HTTP server
 never loses an in-flight dispatch.
@@ -287,6 +304,83 @@ health probe is the authority). `--hook`, `--cron-file`, `--log` and `--entry`
 move the targets; `--no-hook` or `--no-cron` skips one. The crontab it installs
 carries a `@reboot` entry and a five-minute entry, so a server that dies between
 invocations is back within five minutes even when nothing else runs gm.
+
+## Leak watch: gm defends itself at runtime
+
+No CI job can see what is running on a developer machine, so the runtime is the
+only place a process leak can be caught. Every server runs one leak pass on the
+hourly scheduler it already had (`scheduleStaleDeployedBundleChecks`) and once at
+startup, sharing a single host process-table read across the census, the reaper's
+unattributed pass and the duplicate-supervisor count:
+
+```bash
+gm-mcp-server.js leak-watch            # the same pass, by hand
+gm-mcp-server.js leak-watch --json     # the whole report
+gm-mcp-server.js reap --apply          # retire what the pass reports
+```
+
+A pass that finds nothing prints nothing. A pass that finds something writes a
+`leak-watch` diagnostic and one stderr line naming the counts:
+
+```
+gm-mcp: leak watch -- 27 gm-mcp process(es) on this host (warn at 8); 19 server(s), 8 supervisor(s); 27 unattributed, 24 retireable; 2 duplicate supervisor(s) -- ABOVE the population warning threshold
+```
+
+**The population warning is the early signal.** `gm_processes` counts every
+`gm-mcp-server` process alive on the host — servers and supervisors — and
+`above_warn` trips at `GM_MCP_LEAK_POPULATION_WARN` (default `8`), long before
+the count becomes memory pressure. It is a warning, never a kill: nothing is
+refused a start.
+
+**Retiring is opt-in and narrower than the reaper's own `retire` verdict.** By
+default the pass reports and stops. `GM_MCP_LEAK_AUTO_APPLY=1` lets it signal,
+and then only an unattributed **stdio** server that is also:
+
+- not the pid answering `/health` and not the owner of a registered port's
+  listening socket — one shared HTTP server carries every session on the box;
+- free of any live MCP-client ancestor (`claude`, `code`, `cursor`, ...), so a
+  server a session is driving is never touched;
+- free of any live desktop-session ancestor (`selkies`, `xfdesktop`,
+  `xfce4-session`, `s6-svscan`, `Xvfb`, ...) — those look exactly like multi-day
+  orphans and are the live session;
+- of a **measured** start time at least 30 minutes old, and at most 3 per pass.
+
+A process whose ancestry or age cannot be read is never signalled: an unmeasured
+value is never read as "old". Duplicate `http-supervise --port <N>` supervisors
+are counted and reported; retiring them stays with the supervisor sweep
+(`GM_MCP_HTTP_SUPERVISOR_DUPE_REAP`).
+
+**Orphans are the leaks the ledger cannot see.** The reaper assesses only pids
+the child ledger knows, so a process gm never spawned piles up invisibly — 11
+reparented runners held 3367 MB of a 7.8 GB box on 2026-10-15 without one line
+from the watch. The same pass now also scans for processes whose `ppid` is `1`
+(reparented to init), that no ledger row claims, that are **heavyweight** (RSS at
+or above `GM_MCP_LEAK_ORPHAN_RSS_MB`, default 150 MB) and **idle** — CPU seconds
+burned divided by seconds alive below `GM_MCP_LEAK_ORPHAN_DUTY` (default `0.02`)
+— after `GM_MCP_LEAK_ORPHAN_MIN_AGE_MS` (default 900000 ms, 15 minutes) alive.
+The duty ratio is the discriminator: the 11 real leaks sat near 0.01 while the
+one live run of the same binary was still burning CPU.
+
+```
+  ORPHAN pid 1860399 -- 292.1 MB RSS, 791s alive, 15.5s cpu (duty 0.0196) -- target/debug/litebox_runner_linux_userland -Z --uid 0 ...
+```
+
+An orphan is reported, never signalled: gm did not spawn it, so gm does not
+classify whether it may be killed. Detection reads `/proc/<pid>/stat` and
+`/proc/<pid>/status` directly — a `ps` on a box loaded enough to grow orphans
+can take over 120 s and time out, which is exactly the box this scan exists to
+diagnose — so on mac and Windows, which have no `/proc`, the section is simply
+empty rather than wrongly quiet about a number it never measured.
+
+| Env var | Effect | Default |
+|---|---|---|
+| `GM_MCP_LEAK_WATCH` | `0`/`false`/`no`/`off` disables the hourly pass | unset (on) |
+| `GM_MCP_LEAK_POPULATION_WARN` | process count at which the pass goes loud | `8` |
+| `GM_MCP_LEAK_AUTO_APPLY` | any value but `0`/`false`/`no`/`off` arms auto-retire | unset (report only) |
+| `GM_MCP_LEAK_ORPHANS` | `0`/`false`/`no`/`off` disables the orphan scan | unset (on) |
+| `GM_MCP_LEAK_ORPHAN_RSS_MB` | RSS floor at which a reparented process is heavyweight | `150` |
+| `GM_MCP_LEAK_ORPHAN_DUTY` | CPU-seconds-per-second-alive below which it counts as idle | `0.02` |
+| `GM_MCP_LEAK_ORPHAN_MIN_AGE_MS` | age floor, so a starting process is never reported | `900000` |
 
 ## Development
 
@@ -410,6 +504,7 @@ pointer. They are read once at server start, so a host must restart its
 | `GM_MCP_STDOUT_INLINE_MAX` | the whole response of a plain-text-body verb (`exec_js` and every language stem it backs) | `32768` | `1048576` |
 | `GM_MCP_FILE_READ_INLINE_MAX` | the file body `fs_read` returns | `65536` | `1048576` |
 | `GM_MCP_NO_SELF_UPDATE` | any value but `0`/`false`/`no`/`off` freezes the deployed bundle against every self-update | unset | -- |
+| `GM_MCP_SELF_UPDATE_DEPLOYED_ONLY` | any value but `0`/`false`/`no`/`off` limits self-update to a process running from the deployed bundle | unset | -- |
 
 The `fs_read` budget exists because that response *is* the file the caller
 asked for: at the 400-char prose cap every whole-file read came back as a
