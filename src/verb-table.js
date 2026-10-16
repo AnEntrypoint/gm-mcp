@@ -88,7 +88,7 @@ const GIT_SCOPED_TYPES = {
     },
     git_diff: {
         range: z.string(), ref: z.string(), rev: z.string(),
-        staged: z.boolean(), stat: z.boolean(),
+        staged: z.boolean(), stat: z.boolean(), limit: z.number(),
         path: GIT_PATHSPEC, paths: GIT_PATHSPEC, files: GIT_PATHSPEC,
     },
     git_revert: { ref: z.string(), paths: z.array(z.string()) },
