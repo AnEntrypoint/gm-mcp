@@ -608,7 +608,6 @@ const REGISTRY_ROWS = [
     { canonical: 'grep', body: GREP_BODY },
     { canonical: 'ci_status', hyphen: true },
     { canonical: 'ci_log', hyphen: true, body: CI_LOG_BODY },
-    { canonical: 'prd_status', hyphen: true },
     { canonical: 'prd_block', hyphen: true },
     { canonical: 'pool_brief', hyphen: true },
     { canonical: 'pool_observe', hyphen: true, body: POOL_OBSERVE_BODY },
