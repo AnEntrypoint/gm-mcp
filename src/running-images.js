@@ -1,6 +1,7 @@
 import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { agentplugDir } from './paths.js'
+import { readProcessTable } from './process-table.js'
 
 const IMAGE_DIR_NAME = 'gm-mcp-images'
 
@@ -38,6 +39,25 @@ export function recordRunningImage(role, image) {
     } catch {
         return null
     }
+}
+
+const BUNDLE_PROCESS_COMMAND = /^(\S*[\\/])?node(\.exe)?\s.*gm-mcp-server\.m?js(\s|$)/
+const BUNDLE_LAUNCHER_COMMAND = /(^|[\\/\s])node(\.exe)?\s+-e\s/
+
+// Live gm-mcp bundle processes that wrote no image record (launched by a bundle that predates the record, or
+// whose record write failed). Their image is unknown, so they are reported with stale 'unknown', never false.
+export function unrecordedBundleProcesses(recordedPids) {
+    return readProcessTable()
+        .filter((row) => row.pid !== process.pid && !recordedPids.has(row.pid))
+        .filter((row) => BUNDLE_PROCESS_COMMAND.test(row.command) && !BUNDLE_LAUNCHER_COMMAND.test(row.command))
+        .map((row) => ({
+            pid: row.pid,
+            role: 'unrecorded',
+            version: null,
+            sha256: null,
+            started_at: row.started_at === null ? null : new Date(row.started_at).toISOString(),
+            stale: 'unknown',
+        }))
 }
 
 // Lists the records of processes that are still alive and deletes the records of processes that are not.
