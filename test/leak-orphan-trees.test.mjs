@@ -99,9 +99,10 @@ await test('the depth bound stops a chain at 16 levels and says it was truncated
 })
 
 await test('the depth bound does not claim truncation when the chain ends inside it', () => {
-    const table = [orphanRoot(9050)]
-    const ppidMap = new Map([[9050, 1], [9051, 9050], [9052, 9051]])
-    const found = findTrees({ table, ppidMap, readProc: procsOf({ 9050: HEAVY }) })
+    const base = process.pid + 1000
+    const table = [orphanRoot(base)]
+    const ppidMap = new Map([[base, 1], [base + 1, base], [base + 2, base + 1]])
+    const found = findTrees({ table, ppidMap, readProc: procsOf({ [base]: HEAVY }) })
     assert.equal(found.trees[0].member_count, 2)
     assert.equal(found.trees[0].truncated, null)
 })
