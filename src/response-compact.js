@@ -134,6 +134,38 @@ export function withSearchIncompleteness(out) {
     }
 }
 
+function codesearchIncompleteReasons(out) {
+    const data = out.data && typeof out.data === 'object' && !Array.isArray(out.data) ? out.data : {}
+    const reasons = []
+    if (out.ok === false || out.error !== undefined || data.error !== undefined) reasons.push('error')
+    if (searchScopeSize(data) === 0 || searchScopeSize(out) === 0) reasons.push('searched_zero_files')
+    for (const source of [out, data]) {
+        reasons.push(...incompleteScanReasons(source))
+        if (source.truncated === true) reasons.push('truncated')
+        if (Number.isFinite(source.dropped) && source.dropped > 0) reasons.push(`dropped:${source.dropped}`)
+        if (Array.isArray(source.skipped_files) && source.skipped_files.length > 0) reasons.push('skipped_files')
+        for (const [key, value] of Object.entries(source)) {
+            if (key.startsWith('files_skipped') && Number.isFinite(value) && value > 0) reasons.push(`${key}:${value}`)
+        }
+    }
+    return [...new Set(reasons)]
+}
+
+export const CODESEARCH_COMPLETE_KEY = 'complete'
+
+export const CODESEARCH_COMPLETE_REASON_KEY = 'complete_reason'
+
+export function withCodesearchCompleteness(verb, out) {
+    if (verb !== 'codesearch' || !out || typeof out !== 'object' || Array.isArray(out)) return out
+    const reasons = codesearchIncompleteReasons(out)
+    if (!reasons.length) return { ...out, [CODESEARCH_COMPLETE_KEY]: true }
+    return {
+        ...out,
+        [CODESEARCH_COMPLETE_KEY]: false,
+        [CODESEARCH_COMPLETE_REASON_KEY]: reasons.join(', '),
+    }
+}
+
 const SEARCH_PROSE_NOTICE_KEYS = new Map([
     ['query_note', 'query_regex'],
     ['exhaustive_note', 'exhaustive_scope'],
