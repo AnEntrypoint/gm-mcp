@@ -11,6 +11,9 @@ import { liveRunningImages } from './running-images.js'
 
 const DEPLOYED_BUNDLE_FILE_NAME = 'gm-mcp-server.mjs'
 const DEFAULT_BUNDLE_URL = 'https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js'
+const HEAD_PROBE_URL = 'https://api.github.com/repos/AnEntrypoint/gm-mcp/commits/main'
+const commitBundleUrl = (sha) => `https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/${sha}/bin/gm-mcp-server.js`
+const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 1000
 // A stored validator is sent only within this long of the last unconditional fetch (see refreshStaleDeployedBundle).
 const FULL_FETCH_INTERVAL_MS = 10 * 60 * 1000
@@ -246,6 +249,29 @@ async function fetchBundle(url, cached) {
     return { bytes: Buffer.from(await response.arrayBuffer()), etag: response.headers.get('etag'), notModified: false }
 }
 
+// The API probe is the freshness signal: a 304 on the stored validator means the main tip is unchanged and costs no
+// body; a 200 names the tip sha, which the bundle is then fetched by (commit-addressed URLs are immutable).
+async function probeHead(cached) {
+    const headers = { accept: 'application/vnd.github+json', 'user-agent': 'gm-mcp-self-update' }
+    const validated = Boolean(cached?.api_etag && cached?.commit_sha)
+    if (validated) headers['if-none-match'] = cached.api_etag
+    const response = await fetch(HEAD_PROBE_URL, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
+    if (response.status === 304 && validated) return { notModified: true, sha: cached.commit_sha, etag: cached.api_etag }
+    if (!response.ok) throw new Error(`HTTP ${response.status} from ${HEAD_PROBE_URL}`)
+    const head = await response.json()
+    if (typeof head?.sha !== 'string' || !COMMIT_SHA_PATTERN.test(head.sha)) throw new Error('commits API reply names no head sha')
+    return { notModified: false, sha: head.sha, etag: response.headers.get('etag') }
+}
+
+async function probeHeadOrNull(cached) {
+    try {
+        return await probeHead(cached)
+    } catch (error) {
+        appendDiagnostic('self-update-probe-failed', { error: describeError(error) })
+        return null
+    }
+}
+
 function assertLoadableBundle(bytes, candidatePath) {
     if (bytes.length < MIN_PLAUSIBLE_BUNDLE_BYTES) throw new Error(`candidate bundle is only ${bytes.length} bytes`)
     if (!bytes.subarray(0, BUNDLE_SHEBANG.length).toString('utf8').startsWith(BUNDLE_SHEBANG)) throw new Error('candidate bundle has no node shebang')
@@ -291,22 +317,36 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
 
     const url = process.env.GM_MCP_BUNDLE_URL || DEFAULT_BUNDLE_URL
     const cached = readBundleCache(deployedPath)
-    // A stored validator is sent only within FULL_FETCH_INTERVAL_MS of the last unconditional fetch. A 304 can
-    // come from a stale edge that still holds the copy the validator names, so the unconditional fetch bounds
-    // how long such an edge can keep a changed bundle looking current. The on-demand verb is always unconditional.
-    const fullDue = options.unconditional === true || !cached || cached.sha !== deployedHash ||
-        Date.now() - (cached.full_at || 0) >= FULL_FETCH_INTERVAL_MS
-    const fetched = await fetchBundle(url, fullDue ? null : cached)
-    const fullAt = fullDue ? Date.now() : cached.full_at
-    if (fetched.notModified) {
-        writeBundleCache(deployedPath, { etag: fetched.etag, sha: deployedHash, full_at: fullAt, checked_at: Date.now(), outcome: 'not_modified' })
+    const head = url === DEFAULT_BUNDLE_URL ? await probeHeadOrNull(options.unconditional === true ? null : cached) : null
+    if (head?.notModified && cached.sha === deployedHash) {
+        writeBundleCache(deployedPath, { ...cached, checked_at: Date.now(), outcome: 'not_modified' })
         touch(stampPath)
-        return { outcome: 'current', self, hash: deployedHash, not_modified: true }
+        return { outcome: 'current', self, hash: deployedHash, not_modified: true, probe: 'api' }
+    }
+    let fetched
+    let fullAt = cached?.full_at || 0
+    // A null commit_sha and api_etag make the next probe unconditional, so a fallback fetch never leaves a validator behind.
+    let record = { commit_sha: null, api_etag: null }
+    if (head) {
+        fetched = await fetchBundle(commitBundleUrl(head.sha), null)
+        record = { commit_sha: head.sha, api_etag: head.etag }
+    } else {
+        // Fallback when the API probe fails: the raw-main fetch, with its unconditional full fetch at FULL_FETCH_INTERVAL_MS.
+        const fullDue = options.unconditional === true || !cached || cached.sha !== deployedHash ||
+            Date.now() - (cached.full_at || 0) >= FULL_FETCH_INTERVAL_MS
+        fetched = await fetchBundle(url, fullDue ? null : cached)
+        fullAt = fullDue ? Date.now() : cached.full_at
+    }
+    const fetchedFrom = head ? commitBundleUrl(head.sha) : url
+    if (fetched.notModified) {
+        writeBundleCache(deployedPath, { etag: fetched.etag, sha: deployedHash, full_at: fullAt, checked_at: Date.now(), outcome: 'not_modified', ...record })
+        touch(stampPath)
+        return { outcome: 'current', self, hash: deployedHash, not_modified: true, probe: head ? 'api' : 'raw' }
     }
     const freshBytes = fetched.bytes
     const freshHash = sha256(freshBytes)
     if (freshHash === deployedHash) {
-        writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash, full_at: fullAt, checked_at: Date.now(), outcome: 'current' })
+        writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash, full_at: fullAt, checked_at: Date.now(), outcome: 'current', ...record })
         touch(stampPath)
         return { outcome: 'current', self, hash: freshHash }
     }
@@ -319,9 +359,9 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     if (dispatchesInflight > 0) return { outcome: 'deferred-dispatch-inflight', self, dispatches_inflight: dispatchesInflight }
 
     replaceDeployedBundle(deployedPath, freshBytes)
-    writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash, full_at: fullAt, checked_at: Date.now(), outcome: 'refreshed' })
+    writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash, full_at: fullAt, checked_at: Date.now(), outcome: 'refreshed', ...record })
     touch(stampPath)
-    return { outcome: 'refreshed', self, from: deployedHash, to: freshHash, url, deployed_bundle: deployedPath, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
+    return { outcome: 'refreshed', self, from: deployedHash, to: freshHash, url: fetchedFrom, probe: head ? 'api' : 'raw', deployed_bundle: deployedPath, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
 }
 
 // A fix pushed upstream reaches a running server within one check interval. An operator (or an agent
