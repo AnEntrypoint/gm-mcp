@@ -6,7 +6,7 @@ import { BUNDLE_VERSION } from './bundle-version.js'
 import { inflightDispatchCount } from './dispatch.js'
 import { DEFAULT_HOST, DEFAULT_PORT } from './http-transport.js'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
-import { launchedEntryPath, recordSingletonState, waitForHealth } from './singleton.js'
+import { recordSingletonState, serverEntryPath, waitForHealth } from './singleton.js'
 import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
 
@@ -154,7 +154,7 @@ export async function handOverToRefreshedBundle({ host = DEFAULT_HOST, port = DE
     console.error(bundleStalenessNotice(drift) ?? `gm-mcp: handing port ${port} to the installed bundle`)
     appendDiagnostic('bundle-handover-start', detail)
 
-    const entry = launchedEntryPath()
+    const entry = serverEntryPath()
     const { stdio, fd } = childStdio()
     let child = null
     try {
