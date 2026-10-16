@@ -449,6 +449,15 @@ both take the same dispatch path. The registry list lives in `src/verbs.js`
 (`RUNNER_REGISTRY_VERBS`). A client holding a cached `tools/list` from an earlier
 build must re-fetch it.
 
+A code body runs under a deadline of `GM_CODEMODE_TIMEOUT_MS` milliseconds (default
+`600000`; a non-positive or non-numeric value falls back to the default). A body that
+awaits a gm call that never returns, or a loop of calls that outlives the budget, fails
+with `gm_codemode code did not finish within <ms> ms`; calls already dispatched keep running
+in the spool and can be resumed with `resume_task`. The deadline cannot interrupt a
+synchronous loop in the body (`while (true) {}`): the body runs on the server's single
+thread, so that loop blocks every request until the process is killed. A body must bound
+its own synchronous work.
+
 ## Wire compaction
 
 Every dispatch response is compacted before it crosses the wire; nothing is
