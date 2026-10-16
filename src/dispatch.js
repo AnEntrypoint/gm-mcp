@@ -12,7 +12,7 @@ import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { tableRow } from './verb-table.js'
-import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withCodesearchCompleteness, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
 
 let inflightDispatches = 0
 
@@ -2220,6 +2220,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 const collides = Object.keys(data).some(k => k in rest)
                 if (!collides) out = { ...rest, ...data }
             }
+            out = withCodesearchCompleteness(verb, out)
             if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
             if (ownerTransport && ownerTransport !== 'header-v1' && out && typeof out === 'object' && !Array.isArray(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
