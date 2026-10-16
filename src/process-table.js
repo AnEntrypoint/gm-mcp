@@ -22,7 +22,7 @@ const WINDOWS_SCRIPT = [
     '  $line = ($_.CommandLine -replace "[\\r\\n\\t]+", " ")',
     '  Write-Output ($_.ProcessId.ToString() + "|" + $_.ParentProcessId.ToString() + "|" + [string]$_.CreationDate + "|" + $line)',
     '}',
-].join(' ')
+].join('\n')
 const WINDOWS_ENCODED_SCRIPT = Buffer.from(WINDOWS_SCRIPT, 'utf16le').toString('base64')
 
 let lastError = null
