@@ -1,28 +1,27 @@
 #!/usr/bin/env node
-// Bisect oracle over gm-mcp/src, for git bisect run (run from the gm-mcp checkout):
-//   git bisect run node scripts/src-bisect-oracle.mjs
-// Exit 0 = good: every src/*.js parses and src/cli.js bundles, with the BUNDLE_VERSION banner.
-// Exit 1 = bad: a syntax error, an unresolved import, or a missing or mismatched banner version.
-// Exit 125 = skip: esbuild is not installed, so this commit cannot be judged (git bisect convention).
-// The last line is always RESULT: GOOD, RESULT: BAD or RESULT: SKIP with its cause.
 import { execFileSync } from 'node:child_process'
 import { readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+export const USAGE = 'git bisect run node scripts/src-bisect-oracle.mjs'
+const EXIT_GOOD = 0
+const EXIT_BAD = 1
+const EXIT_SKIP = 125
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const srcDir = path.join(repoRoot, 'src')
 
 const bad = (cause) => {
     console.log(`RESULT: BAD (${cause})`)
-    process.exit(1)
+    process.exit(EXIT_BAD)
 }
 
 try {
     await import('esbuild')
 } catch (err) {
     console.log(`RESULT: SKIP esbuild not loadable from ${repoRoot} (${err.code || err.message}); run npm install there`)
-    process.exit(125)
+    process.exit(EXIT_SKIP)
 }
 
 for (const name of readdirSync(srcDir).filter((file) => file.endsWith('.js'))) {
@@ -54,4 +53,4 @@ if (parseBundleVersion(fresh) !== BUNDLE_VERSION) {
 }
 
 console.log(`RESULT: GOOD (src/ parses and bundles at BUNDLE_VERSION ${BUNDLE_VERSION}, ${fresh.length} bytes)`)
-process.exit(0)
+process.exit(EXIT_GOOD)

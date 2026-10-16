@@ -35,7 +35,8 @@ test('a defaulted codesearch reply reports shown and a hint only when matches we
 })
 
 async function withBundle(fn) {
-    const transport = new StdioClientTransport({ command: process.execPath, args: [BUNDLE], stderr: 'pipe' })
+    const env = { ...process.env, GM_MCP_NO_HTTP_SINGLETON: '1' }
+    const transport = new StdioClientTransport({ command: process.execPath, args: [BUNDLE], env, stderr: 'pipe' })
     const client = new Client({ name: 'gm-mcp-list-cap-test', version: '0.0.0' })
     try {
         await client.connect(transport)
