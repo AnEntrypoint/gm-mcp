@@ -29,7 +29,6 @@ export function portListenerState(port) {
     }
 }
 
-// Linux hosts without lsof: ss names the listener's pid in its users:(("name",pid=N,fd=M)) column.
 function ssListenerState(wanted) {
     try {
         const text = execFileSync('ss', ['-H', '-ltnp', `sport = :${wanted}`], { encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'] })

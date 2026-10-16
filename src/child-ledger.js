@@ -2,6 +2,7 @@ import { appendFileSync, closeSync, mkdirSync, openSync, readSync, renameSync, r
 import path from 'node:path'
 
 import { agentplugDir, spoolDirOf } from './paths.js'
+import { ageMsSince } from './timestamp.js'
 
 export const LEDGER_NAME = '.child-pids.jsonl'
 const GLOBAL_LEDGER_NAME = 'gm-child-pids.jsonl'
@@ -137,7 +138,7 @@ export function attributePid(pid, { root = null } = {}) {
         root: latest.root ?? null,
         recorded_ppid: Number.isInteger(Number(latest.ppid)) ? Number(latest.ppid) : null,
         recorded_at: latest.ts ?? null,
-        recorded_age_ms: Number.isFinite(Number(latest.ts)) ? Date.now() - Number(latest.ts) : null,
+        recorded_age_ms: ageMsSince(latest.ts),
         writer: latest.writer ?? null,
         ledger: latest.ledger ?? null,
         record_count: rows.length,

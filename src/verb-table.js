@@ -1,14 +1,5 @@
 import { z } from 'zod'
 
-// The single table of gm verbs. Every verb-facing value is derived from these rows:
-//   canonical   the tool and lookup spelling, underscores only (fs_read, prd_add)
-//   hyphen      true when the runner's own verb name is hyphenated (prd-add, memorize-prune)
-//   aliases     top-level keys folded into body when a caller sends them beside body
-//   fields      zod shape of those top-level keys, merged into the tool's input schema
-//   description extra prose appended to the tool description
-//   body        declared body schema (required and fields); absent when the runner's body is undeclared
-// The runner receives the hyphen spelling only through runnerVerb(), the one boundary conversion.
-
 const numberLike = z.union([z.number(), z.string()])
 const booleanLike = z.union([z.boolean(), z.string()])
 const pathspec = z.union([z.string(), z.array(z.string())])
@@ -177,7 +168,10 @@ const PRD_ADD_BODY = {
     required: [],
     fields: {
         id: { type: 'string', aliases: ['prd_id', 'slug'], description: 'Row id. Absent, it is slugged from subject, title, name, task, goal, description or notes. A row id is a claim until prd-list with that id resolves it.' },
-        subject: { type: 'string', description: 'What the row asserts.' },
+        subject: { type: 'string', description: 'What the row asserts. Persisted verbatim, so the accepted subject spellings (title, name, task, goal, description, notes) land on the row as written.' },
+        description: { type: 'string', description: 'Long-form row prose: what the row asserts and why. Persisted on the row and served by prd-list and {"prd_full_detail":true}.' },
+        acceptance_criteria: { type: 'string', description: 'What closes the row. Persisted on the row and served by prd-list and {"prd_full_detail":true}.' },
+        witness_plan: { type: 'string', description: 'The observation that would close the row. Persisted on the row and served by prd-list and {"prd_full_detail":true}.' },
         status: { type: 'string', enum: ['pending', 'ready', 'completed', 'blocked'], description: 'Row status; defaults to pending.' },
         blockedBy: { type: 'array', description: 'Row ids this row waits on.' },
         overwrite: { type: 'boolean', description: 'Rescopes an existing row; refused when that row is closed.' },
@@ -259,6 +253,13 @@ const CODESEARCH_BODY = {
         docs: { type: 'boolean', description: 'Documentation scan; must be a boolean.' },
         refresh: { type: 'boolean', aliases: ['no_cache', 'force_disk'], description: 'Bypasses the cache.' },
         no_ignore: { type: 'boolean', aliases: ['include_ignored', 'exhaustive'], description: 'Includes ignored paths.' },
+    },
+}
+const GREP_BODY = {
+    required: CODESEARCH_BODY.required,
+    fields: {
+        ...CODESEARCH_BODY.fields,
+        output_mode: { type: 'string', aliases: ['outputMode'], enum: ['content', 'files_with_matches', 'count'], description: 'grep output shape: "content" (default) is path:line: text per hit, "files_with_matches" each matching path once, "count" path:count.' },
     },
 }
 const FS_READ_BODY = {
@@ -484,8 +485,7 @@ const WEBSEARCH_BODY = {
     },
 }
 
-// One row per registry verb, in the runner's registry order.
-const ROWS = [
+const REGISTRY_ROWS = [
     { canonical: 'fs_read', aliases: FS_READ_RANGE_ALIASES, fields: FS_READ_RANGE_FIELDS, description: FS_READ_DESCRIPTION, body: FS_READ_BODY },
     { canonical: 'fs_write', body: FS_WRITE_BODY },
     { canonical: 'fs_readdir', description: FS_READ_PATH_RULE, body: FS_READDIR_BODY },
@@ -623,7 +623,7 @@ const ROWS = [
     { canonical: 'callers', body: CODEINSIGHT_BODY },
     { canonical: 'callees', body: CODEINSIGHT_BODY },
     { canonical: 'impact', body: CODEINSIGHT_BODY },
-    { canonical: 'grep', body: CODESEARCH_BODY },
+    { canonical: 'grep', body: GREP_BODY },
     { canonical: 'ci_status', hyphen: true },
     { canonical: 'ci_log', hyphen: true, body: CI_LOG_BODY },
     { canonical: 'prd_status', hyphen: true },
@@ -651,8 +651,7 @@ const ROWS = [
     { canonical: 'ps1' },
 ]
 
-// Normalised rows: every key present, defaults filled in.
-export const VERB_TABLE = ROWS.map((row) => ({
+export const VERB_TABLE = REGISTRY_ROWS.map((row) => ({
     canonical: row.canonical,
     hyphen: row.hyphen === true,
     aliases: row.aliases ?? [],
@@ -661,17 +660,14 @@ export const VERB_TABLE = ROWS.map((row) => ({
     body: row.body,
 }))
 
-// The sentence every runner verb's tool description opens with; gm.list() strips it from its summary.
 export function verbDescriptionLead(verb) {
     return `gm spool verb \`${verb}\`, dispatched exactly as the generic gm tool dispatches it. Plain-text verbs take raw_body instead of body.`
 }
 
-// The only place a canonical (underscore) name becomes the runner's spelling.
 export function runnerVerb(row) {
     return row.hyphen ? row.canonical.replace(/_/g, '-') : row.canonical
 }
 
-// Any spelling a caller uses (runner, hyphen or underscore) to its canonical name.
 export function canonicalName(spelling) {
     return String(spelling).replace(/-/g, '_')
 }
