@@ -7,7 +7,7 @@ import { BUNDLE_VERSION } from './bundle-version.js'
 import { agentplugDir, toolsDir } from './paths.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { inflightDispatchCount } from './dispatch.js'
-import { liveRunningImages } from './running-images.js'
+import { liveRunningImages, unrecordedBundleProcesses } from './running-images.js'
 
 const DEPLOYED_BUNDLE_FILE_NAME = 'gm-mcp-server.mjs'
 const DEFAULT_BUNDLE_URL = 'https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/main/bin/gm-mcp-server.js'
@@ -164,14 +164,18 @@ export function selfUpdateStatus() {
     const pin = readLocalBuildPin()
     const deployedSha = bytes ? sha256(bytes) : null
     const deployedVersion = bytes ? parseBundleVersion(bytes) : null
-    const runningImages = liveRunningImages().map((image) => ({
-        pid: image.pid,
-        role: image.role,
-        version: image.version,
-        sha256: typeof image.sha256 === 'string' ? image.sha256.slice(0, 12) : null,
-        started_at: image.started_at,
-        stale: Boolean(deployedSha) && (image.version !== deployedVersion || image.sha256 !== deployedSha),
-    }))
+    const recorded = liveRunningImages()
+    const runningImages = [
+        ...recorded.map((image) => ({
+            pid: image.pid,
+            role: image.role,
+            version: image.version,
+            sha256: typeof image.sha256 === 'string' ? image.sha256.slice(0, 12) : null,
+            started_at: image.started_at,
+            stale: Boolean(deployedSha) && (image.version !== deployedVersion || image.sha256 !== deployedSha),
+        })),
+        ...unrecordedBundleProcesses(new Set(recorded.map((image) => image.pid))),
+    ]
     return {
         installed_version: BUNDLE_VERSION,
         deployed_bundle: deployedPath,
@@ -179,7 +183,8 @@ export function selfUpdateStatus() {
         deployed_sha256: deployedSha,
         deployed_pinned_as_local_build: Boolean(bytes && pin && pin.sha256 === deployedSha),
         running_images: runningImages,
-        stale_running_images: runningImages.filter((image) => image.stale).length,
+        stale_running_images: runningImages.filter((image) => image.stale === true).length,
+        unknown_running_images: runningImages.filter((image) => image.stale === 'unknown').length,
         frozen_by: noSelfUpdateReason(),
         no_self_update_file: noSelfUpdateFilePath(),
         no_self_update_file_present: existsSync(noSelfUpdateFilePath()),
