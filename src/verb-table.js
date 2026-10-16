@@ -598,7 +598,6 @@ const REGISTRY_ROWS = [
     { canonical: 'cache_put' },
     { canonical: 'cache_invalidate' },
     { canonical: 'cache_stats' },
-    { canonical: 'learn' },
     { canonical: 'chrome' },
     { canonical: 'crawl' },
     { canonical: 'scan_deps' },
