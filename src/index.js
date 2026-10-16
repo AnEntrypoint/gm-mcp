@@ -5,7 +5,8 @@ import { startHttpServer, httpListenOptions, setHealthExtras } from './http-tran
 import { defaultHttpPort, ensureHttpSingleton, ensureHttpSingletonInBackground, ensureHttpSupervisor, httpMcpUrl, httpSingletonEnabled, probeHealth, recordHttpInstance } from './singleton.js'
 import { serveStdioRelay } from './stdio-relay.js'
 import { adoptHandedOverHandle, handOverToRefreshedBundle, handoverRequested, HANDOVER_LISTEN_RETRY_MS } from './bundle-refresh.js'
-import { bundleHealthBlock, bundleStalenessAnnouncement, startBundleDriftWatch } from './bundle-drift.js'
+import { bundleHealthBlock, bundleStalenessAnnouncement, runningBundle, startBundleDriftWatch } from './bundle-drift.js'
+import { recordRunningImage } from './running-images.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runLeakWatchPass } from './leak-watch.js'
 import { runReleaseBridgeInBackground } from './release-bridge.js'
@@ -63,7 +64,7 @@ function watchForStaleBundle({ handOver = null, transportKind = 'stdio' } = {}) 
         const line = bundleStalenessAnnouncement(honest)
         if (line) console.error(line)
         if (handOver && state?.reloadable === true) return handOver(state)
-        appendDiagnostic('bundle-stale-no-handover', { ...honest, transport: transportKind })
+        if (line) appendDiagnostic('bundle-stale-no-handover', { ...honest, transport: transportKind })
         return null
     }, { transport: transportKind })
 }
@@ -74,6 +75,7 @@ export async function main() {
         setHealthExtras(() => bundleHealthBlock())
         const listenHandle = await adoptHandedOverHandle()
         const { server } = await startHttpServer({ host, port, listenHandle, listenRetryMs: handoverRequested() ? HANDOVER_LISTEN_RETRY_MS : 0 })
+        recordRunningImage('http', runningBundle())
         seedHttpSingletonInBackground({ skipPort: port })
         const supervision = ensureHttpSupervisor({ port })
         recordHttpInstance({ port, host, supervisorPid: supervision?.pid ?? null })
@@ -85,7 +87,11 @@ export async function main() {
 
     installStdioGuards()
     const relayUrl = await stdioRelayTarget()
-    if (relayUrl) return serveStdioRelay({ url: relayUrl })
+    if (relayUrl) {
+        recordRunningImage('stdio-relay', runningBundle())
+        watchForStaleBundle({ transportKind: 'stdio-relay' })
+        return serveStdioRelay({ url: relayUrl })
+    }
     appendDiagnostic('stdio-standalone-start', { pid: process.pid })
     const server = createServer()
     const transport = new StdioServerTransport()
@@ -94,6 +100,7 @@ export async function main() {
 
     await server.connect(transport)
     console.error('gm-mcp: connected, serving on stdio')
+    recordRunningImage('stdio', runningBundle())
     seedHttpSingletonInBackground()
     watchForStaleBundle({ transportKind: 'stdio' })
     scheduleStaleDeployedBundleChecks(null, runLeakWatchPass)
