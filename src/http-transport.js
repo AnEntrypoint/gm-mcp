@@ -6,6 +6,7 @@ import { keepServingOnAsyncFailure, logSignalExits } from './transport-guard.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { flagValue } from './argv.js'
+import { clientCwdContext, clientCwdFromHeaders } from './request-context.js'
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024
 export const DEFAULT_HOST = '127.0.0.1'
@@ -87,7 +88,8 @@ async function serveStatelessMcpRequest(req, res) {
         void mcp.close().catch(() => {})
     })
     await mcp.connect(transport)
-    await transport.handleRequest(transportRequest, res, read.body)
+    const clientCwd = clientCwdFromHeaders(req.headers)
+    await clientCwdContext.run(clientCwd, () => transport.handleRequest(transportRequest, res, read.body))
 }
 
 function sendJson(res, status, payload) {

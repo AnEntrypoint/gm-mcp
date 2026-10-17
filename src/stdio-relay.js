@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { CONTINUATION_LOGGER, observeRelayedReply, startContinuationMonitor } from './continuation.js'
+import { CLIENT_CWD_HEADER } from './request-context.js'
 
 const RELAY_ERROR_CODE = -32000
 const PARSE_ERROR_CODE = -32700
@@ -49,7 +50,7 @@ async function forwardLine(url, line) {
     try {
         const response = await fetch(url, {
             method: 'POST',
-            headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+            headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', [CLIENT_CWD_HEADER]: process.cwd() },
             body: line,
         })
         const contentType = response.headers.get('content-type') || ''
