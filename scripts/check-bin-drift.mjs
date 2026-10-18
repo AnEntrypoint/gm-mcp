@@ -3,14 +3,15 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildBundle, uncommittedSrcPaths } from './build.mjs'
+import { buildBundle } from './build.mjs'
 import { BUNDLE_VERSION } from '../src/bundle-version.js'
 import { parseBundleVersion } from '../src/self-update.js'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const committedPath = path.join(repoRoot, 'bin', 'gm-mcp-server.js')
+const includedSrc = (process.env.GM_MCP_BUILD_INCLUDE || '').split(',').map(s => s.trim()).filter(Boolean)
 
-const result = await buildBundle(false, new Set(uncommittedSrcPaths(repoRoot).map((line) => line.slice(3))))
+const result = await buildBundle(false, new Set(includedSrc))
 
 const committed = readFileSync(committedPath, 'utf8')
 
