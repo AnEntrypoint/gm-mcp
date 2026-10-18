@@ -15,6 +15,8 @@ export const HANDOVER_LISTEN_RETRY_MS = 60_000
 const HANDOVER_FALLBACK_PROBE_MS = 10_000
 const HANDOVER_DRAIN_TIMEOUT_MS = 60_000
 const HANDOVER_DRAIN_POLL_MS = 50
+const HANDOVER_DEFER_LIMIT_MS = 120_000
+let deferralStartedAt = null
 
 export const HANDOVER_ENV = 'GM_MCP_HANDOVER'
 const HANDOVER_READY = 'gm-mcp-handover-ready'
@@ -138,9 +140,16 @@ export async function handOverToRefreshedBundle({ host = DEFAULT_HOST, port = DE
     }
 
     if (inflightDispatchCount() > 0) {
-        appendDiagnostic('bundle-handover-deferred', { ...detail, dispatches_inflight: inflightDispatchCount() })
-        return { outcome: 'deferred', reason: 'dispatch-in-flight', dispatches_inflight: inflightDispatchCount() }
+        const now = Date.now()
+        deferralStartedAt ??= now
+        const waited_ms = now - deferralStartedAt
+        if (waited_ms < HANDOVER_DEFER_LIMIT_MS) {
+            appendDiagnostic('bundle-handover-deferred', { ...detail, dispatches_inflight: inflightDispatchCount(), waited_ms })
+            return { outcome: 'deferred', reason: 'dispatch-in-flight', dispatches_inflight: inflightDispatchCount() }
+        }
+        appendDiagnostic('bundle-handover-deferral-expired', { ...detail, dispatches_inflight: inflightDispatchCount(), waited_ms })
     }
+    deferralStartedAt = null
 
     if (drift.stale === true && drift.reloadable !== true) {
         appendDiagnostic('bundle-handover-refused', {

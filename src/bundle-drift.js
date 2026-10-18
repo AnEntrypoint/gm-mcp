@@ -116,7 +116,10 @@ export function bundleDrift({ transport = process.env.GM_MCP_TRANSPORT || 'stdio
     if (!installedState) return { ...base, stale: false, reloadable: false, refusal: { code: 'installed-bundle-absent', reason: `${runningState.path} is not readable` } }
     const stale = runningState.sha256 !== installedState.sha256
     if (!stale) return { ...base, stale: false, reloadable: false, refusal: null }
-    const refusal = reloadRefusal(runningState, installedState)
+    const refused = reloadRefusal(runningState, installedState)
+    const refusal = refused.code === null && transport !== 'http'
+        ? { code: 'no-handover', reason: `a ${transport} server cannot replace itself without dropping its client, so a relaunch serves the installed bundle` }
+        : refused
     return {
         ...base,
         stale: true,
