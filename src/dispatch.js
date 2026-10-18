@@ -332,7 +332,7 @@ function largestMatchesKeptWithinBudget(out, holder, budget, toYaml) {
     return low
 }
 
-function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
+function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', requestedMaxChars = maxChars) {
     if (text.length <= maxChars) return text
     const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
     const holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
@@ -349,7 +349,7 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '') {
         const lastBreak = cut.lastIndexOf('\n')
         head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
     }
-    let notice = `reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nspill_file: ${spillPath}\n${spillNote}`
+    let notice = `reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\nspill_file: ${spillPath}\n${spillNote}`
     if (matchesTotal !== undefined && matchesReturned < matchesTotal) {
         notice += `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n`
         notice += `matches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
@@ -2209,7 +2209,7 @@ function continuationKeyOf(args) {
 }
 
 export async function gmDispatch(args, signal, responseValueObserver) {
-    if (typeof args?.max_chars === 'number' && args.max_chars > 2 * CONTINUATION_RESERVE_CHARS) args = { ...args, max_chars: args.max_chars - CONTINUATION_RESERVE_CHARS }
+    if (typeof args?.max_chars === 'number' && args.max_chars > 2 * CONTINUATION_RESERVE_CHARS) args = { ...args, max_chars: args.max_chars - CONTINUATION_RESERVE_CHARS, requested_max_chars: args.max_chars }
     if (args?.verb === CONTINUATION_STOP_VERB) {
         const key = continuationKeyOf(args)
         setContinuationStopped(key, true)
@@ -2234,7 +2234,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     }
 }
 
-async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars }, signal, responseValueObserver) {
+async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seconds, poll_interval_seconds, include_timing, resume_task, full_response, max_chars, requested_max_chars }, signal, responseValueObserver) {
     if (!verb) return 'error: verb required'
     if (typeof session_id === 'string') session_id = session_id.trim()
     session_id = explicitBodySessionId(body) || session_id
@@ -2415,7 +2415,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             const replyCap = replyMaxChars(max_chars)
             const spillPath = `${outPath}.reply.txt`
             if (rendered.length > replyCap) fs.writeFileSync(spillPath, rendered)
-            return capReplyText(rendered, replyCap, spillPath, out, toYaml, spillNote)
+            return capReplyText(rendered, replyCap, spillPath, out, toYaml, spillNote, requested_max_chars ?? replyCap)
         } catch (e) {
             const failed = { error: `response file was not valid JSON: ${e.message}`, task: requestNumber, out_path: outPath }
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs)) : failed)
