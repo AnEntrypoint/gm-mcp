@@ -1431,8 +1431,25 @@ function sleep(ms, signal) {
 
 const SPOOL_WATCHED_FALLBACK_MS = 2000
 const SPOOL_RESPONSE_MAX_AGE_MS = 60 * 60 * 1000
+const SPOOL_REFUSED_MAX_AGE_MS = 15 * 60 * 1000
 const SPOOL_PRUNE_EVERY_MS = 10 * 60 * 1000
+const SPOOL_REFUSAL_HEAD_BYTES = 4096
+const SPOOL_REFUSAL_HEAD = /"refused"\s*:\s*true|"status"\s*:\s*"refused"|"outcome"\s*:\s*"refused"/
 const spoolPrunedAt = new Map()
+
+function isUnreadRefusalFile(file) {
+    let fd
+    try {
+        fd = fs.openSync(file, 'r')
+        const head = Buffer.alloc(SPOOL_REFUSAL_HEAD_BYTES)
+        const n = fs.readSync(fd, head, 0, SPOOL_REFUSAL_HEAD_BYTES, 0)
+        return SPOOL_REFUSAL_HEAD.test(head.toString('utf8', 0, n))
+    } catch {
+        return false
+    } finally {
+        if (fd !== undefined) fs.closeSync(fd)
+    }
+}
 
 function pruneSpoolResponsesOnce(outDir) {
     const now = Date.now()
@@ -1447,7 +1464,9 @@ function pruneSpoolResponsesOnce(outDir) {
     for (const name of names) {
         const file = path.join(outDir, name)
         try {
-            if (now - fs.statSync(file).mtimeMs > SPOOL_RESPONSE_MAX_AGE_MS) fs.unlinkSync(file)
+            const age = now - fs.statSync(file).mtimeMs
+            if (age > SPOOL_RESPONSE_MAX_AGE_MS) fs.unlinkSync(file)
+            else if (age > SPOOL_REFUSED_MAX_AGE_MS && isUnreadRefusalFile(file)) fs.unlinkSync(file)
         } catch {
         }
     }
