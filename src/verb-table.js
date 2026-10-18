@@ -54,6 +54,7 @@ const GIT_COMMIT_TYPES = {
     paths: z.array(z.string()),
     files: z.array(z.string()),
     allow_whole_index: booleanLike,
+    untrack: booleanLike,
     recover_remote_moved: booleanLike,
     source_ref: z.string(),
     rev: z.string(),
@@ -69,13 +70,13 @@ const GIT_COMMIT_TYPES = {
     hunks: z.record(z.string(), z.array(numberLike)),
     offset: numberLike,
 }
-const GIT_COMMIT_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'recover_remote_moved', 'source_ref', 'rev', 'author_name', 'author_email']
+const GIT_COMMIT_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'untrack', 'recover_remote_moved', 'source_ref', 'rev', 'author_name', 'author_email']
 const GIT_FINALIZE_FIELDS = aliasFields('git_finalize', GIT_COMMIT_TYPES, GIT_COMMIT_KEYS)
 const GIT_COMMIT_VERB_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'author_name', 'author_email', 'claim_only', 'patch', 'hunks']
 const GIT_COMMIT_FIELDS = aliasFields('git_commit', GIT_COMMIT_TYPES, GIT_COMMIT_VERB_KEYS)
 const GIT_SINGLE_SHAPE = (verb, keys, sample) => ` ${keys.join(', ')} ${keys.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${sample}":...} and body:{"${sample}":...} are the same call (one accepted shape for ${verb}); a key named in both takes its value from body.`
 const GIT_COMMIT_DESCRIPTION = GIT_SINGLE_SHAPE('git_commit', GIT_COMMIT_VERB_KEYS, 'message') + ` The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit. claim_only:true only claims paths in .gm/lane-claims.json for SESSION_ID (needs a non-empty paths array) and does not commit or publish.`
-const GIT_FINALIZE_DESCRIPTION = ` ${GIT_COMMIT_KEYS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body. The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit.`
+const GIT_FINALIZE_DESCRIPTION = ` ${GIT_COMMIT_KEYS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body. The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit. .agentplug* paths are runtime state: add and modify are refused with a reason; untrack:true with only tracked .agentplug* paths commits their index removal (files stay on disk).`
 
 const GIT_PUSH_KEYS = ['rev']
 const GIT_PUSH_FIELDS = aliasFields('git_push', GIT_COMMIT_TYPES, GIT_PUSH_KEYS)
@@ -392,6 +393,7 @@ const GIT_FINALIZE_BODY = {
         paths: { type: 'array', aliases: ['files'], description: 'Paths to commit.' },
         rev: { type: 'string', aliases: ['source_ref'], description: 'Present, this is the push-only path and commits nothing.' },
         allow_whole_index: { type: 'boolean', description: 'Commits the whole index when paths is absent.' },
+        untrack: { type: 'boolean', description: 'Removes the named .agentplug* paths from the index only (git rm --cached semantics; files stay on disk) in a commit that names nothing else, then pushes. Add and modify of .agentplug* stay refused.' },
     },
 }
 const GIT_PUSH_BODY = {
