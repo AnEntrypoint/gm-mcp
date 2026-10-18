@@ -24,8 +24,26 @@ permissions:
   contents: read
 
 jobs:
+  version-bump:
+    name: version bump (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'push'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: checkout with full history for the version-bump guard
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: a src/ change ships with a bumped BUNDLE_VERSION and a rebuilt bundle
+        run: node scripts/check-version-bump.mjs ${{ github.event.before }} ${{ github.sha }}
+
   verify:
     name: verify (${{ matrix.os }})
+    needs: version-bump
+    if: ${{ always() && needs.version-bump.result != 'failure' && needs.version-bump.result != 'cancelled' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -40,7 +58,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: checkout with full history for the version-bump guard
+      - name: checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
@@ -53,10 +71,6 @@ jobs:
 
       - name: bin/gm-mcp-server.js is a fresh build of src/
         run: npm run verify-build
-
-      - name: a src/ change ships with a bumped BUNDLE_VERSION and a rebuilt bundle
-        if: github.event_name == 'push'
-        run: node scripts/check-version-bump.mjs ${{ github.event.before }} ${{ github.sha }}
 
       - name: verb registry contract
         run: node scripts/verbs-witness.mjs
