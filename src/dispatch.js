@@ -2013,7 +2013,9 @@ const DISPATCH_WAIT_DISCLOSED_AT_MS = 5000
 
 function withDispatchWait(out, waitedMs) {
     if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !isPlainObject(out)) return out
-    return { ...out, dispatch_waited_ms: waitedMs }
+    const admitted = Number(out.admission_waited_ms)
+    const admissionMs = Number.isFinite(admitted) && admitted > 0 ? Math.min(admitted, waitedMs) : 0
+    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, unattributed_ms: waitedMs - admissionMs } }
 }
 
 function withResumeDisclosure(out, disclosure) {
