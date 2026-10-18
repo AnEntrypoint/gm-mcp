@@ -1284,11 +1284,19 @@ function ensureSpoolDecision(root, now) {
     return true
 }
 
+const INHERITED_PROJECT_ROOT_OVERRIDES = ['CLAUDE_PROJECT_DIR']
+
+function runnerEnv() {
+    const env = { ...process.env, GM_TOOLS_DIR: RUNNER_DIR, AGENTPLUG_HOME: AGENTPLUG_DIR, AGENTPLUG_LEASE_PID: String(process.pid) }
+    for (const name of INHERITED_PROJECT_ROOT_OVERRIDES) delete env[name]
+    return env
+}
+
 function spawnRunnerDetached(root, now) {
     try {
         const child = spawn(RUNNER_PATH, ['spool'], {
             cwd: root,
-            env: { ...process.env, GM_TOOLS_DIR: RUNNER_DIR, AGENTPLUG_HOME: AGENTPLUG_DIR, CLAUDE_PROJECT_DIR: root, AGENTPLUG_LEASE_PID: String(process.pid) },
+            env: runnerEnv(),
             ...hiddenDetachedOptions(),
         })
         try {
