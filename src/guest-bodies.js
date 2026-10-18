@@ -1,4 +1,4 @@
-export const GUEST_BODY_SOURCE = {"repo":"AnEntrypoint/rs-plugkit","sha":"9a6ce828ccf393e0328e17008e29ce60ad24311d"}
+export const GUEST_BODY_SOURCE = {"repo":"AnEntrypoint/rs-plugkit","sha":"74ba797b9bf2bcfb54d76ab15ff69a20c77d4e16"}
 
 export const GUEST_ENVELOPE_FIELDS = ["SESSION_ID","session_id","sessionId","cwd","repo","root","projectPath","git_root_override","full_response"]
 

@@ -675,6 +675,34 @@ function withCodesearchScalarsCoerced(verb, body) {
 }
 
 const CODESEARCH_DEFAULT_K = 50
+const CODESEARCH_PATH_ALIASES = ['path', ...tableRow('codesearch').body.fields.path.aliases]
+
+// The guest scopes only the literal fallback of mode dual, so a dual scan runs unscoped here and its ranked hits are kept under the path.
+export function withCodesearchDualPathRouted(verb, body) {
+    if (verb !== 'codesearch' || !isPlainObject(body) || body.mode !== 'dual') return { body, scope: null }
+    const key = CODESEARCH_PATH_ALIASES.find((name) => typeof body[name] === 'string' && body[name].trim() !== '')
+    if (key === undefined) return { body, scope: null }
+    const scope = body[key].trim().replace(/^(\.\/)+/, '').replace(/\/+$/, '')
+    const routed = { ...body }
+    for (const name of CODESEARCH_PATH_ALIASES) delete routed[name]
+    return { body: routed, scope: scope === '' || scope === '.' ? null : scope }
+}
+
+export function withCodesearchDualPathScope(scope, out) {
+    if (!scope || !isPlainObject(out)) return out
+    const inScope = (hit) => typeof hit?.at === 'string' && (hit.at === scope || hit.at.startsWith(`${scope}/`))
+    const scoped = { ...out }
+    let kept = 0
+    let dropped = 0
+    for (const channel of ['bm25_hits', 'vector_hits']) {
+        if (!Array.isArray(out[channel])) continue
+        scoped[channel] = out[channel].filter(inScope)
+        kept += scoped[channel].length
+        dropped += out[channel].length - scoped[channel].length
+    }
+    scoped.path_scope = { path: scope, applied: 'post-filter', kept, dropped }
+    return scoped
+}
 const CODESEARCH_DEFAULT_K_MODES = new Set(['literal', 'regex', 'filename'])
 const CODESEARCH_K_ALIASES = ['k', ...tableRow('codesearch').body.fields.k.aliases]
 
@@ -2218,6 +2246,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
 
     let normalizedBody
     let codesearchKDefaulted = false
+    let codesearchDualScope = null
     let rawBodyText
     if (!resume_task && !isPlainText) {
         const normalized = normalizedObjectBody(verb, body)
@@ -2230,7 +2259,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             const diagnostic = objectBodyDiagnostic(verb, globCoerced.value)
             if (diagnostic) return `error: ${diagnostic}`
             const coerced = withCodesearchScalarsCoerced(verb, globCoerced.value)
-            const withDefaultK = withCodesearchDefaultK(verb, coerced)
+            const dualRouted = withCodesearchDualPathRouted(verb, coerced)
+            codesearchDualScope = dualRouted.scope
+            const withDefaultK = withCodesearchDefaultK(verb, dualRouted.body)
             codesearchKDefaulted = withDefaultK.defaulted
             normalizedBody = withAssertedInstructionHash(verb, fsReadRangeCanonicalBody(verb, withDefaultK.body))
         }
@@ -2318,6 +2349,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
             out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, gitShowCaptureFallback(verb, normalizedBody, out, root))))
+            out = withCodesearchDualPathScope(codesearchDualScope, out)
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs))
             else out = withDispatchWait(out, Date.now() - callStartedAtMs)

@@ -33,9 +33,25 @@ function withCodemodeDeadline(pending, timeoutMs) {
 
 const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A second object argument is folded into the first, so gm.<verb>({...}, {cwd: "<root>", max_chars: 800}) is the same call; a second argument that is not an object is refused rather than dropped, because a dropped cwd silently runs the dispatch against another project. A top-level `body` is the dispatch body only when it is an object or JSON object text; any other text is row prose, sent as the verb\'s own `body` field when it declares one and as `description` otherwise, so gm.prd_add({id, subject, body}) reaches prd-add as body:{id, subject, description} (an explicit description wins). Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns one entry per verb as {name, aliases?, description?}: the description is the verb text cut to 80 chars, without the boilerplate every runner verb shares, and it is omitted when the verb has none; `gm.describe(name)` gives the runner spelling of the verb, its input schema and its body schema. `gm.list({filter, names_only, max_desc})` narrows it (max_desc 0 gives full descriptions). `gm.help()` returns the notice codes that replies carry. The reply is capped at max_chars (default 24000). `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). If the body returns nothing, the text of every gm call reply is returned in call order, so a git_commit or git_push without a return still reports its result. Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
 
-function replyText(result) {
+const FAILED_REPLY_MAX_CHARS = 400
+
+function failedReplyDetail(text) {
+    if (!/^(dispatch_id|data|error|ok|gm_session_header_version):/.test(text)) return null
+    const header = text.split(/^--- data/m)[0]
+    if (!/^ok: false$/m.test(header)) return null
+    const lines = header.split('\n')
+    const start = lines.findIndex((line) => line.startsWith('error:'))
+    const block = start === -1 ? '' : lines.slice(start).filter((line, index) => index === 0 || /^\s/.test(line)).join(' ').replace(/\s+/g, ' ').trim()
+    const code = /^error_code: (.*)$/m.exec(header)?.[1]
+    const detail = `ok: false${code ? ` (error_code: ${code})` : ''} -- ${block || 'the reply names no error field'}`
+    return detail.length > FAILED_REPLY_MAX_CHARS ? `${detail.slice(0, FAILED_REPLY_MAX_CHARS - 3)}...` : detail
+}
+
+function replyText(result, verb) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
     if (result?.isError) throw new Error(text)
+    const failed = failedReplyDetail(text)
+    if (failed !== null) throw new Error(`${verb} ${failed}`)
     return text
 }
 
@@ -235,7 +251,7 @@ function bindings(tools, { session_id, cwd }, extra, sink = null) {
             const defaultCwd = defaultCwdFor(merged, cwd)
             if (defaultCwd !== undefined) defaults.cwd = defaultCwd
         }
-        const pending = tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then(replyText)
+        const pending = tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then((result) => replyText(result, tool.verb ?? name))
         if (!sink) return pending
         const entry = { verb: tool.verb ?? name }
         sink.push(entry)
