@@ -37,7 +37,21 @@ function emitContinuation(params) {
     writeFrame(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/message', params }))
 }
 
-async function forwardLine(url, line) {
+async function post(url, line) {
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+        body: line,
+    })
+    return { contentType: response.headers.get('content-type') || '', text: await response.text() }
+}
+
+function unreachableMessage(url, error) {
+    const port = new URL(url).port
+    return `gm-mcp relay: HTTP server "gm" on 127.0.0.1:${port} (${url}) is unreachable (${describeError(error)}) and an automatic restart did not bring it back. Restart it with: node "${process.argv[1]}" --http --port ${port}`
+}
+
+async function forwardLine(url, line, recover) {
     let request
     try {
         request = JSON.parse(line)
@@ -46,26 +60,31 @@ async function forwardLine(url, line) {
         return
     }
     const expectsReply = request && typeof request === 'object' && request.id !== undefined && request.id !== null
-    try {
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
-            body: line,
-        })
-        const contentType = response.headers.get('content-type') || ''
-        const text = await response.text()
-        if (!expectsReply) return
-        for (const frame of framesFromResponse(contentType, text)) {
-            observeFrame(frame)
-            writeFrame(frame)
+    let target = url
+    let failure = null
+    let reply = await post(target, line).catch((error) => { failure = error; return null })
+    if (!reply && recover) {
+        appendDiagnostic('stdio-relay-forward-failed', { url, method: request?.method ?? null, error: describeError(failure) })
+        const restarted = await recover().catch(() => null)
+        if (restarted) {
+            target = restarted
+            failure = null
+            reply = await post(target, line).catch((error) => { failure = error; return null })
         }
-    } catch (error) {
-        appendDiagnostic('stdio-relay-forward-failed', { url, method: request?.method ?? null, error: describeError(error) })
-        if (expectsReply) writeFrame(errorFrame(request.id, RELAY_ERROR_CODE, `gm-mcp relay: HTTP server at ${url} unreachable: ${describeError(error)}`))
+    }
+    if (!reply) {
+        appendDiagnostic('stdio-relay-forward-failed', { url: target, method: request?.method ?? null, error: describeError(failure) })
+        if (expectsReply) writeFrame(errorFrame(request.id, RELAY_ERROR_CODE, unreachableMessage(target, failure)))
+        return
+    }
+    if (!expectsReply) return
+    for (const frame of framesFromResponse(reply.contentType, reply.text)) {
+        observeFrame(frame)
+        writeFrame(frame)
     }
 }
 
-export function serveStdioRelay({ url }) {
+export function serveStdioRelay({ url, recover = null }) {
     let inFlight = 0
     let inputClosed = false
     const finishIfDone = () => {
@@ -75,7 +94,7 @@ export function serveStdioRelay({ url }) {
     input.on('line', (line) => {
         if (!line.trim()) return
         inFlight += 1
-        forwardLine(url, line).finally(() => {
+        forwardLine(url, line, recover).finally(() => {
             inFlight -= 1
             finishIfDone()
         })
