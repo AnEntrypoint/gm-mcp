@@ -43,7 +43,11 @@ if (!paths.includes('bin/gm-mcp-server.js')) {
 }
 
 if (problems.length > 0) {
-    for (const problem of problems) console.error(`check-version-bump: ${problem}`)
+    for (const problem of problems) {
+        const line = `check-version-bump: ${problem}`
+        console.log(line)
+        console.error(line)
+    }
     process.exit(1)
 }
 
