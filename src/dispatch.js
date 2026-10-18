@@ -8,7 +8,7 @@ import path from 'node:path'
 import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
 import { recordChild } from './child-ledger.js'
-import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
+import { bundleDrift, bundleStalenessAnnouncement } from './bundle-drift.js'
 import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuedReply, setContinuationStopped } from './continuation.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel } from './git-adapter.js'
@@ -2147,6 +2147,9 @@ function withStaleBundleNotice(verb, text) {
     if (typeof text !== 'string' || text === '') return text
     const drift = bundleDrift()
     if (!drift.stale) return text
+    const withNewline = text.endsWith('\n') ? text : `${text}\n`
+    const line = bundleStalenessAnnouncement(drift)
+    if (!line) return `${withNewline}bundle_stale: true (restart pending; the full notice came with an earlier reply)\n`
     const block = yaml.dump({
         bundle_stale: true,
         bundle_served_version: drift.running_version,
@@ -2155,9 +2158,7 @@ function withStaleBundleNotice(verb, text) {
         bundle_installed_sha: drift.installed_sha256,
         bundle_reloadable: drift.reloadable === true,
     }, { lineWidth: 100 })
-    const line = bundleStalenessNotice(drift)
-    const body = `${text.endsWith('\n') ? text : `${text}\n`}${block}`
-    return line ? `${body}\n${line}\n` : body
+    return `${withNewline}${block}\n${line}\n`
 }
 
 function spoolDiagnostics(spoolDir, verb, requestNumber, outPath) {
