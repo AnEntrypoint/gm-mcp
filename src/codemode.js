@@ -2,7 +2,9 @@ import { isPlainObject } from './plain-object.js';
 import { z } from 'zod'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { canonicalToolName, nearestNames } from './verbs.js'
-import { verbDescriptionLead } from './verb-table.js'
+import { tableRow, verbDescriptionLead } from './verb-table.js'
+
+const DISPATCH_ENVELOPE_NAME = 'dispatch_envelope'
 import { verbBodySchema } from './verb-bodies.js'
 import { NOTICES } from './notices.js'
 import { CONTINUATION_RESERVE_CHARS, continuedReply } from './continuation.js'
@@ -211,18 +213,25 @@ function bindings(tools, { session_id, cwd }, extra) {
         }
         return tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then(replyText)
     }
+    const dispatchEnvelopeSchema = () => z.toJSONSchema(z.object(tools.values().next().value.inputSchema))
     const api = {
         list: (options) => listEntries(tools, options),
-        help: () => ({ notices: NOTICES, list_options: { filter: 'substring of name, verb, alias or description', names_only: 'true returns names only', max_desc: `description chars (default ${DEFAULT_LIST_DESC_CHARS}, 0 = full)` }, codemode_max_chars: `reply cap (default ${DEFAULT_CODEMODE_MAX_CHARS})` }),
+        help: () => ({ notices: NOTICES, list_options: { filter: 'substring of name, verb, alias or description', names_only: 'true returns names only', max_desc: `description chars (default ${DEFAULT_LIST_DESC_CHARS}, 0 = full)` }, codemode_max_chars: `reply cap (default ${DEFAULT_CODEMODE_MAX_CHARS})`, [DISPATCH_ENVELOPE_NAME]: dispatchEnvelopeSchema() }),
         describe: (name) => {
             const resolved = resolve(name)
             if (!resolved) throw unknownNameError(name, names)
             const tool = tools.get(resolved)
             const schema = verbBodySchema(tool.verb)
+            const row = tableRow(tool.verb ?? resolved)
+            const envelope = dispatchEnvelopeSchema()
+            const ownSchema = z.toJSONSchema(z.object(tool.inputSchema))
+            const sameAsEnvelope = JSON.stringify(ownSchema) === JSON.stringify(envelope)
             return {
                 name: resolved,
                 verb: tool.verb ?? null,
-                input_schema: z.toJSONSchema(z.object(tool.inputSchema)),
+                summary: row?.description?.trim() || null,
+                docs: `skills/gm/docs/verbs.md: search for \`${tool.verb ?? resolved}\``,
+                input_schema: sameAsEnvelope ? { shared: DISPATCH_ENVELOPE_NAME } : ownSchema,
                 body_schema: schema.declared
                     ? { declared: true, required: schema.required, fields: schema.fields }
                     : { declared: false, note: schema.note },
