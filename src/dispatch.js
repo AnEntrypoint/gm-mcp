@@ -746,7 +746,7 @@ export function withCodesearchDefaultKHint(defaulted, verb, out) {
     if (!Array.isArray(source.matches)) return out
     const shown = source.matches.length
     const total = Number(/^(\d+) lines?\b/.exec(String(source.count ?? ''))?.[1] ?? shown)
-    if (total <= shown) return out
+    if (shown === 0 || total <= shown) return out
     const hint = {
         shown,
         total,
@@ -2027,13 +2027,15 @@ function carriedNoFailure(out) {
 
 const DISPATCH_WAIT_DISCLOSED_AT_MS = 5000
 
-function withDispatchWait(out, waitedMs) {
+function withDispatchWait(out, waitedMs, claimedAtMs) {
     if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !isPlainObject(out)) return out
     const admitted = Number(out.admission_waited_ms)
     const admissionMs = Number.isFinite(admitted) && admitted > 0 ? Math.min(admitted, waitedMs) : 0
+    const claimMs = claimedAtMs === null ? 0 : Math.max(0, Math.min(claimedAtMs - admissionMs, waitedMs - admissionMs))
     const executed = firstReportedMs(out, ['duration_ms', 'guest_elapsed_ms'])
-    const execMs = executed === null ? 0 : Math.min(executed, waitedMs - admissionMs)
-    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, exec_ms: execMs, exec_timed: executed !== null, unattributed_ms: waitedMs - admissionMs - execMs } }
+    const postClaimMs = waitedMs - admissionMs - claimMs
+    const execMs = executed === null ? postClaimMs : Math.min(executed, postClaimMs)
+    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, unattributed_ms: waitedMs - admissionMs - claimMs - execMs } }
 }
 
 function firstReportedMs(out, keys) {
@@ -2421,7 +2423,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             out = withCodesearchDualPathScope(codesearchDualScope, out)
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs))
-            else out = withDispatchWait(out, Date.now() - callStartedAtMs)
+            else out = withDispatchWait(out, Date.now() - callStartedAtMs, claimedAtMs)
             if (out && typeof out === 'object' && out.instruction_unchanged === true && bodyCarriesInstructionHash(normalizedBody)) {
                 out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
             }
@@ -2469,11 +2471,13 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         request_withdrawn_before_claim: withdrawUnclaimedRequest(),
     })
 
+    let claimedAtMs = null
     while (true) {
         if (signal?.aborted) return abortedReply()
         ensureSpoolRunnerRunning(root)
         const landed = readLandedOutFile()
         if (landed !== undefined) return landed
+        if (claimedAtMs === null && fs.existsSync(`${inPath}.inflight`)) claimedAtMs = Date.now() - callStartedAtMs
         if (Date.now() >= deadline) {
             const finalRecheckDeadline = Date.now() + FINAL_OUT_RECHECK_WINDOW_MS
             while (Date.now() < finalRecheckDeadline) {
