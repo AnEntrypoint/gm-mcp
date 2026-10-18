@@ -21,7 +21,7 @@ function topLevelDescription(verb, keys, defaultsOf) {
     return ` ${keys.join(', ')} ${keys.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${keys[0]}":"<${defaultsOf.sample}>"} and body:{"${keys[0]}":"<${defaultsOf.sample}>"} are the same call; a key named in both takes its value from body. Without one of them ${verb} takes its own default: ${defaultsOf.text}.`
 }
 
-const FS_READ_RANGE_ALIASES = ['startLine', 'endLine', 'start_line', 'end_line', 'start', 'end', 'count', 'from', 'to', 'offset', 'limit', 'line', 'lines']
+export const FS_READ_RANGE_ALIASES = ['startLine', 'endLine', 'start_line', 'end_line', 'start', 'end', 'count', 'from', 'to', 'offset', 'limit', 'line', 'lines']
 const FS_READ_RANGE_PAIR_HELP = 'Pairs are resolved in this order: startLine/endLine (snake_case start_line/end_line is the same pair), then start/end (start/count also works), then from/to, then offset/limit, then line/lines. endLine/end/to is the last line to return; limit/count/lines is a number of lines, not an end line.'
 const FS_READ_RANGE_LINE_HELP = {
     startLine: 'First line to return (1-based).',
@@ -350,8 +350,8 @@ const GIT_COMMIT_BODY = {
         add_all: { type: 'boolean', description: 'Stages everything first.' },
         allow_whole_index: { type: 'boolean', description: 'Commits the whole index when paths is absent.' },
         allow_foreign_rows: { type: 'boolean', aliases: ['allow_foreign_prd_rows'], description: 'Commits rows another session owns.' },
-        author_name: { type: 'string', description: 'Commit author name; must equal the configured identity, any other value is refused.' },
-        author_email: { type: 'string', description: 'Commit author email; must equal the configured identity, any other value is refused.' },
+        author_name: { type: 'string', description: 'Commit author name; defaults to the configured git identity.' },
+        author_email: { type: 'string', description: 'Commit author email; defaults to the configured git identity.' },
         patch: { type: 'string', description: 'Hunk-scoped commit: a unified diff against HEAD, committed through a temp index so only its hunks land. Exclusive with hunks; does not combine with paths, files, add_all, amend or allow_empty.' },
         hunks: { type: 'object', description: 'Hunk-scoped commit: {path: [1-based hunk numbers from git diff HEAD -- <path>]}, committed through a temp index. Exclusive with patch; does not combine with paths, files, add_all, amend or allow_empty.' },
     },
@@ -384,6 +384,8 @@ const BROWSER_LEASE_BODY = {
     required: ['agent'],
     fields: {
         agent: { type: 'string', description: 'Name of the agent holding or releasing the shared browser lease.' },
+        ttl_ms: { type: 'integer', description: 'Lease time-to-live in milliseconds before a silent holder counts as dead.' },
+        wait_ms: { type: 'integer', description: 'Milliseconds to wait for the lease before refusing.' },
     },
 }
 

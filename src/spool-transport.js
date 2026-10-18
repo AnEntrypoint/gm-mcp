@@ -1,11 +1,11 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { DEFAULT_CODEMODE_TIMEOUT_MS } from './codemode-budget.js'
 
 const POLL_INTERVAL_MS = 50
 const WATCH_SILENT_MS = 1000
 const RENAME_BACKOFF_MS = [10, 20, 40, 80, 160, 320]
 const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY'])
-const DEFAULT_CODEMODE_TIMEOUT_MS = 600000
 const TIMEOUT_MARGIN_MS = 5000
 const VERB_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,254}$/
 const SESSION_PATTERN = /^[A-Za-z0-9_.-]{1,150}$/

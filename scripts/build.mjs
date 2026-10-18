@@ -14,7 +14,21 @@ export function uncommittedSrcPaths(root) {
         .filter(Boolean)
 }
 
-export async function buildBundle(write = false) {
+export function headSrcPlugin(root, keep) {
+    const dirty = new Set(uncommittedSrcPaths(root).map(line => line.slice(3)))
+    return {
+        name: 'head-src',
+        setup(build) {
+            build.onLoad({ filter: /[\\/]src[\\/].*\.js$/ }, args => {
+                const rel = path.relative(root, args.path).split(path.sep).join('/')
+                if (!dirty.has(rel) || keep.has(rel)) return undefined
+                return { contents: execFileSync('git', ['show', `HEAD:${rel}`], { cwd: root, encoding: 'utf8' }), loader: 'js' }
+            })
+        },
+    }
+}
+
+export async function buildBundle(write = false, keep = new Set()) {
     return esbuild.build({
         entryPoints: [path.join(repoRoot, 'src', 'cli.js')],
         bundle: true,
@@ -25,15 +39,16 @@ export async function buildBundle(write = false) {
         banner: { js: `#!/usr/bin/env node\nvar BUNDLE_VERSION = ${JSON.stringify(BUNDLE_VERSION)};` },
         preserveSymlinks: true,
         outfile: path.join(repoRoot, 'bin', 'gm-mcp-server.js'),
+        plugins: [headSrcPlugin(repoRoot, keep)],
         write,
     })
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {
-    const dirty = process.env.GM_MCP_BUILD_ALLOW_DIRTY ? [] : uncommittedSrcPaths(repoRoot)
-    if (dirty.length) {
-        console.error(`refusing to write bin/gm-mcp-server.js: uncommitted src/ paths would ship in the bundle:\n${dirty.join('\n')}\ncommit them first, or set GM_MCP_BUILD_ALLOW_DIRTY=1 to bundle the working tree on purpose`)
-        process.exit(1)
-    }
-    await buildBundle(true)
+    const keep = new Set((process.env.GM_MCP_BUILD_INCLUDE || '').split(',').map(s => s.trim()).filter(Boolean))
+    const dirty = uncommittedSrcPaths(repoRoot).map(line => line.slice(3))
+    if (process.env.GM_MCP_BUILD_ALLOW_DIRTY) dirty.forEach(p => keep.add(p))
+    const foreign = dirty.filter(p => !keep.has(p))
+    if (foreign.length) console.error(`bundling committed HEAD for uncommitted src/ paths (name them in GM_MCP_BUILD_INCLUDE to ship them):\n${foreign.join('\n')}`)
+    await buildBundle(true, keep)
 }

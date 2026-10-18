@@ -5,6 +5,7 @@ import { CONTINUATION_LOGGER, observeRelayedReply, startContinuationMonitor } fr
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { createServer } from './mcp-server.js'
 import { gitToplevel } from './git-adapter.js'
+import { DEFAULT_CODEMODE_TIMEOUT_MS } from './codemode-budget.js'
 
 const RELAY_ERROR_CODE = -32000
 const PARSE_ERROR_CODE = -32700
@@ -13,7 +14,6 @@ const SSE_DATA_PREFIX = 'data:'
 const RETRY_DELAYS_MS = [250, 1000, 2000, 4000]
 const TRANSIENT_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_CLOSED'])
 const LOCAL_INIT_ID = 'gm-relay-local-init'
-const DEFAULT_CODEMODE_TIMEOUT_MS = 600000
 const RELAY_BUDGET_MS = (Number(process.env.GM_CODEMODE_TIMEOUT_MS) > 0 ? Number(process.env.GM_CODEMODE_TIMEOUT_MS) : DEFAULT_CODEMODE_TIMEOUT_MS) + 5000
 const HEALTH_PROBE_MS = 1500
 const RESTART_BUDGET_MS = 8000

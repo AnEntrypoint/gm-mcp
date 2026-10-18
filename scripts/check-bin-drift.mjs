@@ -13,6 +13,7 @@ const committedPath = path.join(repoRoot, 'bin', 'gm-mcp-server.js')
 const result = await buildBundle(false)
 
 const committed = readFileSync(committedPath, 'utf8')
+
 const fresh = result.outputFiles[0].text
 
 if (parseBundleVersion(fresh) !== BUNDLE_VERSION) {

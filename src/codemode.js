@@ -2,21 +2,20 @@ import { isPlainObject } from './plain-object.js';
 import { z } from 'zod'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { canonicalToolName, nearestNames } from './verbs.js'
-import { tableRow, verbDescriptionLead } from './verb-table.js'
+import { FS_READ_RANGE_ALIASES, tableRow, verbDescriptionLead } from './verb-table.js'
 
 const DISPATCH_ENVELOPE_NAME = 'dispatch_envelope'
 import { DISPATCH_BODY_FIELDS, GUEST_ENVELOPE_FIELDS, verbBodySchema } from './verb-bodies.js'
 import { fsReadRangeCanonicalBody } from './dispatch.js'
 import { NOTICES } from './notices.js'
 import { CONTINUATION_RESERVE_CHARS, continuedReply } from './continuation.js'
+import { DEFAULT_CODEMODE_TIMEOUT_MS } from './codemode-budget.js'
 
 const PROCESS_CODEMODE_SESSION_ID = `mcp-codemode-${process.pid}-${Date.now()}`
 import { createRequire } from 'node:module'
 import { resolve as resolvePath } from 'node:path'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
-
-const DEFAULT_CODEMODE_TIMEOUT_MS = 540000
 
 function codemodeTimeoutMs() {
     const configured = Number(process.env.GM_CODEMODE_TIMEOUT_MS)
@@ -139,6 +138,7 @@ export function refuseUndeclaredBodyKeys(name, verb, folded) {
     if (!schema.declared) return
     const known = new Set([...Object.keys(schema.fields), ...Object.keys(DISPATCH_BODY_FIELDS), ...GUEST_ENVELOPE_FIELDS, ...(tableRow(verb)?.aliases ?? [])])
     for (const spec of Object.values(schema.fields)) for (const alias of spec.aliases ?? []) known.add(alias)
+    if (verb === 'fs_read') for (const alias of FS_READ_RANGE_ALIASES) known.add(alias)
     const unknown = Object.keys(body).filter((key) => !known.has(key))
     if (unknown.length === 0) return
     throw new Error(`${name} body has undeclared key ${unknown.join(', ')} -- declared body fields: ${[...known].join(', ')}`)
