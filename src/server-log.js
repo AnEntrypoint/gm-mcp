@@ -6,7 +6,7 @@ const LOG_FILE_NAME = 'gm-mcp-server.log'
 const MAX_LOG_BYTES = 2 * 1024 * 1024
 const REPEAT_WINDOW_MS = 60 * 1000
 const MAX_REPEAT_KEYS = 512
-const REPEAT_KEY_IGNORED_FIELDS = new Set(['ms', 'inflight', 'dispatches_inflight', 'pid'])
+const REPEAT_KEY_IGNORED_FIELDS = new Set(['ms', 'inflight', 'dispatches_inflight', 'pid', 'dispatch_id'])
 const lastWrittenByKey = new Map()
 
 export function logFilePath() {
@@ -33,6 +33,7 @@ function admitRecord(event, fields, now) {
     const previous = lastWrittenByKey.get(key)
     if (previous && now - previous.at < REPEAT_WINDOW_MS) {
         previous.suppressed += 1
+        if (fields.dispatch_id !== undefined) previous.dispatch_id = fields.dispatch_id
         return { write: false }
     }
     lastWrittenByKey.set(key, { at: now, suppressed: 0 })
@@ -42,7 +43,7 @@ function admitRecord(event, fields, now) {
         }
         if (lastWrittenByKey.size > MAX_REPEAT_KEYS) lastWrittenByKey.clear()
     }
-    return { write: true, suppressed: previous?.suppressed ?? 0 }
+    return { write: true, suppressed: previous?.suppressed ?? 0, dispatch_id: previous?.dispatch_id }
 }
 
 export function appendDiagnostic(event, fields = {}) {
@@ -60,7 +61,7 @@ export function appendDiagnostic(event, fields = {}) {
         if (!admission.write) return record
         mkdirSync(path.dirname(file), { recursive: true })
         const summary = admission.suppressed > 0
-            ? `${JSON.stringify({ ts, pid: process.pid, event: 'repeat-suppressed', of: event, count: admission.suppressed, window_ms: REPEAT_WINDOW_MS })}
+            ? `${JSON.stringify({ ts, pid: process.pid, event: 'repeat-suppressed', of: event, count: admission.suppressed, window_ms: REPEAT_WINDOW_MS, ...(admission.dispatch_id !== undefined ? { dispatch_id: admission.dispatch_id } : {}) })}
 `
             : ''
         appendFileSync(file, `${summary}${record}

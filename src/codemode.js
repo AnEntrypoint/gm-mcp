@@ -1,6 +1,6 @@
 import { isPlainObject } from './plain-object.js';
 import { z } from 'zod'
-import { appendDiagnostic, describeError } from './server-log.js'
+import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { canonicalToolName, nearestNames } from './verbs.js'
 import { FS_READ_RANGE_ALIASES, tableRow, verbDescriptionLead } from './verb-table.js'
 
@@ -30,9 +30,7 @@ function withCodemodeDeadline(pending, timeoutMs) {
     return Promise.race([pending, deadline]).finally(() => clearTimeout(timer))
 }
 
-const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A second object argument is folded into the first, so gm.<verb>({...}, {cwd: "<root>", max_chars: 800}) is the same call; a second argument that is not an object is refused rather than dropped, because a dropped cwd silently runs the dispatch against another project. A top-level `body` is the dispatch body only when it is an object or JSON object text; any other text is row prose, sent as the verb\'s own `body` field when it declares one and as `description` otherwise, so gm.prd_add({id, subject, body}) reaches prd-add as body:{id, subject, description} (an explicit description wins). Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns one entry per verb as {name, aliases?, description?}: the description is the verb text cut to 80 chars, without the boilerplate every runner verb shares, and it is omitted when the verb has none; `gm.describe(name)` gives the runner spelling of the verb, its input schema and its body schema. `gm.list({filter, names_only, max_desc})` narrows it (max_desc 0 gives full descriptions). `gm.help()` returns the notice codes that replies carry. The reply is capped at max_chars (default 24000). `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). If the body returns nothing, the text of every gm call reply is returned in call order, so a git_commit or git_push without a return still reports its result. Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
-
-const FAILED_REPLY_MAX_CHARS = 400
+const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A second object argument is folded into the first, so gm.<verb>({...}, {cwd: "<root>", max_chars: 800}) is the same call; a second argument that is not an object is refused rather than dropped, because a dropped cwd silently runs the dispatch against another project. A top-level `body` is the dispatch body only when it is an object or JSON object text; any other text is row prose, sent as the verb\'s own `body` field when it declares one and as `description` otherwise, so gm.prd_add({id, subject, body}) reaches prd-add as body:{id, subject, description} (an explicit description wins). Each call returns that tool\'s reply as a plain text string, never a parsed object, so a read such as `r.data.matches` is undefined; parse the text or match it instead (for example `r.includes("needle")`). Each call throws when the tool fails.`return gm.list()` returns one entry per verb as {name, aliases?, description?}: the description is the verb text cut to 80 chars, without the boilerplate every runner verb shares, and it is omitted when the verb has none; `gm.describe(name)` gives the runner spelling of the verb, its input schema and its body schema. `gm.list({filter, names_only, max_desc})` narrows it (max_desc 0 gives full descriptions). `gm.help()` returns the notice codes that replies carry. The reply is capped at max_chars (default 24000). `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). If the body returns nothing, the text of every gm call reply is returned in call order, so a git_commit or git_push without a return still reports its result. Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
 
 function dispatchIdOf(text) {
     return /^dispatch_id: (\S+)/m.exec(text)?.[1] ?? null
@@ -40,25 +38,26 @@ function dispatchIdOf(text) {
 
 let codemodeThrowSeq = 0
 
-function failedReplyDetail(text) {
+const CONTINUATION_TAIL = /\s+(?:state:\s*\S+\s+)?(?:continuation:|pending_rows:|idle_ms:|action:).*$/
+
+function failedReplyDetail(text, verb) {
     if (!/^(dispatch_id|data|error|ok|gm_session_header_version):/.test(text)) return null
     const header = text.split(/^--- data/m)[0]
     if (!/^ok: false$/m.test(header)) return null
     const lines = header.split('\n')
     const start = lines.findIndex((line) => line.startsWith('error:'))
-    const block = start === -1 ? '' : lines.slice(start).filter((line, index) => index === 0 || /^\s/.test(line)).join(' ').replace(/\s+/g, ' ').trim()
+    const block = (start === -1 ? '' : lines.slice(start).filter((line, index) => index === 0 || /^\s/.test(line)).join(' ').replace(/\s+/g, ' ').trim()).replace(CONTINUATION_TAIL, '')
     const code = /^error_code: (.*)$/m.exec(header)?.[1]
     const dispatchId = dispatchIdOf(text)
     const head = header.split('\n').slice(0, 8).join(' | ').replace(/\s+/g, ' ').trim()
-    const detail = `ok: false${code ? ` (error_code: ${code})` : ''}${dispatchId ? ` dispatch_id: ${dispatchId}` : ''} -- ${block || `no error field; reply head: ${head}`}`
-    return detail.length > FAILED_REPLY_MAX_CHARS ? `${detail.slice(0, FAILED_REPLY_MAX_CHARS - 3)}...` : detail
+    return `verb=${verb} error_code=${code ?? 'none'} dispatch_id=${dispatchId ?? 'none'}\n${block || `no error field; reply head: ${head}`}`
 }
 
 function replyText(result, verb) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
     if (result?.isError) throw new Error(text)
-    const failed = failedReplyDetail(text)
-    if (failed !== null) throw new Error(`${verb} ${failed}`)
+    const failed = failedReplyDetail(text, verb)
+    if (failed !== null) throw new Error(failed)
     return text
 }
 
@@ -158,7 +157,7 @@ export function refuseMissingRequiredBodyKeys(name, verb, folded) {
         return !(schema.fields[field]?.aliases ?? []).some((alias) => body[alias] !== undefined)
     })
     if (missing.length === 0) return
-    throw new Error(`${name} body field ${missing.join(', ')} required: error: ${missing.map((field) => `${field} required`).join('; ')} -- send ${missing.map((field) => `body.${field}`).join(', ')}`)
+    throw new Error(`${name} body field ${missing.join(', ')} required -- send ${missing.map((field) => `body.${field}`).join(', ')}`)
 }
 
 const DEFAULT_LIST_DESC_CHARS = 80
@@ -280,7 +279,7 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
         if (!sink) return pending
         const entry = { verb: tool.verb ?? name }
         sink.push(entry)
-        return pending.then((text) => { entry.text = text; entry.dispatch_id = dispatchIdOf(text); return text })
+        return pending.then((text) => { entry.text = text; entry.dispatch_id = dispatchIdOf(text); return text }, (error) => { entry.failed = true; throw error })
     }
     let envelopeCache
     const dispatchEnvelopeSchema = () => {
@@ -313,7 +312,7 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
                 verb: tool.verb ?? null,
                 summary: row?.description?.trim() || null,
                 docs: `skills/gm/docs/verbs.md: search for \`${tool.verb ?? resolved}\``,
-                input_schema: sameAsEnvelope ? { shared: DISPATCH_ENVELOPE_NAME } : ownSchema,
+                input_schema: sameAsEnvelope ? { shared: DISPATCH_ENVELOPE_NAME, resolved: envelope } : ownSchema,
                 body_schema: schema.declared
                     ? { declared: true, required: schema.required, fields: schema.fields }
                     : { declared: false, note: schema.note },
@@ -404,12 +403,14 @@ export function registerCodeMode(server, tools) {
                 const callIds = replies.map((entry) => entry.dispatch_id).filter(Boolean)
                 appendDiagnostic('codemode-threw', { diagnostic_id: diagnosticId, session_id, gm_dispatch_ids: callIds, error: detail })
                 const settled = replies.filter((entry) => entry.text !== undefined)
-                const partial = settled.map((entry, index) => `--- partial ${index + 1}/${replies.length}: gm.${entry.verb} completed before the throw ---\n${capCodemodeText(entry.text, cap)}`)
-                const unsettled = replies.length - settled.length
-                const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettled ? `, ${unsettled} still pending or failed` : ''}; their replies follow`] : []
+                const partial = args.full_response ? settled.map((entry, index) => `--- partial ${index + 1}/${replies.length}: gm.${entry.verb} completed before the throw ---\n${capCodemodeText(entry.text, cap)}`) : []
+                const failedCount = replies.filter((entry) => entry.failed).length
+                const pendingCount = replies.length - settled.length - failedCount
+                const unsettledNote = [pendingCount ? `${pendingCount} still pending` : '', failedCount ? `${failedCount} failed` : ''].filter(Boolean).join(', ')
+                const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettledNote ? `, ${unsettledNote}` : ''}; ${args.full_response ? 'their replies follow' : 'their replies omitted, pass full_response:true'}`] : []
                 const ids = callIds.length ? [`gm_dispatch_ids: ${callIds.join(', ')}`] : []
-                const headline = detail.split('\n')[0]
-                const text = [`diagnostic_id: ${diagnosticId}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...ids, ...tally, ...partial].join('\n')
+                const [headline, ...detailLines] = detail.split('\n')
+                const text = [`diagnostic_id: ${diagnosticId}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...detailLines, ...ids, ...tally, ...partial].join('\n')
                 return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(text, cap, CONTINUATION_RESERVE_CHARS)) }], isError: true }
             }
         }
