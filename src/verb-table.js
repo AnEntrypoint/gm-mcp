@@ -118,11 +118,25 @@ const GIT_SCOPED_TYPES = {
     git_stash_drop: { ref: z.string() },
     git_worktree_add: { ref: z.string(), rev: z.string(), commit: z.string(), start_point: z.string(), path: z.string(), create: z.boolean(), allowOutsideRoot: z.boolean() },
     git_status: { path: GIT_PATHSPEC, paths: GIT_PATHSPEC, files: GIT_PATHSPEC, summary: z.boolean(), limit: z.number(), eol: z.boolean() },
+    git_pull: { remote: z.string(), branch: z.string(), ff_only: booleanLike, rebase: booleanLike, autostash: booleanLike, user_name: z.string(), author_name: z.string(), user_email: z.string(), author_email: z.string() },
+    git_rewrite_authors: { apply: booleanLike, confirm: z.string(), since: z.string(), author_name: z.string(), author_email: z.string() },
+}
+
+const ZOD_BODY_TYPE_NAMES = { ZodString: 'string', ZodBoolean: 'boolean', ZodNumber: 'number', ZodArray: 'array' }
+function zodBodyType(zt) {
+    let t = zt
+    while (t._def.innerType) t = t._def.innerType
+    if (t._def.options) return t._def.options.map(zodBodyType).join('|')
+    return ZOD_BODY_TYPE_NAMES[t._def.typeName] ?? 'any'
 }
 
 function scopedGitRow(verb) {
     const types = GIT_SCOPED_TYPES[verb]
     const keys = Object.keys(types)
+    const body = {
+        required: [],
+        fields: Object.fromEntries(keys.map((key) => [key, { type: zodBodyType(types[key]), description: `${key} body field of ${verb}; a dropped one falls back to the verb's own default.` }])),
+    }
     const revisions = keys.filter((key) => key === 'range' || key === 'ref' || key === 'rev')
     const scoped = keys.filter((key) => !revisions.includes(key))
     const text = [
@@ -134,8 +148,11 @@ function scopedGitRow(verb) {
     return {
         aliases: keys,
         fields: aliasFields(verb, types, keys),
+        body,
         description: verb === 'git_reset'
             ? description + ' hard:true is the boolean form of mode:"hard" and rev is an alias of ref; paths scope the index only, so hard:true together with paths is refused. mode accepts soft|mixed|hard and hard must be a boolean -- anything else is refused with error_code invalid_args, never coerced to a default. Every ok reply carries mode, hard, reset_to and scope, so the operation that ran is readable without re-reading the repo.'
+            : verb === 'git_log'
+            ? description + ' When several count keys are sent, limit wins over count, count over max_count, and max_count over n.'
             : description,
     }
 }
@@ -201,6 +218,9 @@ const PRD_ADD_BODY = {
         blockedBy: { type: 'array', description: 'Row ids this row waits on.' },
         overwrite: { type: 'boolean', description: 'Rescopes an existing row; refused when that row is closed.' },
         repair: { type: 'boolean', description: 'Repairs the PRD store before the add.' },
+        owner: { type: 'string', description: 'Accountable lane or session that must act on the finding. Defaults to the filer session_id.' },
+        disposition: { type: 'string', enum: ['open', 'accepted', 'rejected', 'deferred'], description: 'Inspection disposition of the finding; a reason belongs in description.' },
+        recheck_by: { type: 'string', description: 'Session that re-checks the finding; must differ from owner.' },
     },
 }
 const PRD_ADD_TYPES = {
@@ -213,8 +233,11 @@ const PRD_ADD_TYPES = {
     blockedBy: z.array(z.string()),
     overwrite: booleanLike,
     repair: booleanLike,
+    owner: z.string(),
+    disposition: z.enum(['open', 'accepted', 'rejected', 'deferred']),
+    recheck_by: z.string(),
 }
-const PRD_ADD_KEYS = ['id', 'subject', 'description', 'acceptance_criteria', 'witness_plan', 'status', 'blockedBy', 'overwrite', 'repair']
+const PRD_ADD_KEYS = ['id', 'subject', 'description', 'acceptance_criteria', 'witness_plan', 'status', 'blockedBy', 'overwrite', 'repair', 'owner', 'disposition', 'recheck_by']
 const PRD_ADD_FIELDS = aliasFields('prd_add', PRD_ADD_TYPES, PRD_ADD_KEYS)
 const PRD_ADD_DESCRIPTION = ` ${PRD_ADD_KEYS.join(', ')} are accepted at the top level and folded into body, so {"subject":"<row intent>","description":"<row prose>"} and body:{"subject":"...","description":"..."} are the same call; a key named in both takes its value from body. description is the row prose: it is persisted on the row as description, never as the dispatch body. Without an id or any subject/title/name/task/goal/description/notes text the row is refused.`
 const PRD_RESOLVE_BODY = {
@@ -360,6 +383,8 @@ const GIT_ADD_BODY = {
     required: [],
     fields: {
         paths: { type: 'array', aliases: ['files'], description: 'Pathspecs to stage with git add. Protected gm state paths are refused and named in the refusal.' },
+        hunks: { type: 'object', description: 'Refused: git_add stages whole files only, so hunk-scoped staging has no verb. Use git_commit {hunks} to commit named hunks without staging the rest.' },
+        patch: { type: 'string', description: 'Refused: git_add stages whole files only, so patch-scoped staging has no verb. Use git_commit {patch} to commit a diff without staging the rest.' },
     },
 }
 
@@ -587,7 +612,7 @@ const REGISTRY_ROWS = [
     { canonical: 'git_add', body: GIT_ADD_BODY },
     { canonical: 'git_commit', aliases: GIT_COMMIT_VERB_KEYS, fields: GIT_COMMIT_FIELDS, description: GIT_COMMIT_DESCRIPTION, body: GIT_COMMIT_BODY },
     { canonical: 'git_amend' },
-    { canonical: 'git_rewrite_authors' },
+    { canonical: 'git_rewrite_authors', ...scopedGitRow('git_rewrite_authors') },
     { canonical: 'git_finalize', aliases: GIT_COMMIT_KEYS, fields: GIT_FINALIZE_FIELDS, description: GIT_FINALIZE_DESCRIPTION, body: GIT_FINALIZE_BODY },
     { canonical: 'git_log', ...scopedGitRow('git_log') },
     { canonical: 'git_diff', ...scopedGitRow('git_diff') },
@@ -604,7 +629,7 @@ const REGISTRY_ROWS = [
     { canonical: 'git_rm' },
     { canonical: 'git_revert', ...scopedGitRow('git_revert') },
     { canonical: 'git_reset', ...scopedGitRow('git_reset') },
-    { canonical: 'git_pull' },
+    { canonical: 'git_pull', ...scopedGitRow('git_pull') },
     { canonical: 'git_stash' },
     { canonical: 'git_stash_pop', ...scopedGitRow('git_stash_pop') },
     { canonical: 'git_stash_drop', ...scopedGitRow('git_stash_drop') },
