@@ -50,7 +50,8 @@ function failedReplyDetail(text) {
     const block = start === -1 ? '' : lines.slice(start).filter((line, index) => index === 0 || /^\s/.test(line)).join(' ').replace(/\s+/g, ' ').trim()
     const code = /^error_code: (.*)$/m.exec(header)?.[1]
     const dispatchId = dispatchIdOf(text)
-    const detail = `ok: false${code ? ` (error_code: ${code})` : ''}${dispatchId ? ` dispatch_id: ${dispatchId}` : ''} -- ${block || 'the reply names no error field'}`
+    const head = header.split('\n').slice(0, 8).join(' | ').replace(/\s+/g, ' ').trim()
+    const detail = `ok: false${code ? ` (error_code: ${code})` : ''}${dispatchId ? ` dispatch_id: ${dispatchId}` : ''} -- ${block || `no error field; reply head: ${head}`}`
     return detail.length > FAILED_REPLY_MAX_CHARS ? `${detail.slice(0, FAILED_REPLY_MAX_CHARS - 3)}...` : detail
 }
 

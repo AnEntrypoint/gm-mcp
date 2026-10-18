@@ -117,11 +117,12 @@ function assertReleaseAssetUrl(url, repo) {
 }
 
 async function fetchLatestRelease(repo) {
-    const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+    const url = `https://api.github.com/repos/${repo}/releases/latest`
+    const response = await fetch(url, {
         headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'gm-mcp-release-bridge' },
         signal: AbortSignal.timeout(API_TIMEOUT_MS),
     })
-    if (!response.ok) throw new Error(`HTTP ${response.status} from ${repo} releases/latest`)
+    if (!response.ok) throw new Error(`HTTP ${response.status} from ${url}`)
     const body = await response.json()
     const tag = body && typeof body === 'object' ? body.tag_name : undefined
     const version = parseReleaseTag(tag)

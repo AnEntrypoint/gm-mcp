@@ -161,7 +161,7 @@ const EXEC_JS_BODY = {
     required: ['code'],
     fields: {
         code: { type: 'string', aliases: ['body'], description: 'JavaScript body, run as nodejs. Pass it as the top-level raw_body argument: a JSON object body is refused. A leading "timeoutMs=<ms>" line sets the budget (floor 100, ceiling 900000).' },
-        timeoutMs: { type: 'integer', description: 'Wall-clock budget for the child in milliseconds (floor 100, ceiling 900000, default 300000). Sent as a leading timeoutMs= line of the raw body.' },
+        timeoutMs: { type: 'integer', description: 'Wall-clock budget for the child in milliseconds (floor 100, ceiling 900000, default 300000). Sent as a leading timeoutMs= line of the raw body. Above 600000 the caller wait stops at the 600000 ms poll ceiling (timeout_seconds max 600): the timed-out reply then carries exec_limit_ms (the child budget) and poll_timeout_ceiling_ms (the wait) as separate fields, and resume_task keeps waiting on the same dispatch.' },
         cwd: { type: 'string', description: 'Directory the script runs in.' },
     },
 }
@@ -348,8 +348,8 @@ const GIT_COMMIT_BODY = {
         add_all: { type: 'boolean', description: 'Stages everything first.' },
         allow_whole_index: { type: 'boolean', description: 'Commits the whole index when paths is absent.' },
         allow_foreign_rows: { type: 'boolean', aliases: ['allow_foreign_prd_rows'], description: 'Commits rows another session owns.' },
-        author_name: { type: 'string', description: 'Commit author name; overrides the configured identity.' },
-        author_email: { type: 'string', description: 'Commit author email; overrides the configured identity.' },
+        author_name: { type: 'string', description: 'Commit author name; must equal the configured identity, any other value is refused.' },
+        author_email: { type: 'string', description: 'Commit author email; must equal the configured identity, any other value is refused.' },
         patch: { type: 'string', description: 'Hunk-scoped commit: a unified diff against HEAD, committed through a temp index so only its hunks land. Exclusive with hunks; does not combine with paths, files, add_all, amend or allow_empty.' },
         hunks: { type: 'object', description: 'Hunk-scoped commit: {path: [1-based hunk numbers from git diff HEAD -- <path>]}, committed through a temp index. Exclusive with patch; does not combine with paths, files, add_all, amend or allow_empty.' },
     },
