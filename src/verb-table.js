@@ -286,7 +286,7 @@ const CODESEARCH_BODY = {
         exclude: { type: 'string', aliases: ['exclude_glob', 'exclude_globs'], description: 'Exclusion glob.' },
         combine: { type: 'string', aliases: ['term_combination'], enum: ['phrase', 'and', 'or'], description: 'Anything else is refused.' },
         output: { type: 'string', enum: ['matches', 'full', 'compact', 'content', 'files', 'count'], description: 'Output shape. "compact" is path:line: trimmed text and "content" is the same shape under grep\'s name for it; "full" is an alias of "matches".' },
-        case_insensitive: { type: 'boolean', description: 'Folds case. Literal and regex are case-sensitive by default (a mixed-case match is missed unless this is true); the reply echoes case_insensitive.' },
+        case_insensitive: { type: 'boolean', aliases: ['ignore_case'], description: 'Folds case. Literal and regex are case-sensitive by default (a mixed-case match is missed unless this is true); the reply echoes case_insensitive.' },
         whole_word: { type: 'boolean', description: 'Whole-word match; refused in filename mode.' },
         comments_only: { type: 'boolean', aliases: ['comments'], description: 'Scans comments only; refused in filename mode.' },
         verbatim: { type: 'boolean', description: 'Forces combine to phrase.' },
