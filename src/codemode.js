@@ -16,7 +16,6 @@ import { resolve as resolvePath } from 'node:path'
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
 const DEFAULT_CODEMODE_TIMEOUT_MS = 540000
-const UNRETURNED_REPLY_CHARS = 6000
 
 function codemodeTimeoutMs() {
     const configured = Number(process.env.GM_CODEMODE_TIMEOUT_MS)
@@ -369,15 +368,15 @@ export function registerCodeMode(server, tools) {
             const logger = { log: (...parts) => logs.push(parts.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' ')) }
             const session_id = args.session_id || PROCESS_CODEMODE_SESSION_ID
             const replies = []
+            const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
             try {
                 const gm = bindings(tools, { session_id, cwd: args.cwd }, extra, replies)
                 const require = createRequire(resolvePath(args.cwd || process.cwd(), 'gm-codemode.js'))
                 const value = await withCodemodeDeadline(new AsyncFunction('gm', 'console', 'require', args.code)(gm, logger, require), codemodeTimeoutMs())
                 const unreturned = value === undefined
-                    ? replies.filter((entry) => entry.text !== undefined).map((entry) => `--- gm.${entry.verb} (body returned nothing, so each gm reply follows) ---\n${capCodemodeText(entry.text, UNRETURNED_REPLY_CHARS)}`)
+                    ? replies.filter((entry) => entry.text !== undefined).map((entry) => `--- gm.${entry.verb} (body returned nothing, so each gm reply follows) ---\n${capCodemodeText(entry.text, cap)}`)
                     : []
                 const joined = [...logs, formatValue(value), ...unreturned].filter((line) => line !== '').join('\n')
-                const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
                 return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(joined, cap, CONTINUATION_RESERVE_CHARS)) }] }
             } catch (error) {
                 const detail = describeError(error)
@@ -385,13 +384,12 @@ export function registerCodeMode(server, tools) {
                 const callIds = replies.map((entry) => entry.dispatch_id).filter(Boolean)
                 appendDiagnostic('codemode-threw', { dispatch_id: dispatchId, session_id, gm_dispatch_ids: callIds, error: detail })
                 const settled = replies.filter((entry) => entry.text !== undefined)
-                const partial = settled.map((entry, index) => `--- partial ${index + 1}/${replies.length}: gm.${entry.verb} completed before the throw ---\n${capCodemodeText(entry.text, UNRETURNED_REPLY_CHARS)}`)
+                const partial = settled.map((entry, index) => `--- partial ${index + 1}/${replies.length}: gm.${entry.verb} completed before the throw ---\n${capCodemodeText(entry.text, cap)}`)
                 const unsettled = replies.length - settled.length
                 const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettled ? `, ${unsettled} still pending or failed` : ''}; their replies follow`] : []
                 const ids = callIds.length ? [`gm_dispatch_ids: ${callIds.join(', ')}`] : []
                 const headline = detail.split('\n')[0]
                 const text = [`dispatch_id: ${dispatchId}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...ids, ...tally, ...partial].join('\n')
-                const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
                 return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(text, cap, CONTINUATION_RESERVE_CHARS)) }], isError: true }
             }
         }
