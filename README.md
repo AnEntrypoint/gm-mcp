@@ -243,10 +243,15 @@ health-probe the port and spawn the shared server detached when nothing answers
 (one spawner per port, see `claimSpawn` in `gm-mcp/AGENTS.md`), so the durable
 transport is up before any client asks for it and comes back by itself after a
 crash. A stdio start runs a local server with its watchers only when the
-singleton is opted out or unreachable. `GM_MCP_NO_HTTP_SINGLETON=1`
-(or `GM_MCP_NO_HTTP_SINGLETON=1`) opts out, `GM_MCP_HTTP_PORT` moves the port.
-Because no state is carried between requests, a restart of the HTTP server
-never loses an in-flight dispatch.
+singleton is opted out (`GM_MCP_NO_HTTP_SINGLETON=1`) or cannot start, and
+`GM_MCP_HTTP_PORT` moves the port. A relay whose singleton stops answering
+restarts it once (8 s budget), answers the call in-process over the spool when
+the restart does not answer in time, and probes `/health` before each later
+call so it routes back to HTTP as soon as the singleton answers. Each relayed
+call is bounded by `GM_CODEMODE_TIMEOUT_MS` (default 600000) plus 5 s; an error
+names the failing layer (HTTP singleton, or in-process fallback). Because no
+state is carried between requests, a restart of the HTTP server never loses an
+in-flight dispatch.
 
 The HTTP transport has its own stranding failure: if the port is empty when a
 session's client connects, that client answers `MCP server "gm" is not

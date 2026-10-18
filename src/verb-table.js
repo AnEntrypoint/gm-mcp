@@ -235,8 +235,9 @@ const PRD_LIST_BODY = {
     required: [],
     fields: {
         id: { type: 'string', aliases: ['ids', 'row_id'], description: 'Resolves one row. prd-list is not a selector beyond this.' },
-        status: { type: 'string', enum: ['pending', 'ready', 'completed', 'blocked'], description: 'Keeps only rows of this status.' },
+        status: { type: 'string', enum: ['pending', 'ready', 'completed', 'blocked', 'all'], description: 'Keeps only rows of this status; all pages every status.' },
         limit: { type: 'integer', description: 'Maximum rows returned.' },
+        offset: { type: 'integer', description: 'First row to return (0-based); use next_offset of the previous page.' },
         full: { type: 'boolean', aliases: ['verbose', 'bodies'], description: 'Expands row bodies; the default is full when an id filter was given.' },
         brief: { type: 'boolean', aliases: ['compact'], description: 'Compresses rows.' },
     },
@@ -314,7 +315,7 @@ const FS_WRITE_BODY = {
     required: ['path', 'content'],
     fields: {
         path: { type: 'string', description: 'Project-relative path. allowOutsideRoot never widens a write.' },
-        content: { type: 'string', aliases: ['data', 'text'], description: 'Complete file content: gm has no edit verb, so a whole-file write is the supported edit.' },
+        content: { type: 'string or array of lines', aliases: ['data', 'text'], description: 'Complete file content: gm has no edit verb, so a whole-file write is the supported edit.' },
         allow_empty: { type: 'boolean', description: 'Empty content is refused without it.' },
         append: { type: 'boolean', description: 'Appends instead of replacing.' },
     },

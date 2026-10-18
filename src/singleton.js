@@ -27,6 +27,7 @@ const STARTUP_WAIT_MS = 20_000
 const STARTUP_POLL_MS = 250
 const RETIRE_WAIT_MS = 5_000
 const RETIRE_POLL_MS = 200
+const RETIRE_KILL_WAIT_MS = 3_000
 const SUPERVISOR_INTERVAL_MS = 15_000
 const SUPERVISOR_STATE_STALE_MS = 60_000
 const OFF_VALUES = new Set(['0', 'false', 'no', 'off'])
@@ -380,24 +381,35 @@ export function parentPidOf(pid) {
     }
 }
 
+function signalRetiredPid(port, pid, reason, signal) {
+    try {
+        process.kill(pid, signal)
+    } catch (error) {
+        appendDiagnostic('http-instance-retire-signal-failed', { port, pid, reason, signal, error: describeError(error) })
+    }
+}
+
+async function retireWaitGone(port, pid, waitMs) {
+    const deadline = Date.now() + waitMs
+    for (;;) {
+        const gone = pidAlive(pid) !== true && !(await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS))
+        if (gone || Date.now() >= deadline) return gone
+        await new Promise((resolve) => setTimeout(resolve, RETIRE_POLL_MS))
+    }
+}
+
 async function retireHttpInstance({ port, pid, reason, version = null }) {
     const target = Number(pid)
     if (!Number.isInteger(target) || target <= 0 || target === process.pid) return false
     appendDiagnostic('http-instance-retire', { port, pid: target, reason, running_version: version, installed_version: BUNDLE_VERSION })
-    try {
-        process.kill(target)
-    } catch (error) {
-        appendDiagnostic('http-instance-retire-signal-failed', { port, pid: target, reason, error: describeError(error) })
-        return false
-    }
-    const deadline = Date.now() + RETIRE_WAIT_MS
-    while (Date.now() < deadline) {
-        if (!(await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS))) break
-        await new Promise((resolve) => setTimeout(resolve, RETIRE_POLL_MS))
-    }
-    if (await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS)) {
-        appendDiagnostic('http-instance-retire-refused', { port, pid: target, reason, waited_ms: RETIRE_WAIT_MS })
-        return false
+    signalRetiredPid(port, target, reason, 'SIGTERM')
+    if (!(await retireWaitGone(port, target, RETIRE_WAIT_MS))) {
+        appendDiagnostic('http-instance-retire-escalated', { port, pid: target, reason, from: 'SIGTERM', to: 'SIGKILL' })
+        signalRetiredPid(port, target, reason, 'SIGKILL')
+        if (!(await retireWaitGone(port, target, RETIRE_KILL_WAIT_MS))) {
+            appendDiagnostic('http-instance-retire-refused', { port, pid: target, reason, waited_ms: RETIRE_WAIT_MS + RETIRE_KILL_WAIT_MS })
+            return false
+        }
     }
     dropInstanceFiles(port)
     appendDiagnostic('http-instance-retired', { port, pid: target, reason })
@@ -622,15 +634,18 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
     }
 
     const recorded = readStateFile(stateFilePath(), port)
-    if (recorded?.pid && pidAlive(recorded.pid) === true) {
+    const holderPid = recorded?.pid && pidAlive(recorded.pid) === true
+        ? Number(recorded.pid)
+        : recordedServerPid(readStateFile(instanceFilePath(port), port), readStateFile(supervisorStateFilePath(port), port), port)
+    if (holderPid !== null) {
         const late = await waitForHealth(port, 5_000)
         if (late) {
-            return { url: httpMcpUrl(port), port, pid: late.pid ?? recorded.pid, reused: true, version: late.version ?? null }
+            return { url: httpMcpUrl(port), port, pid: late.pid ?? holderPid, reused: true, version: late.version ?? null }
         }
-        const retired = await retireHttpInstance({ port, pid: recorded.pid, reason: 'unresponsive-recorded-pid' })
+        const retired = await retireHttpInstance({ port, pid: holderPid, reason: 'unresponsive-recorded-pid' })
         appendDiagnostic('http-singleton-unresponsive', {
             port,
-            recorded_pid: recorded.pid,
+            recorded_pid: holderPid,
             retired,
             note: 'a live pid holds the port but answers no health check',
         })

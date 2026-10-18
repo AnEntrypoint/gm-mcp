@@ -35,6 +35,12 @@ const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm too
 
 const FAILED_REPLY_MAX_CHARS = 400
 
+function dispatchIdOf(text) {
+    return /^dispatch_id: (\S+)/m.exec(text)?.[1] ?? null
+}
+
+let codemodeThrowSeq = 0
+
 function failedReplyDetail(text) {
     if (!/^(dispatch_id|data|error|ok|gm_session_header_version):/.test(text)) return null
     const header = text.split(/^--- data/m)[0]
@@ -43,7 +49,8 @@ function failedReplyDetail(text) {
     const start = lines.findIndex((line) => line.startsWith('error:'))
     const block = start === -1 ? '' : lines.slice(start).filter((line, index) => index === 0 || /^\s/.test(line)).join(' ').replace(/\s+/g, ' ').trim()
     const code = /^error_code: (.*)$/m.exec(header)?.[1]
-    const detail = `ok: false${code ? ` (error_code: ${code})` : ''} -- ${block || 'the reply names no error field'}`
+    const dispatchId = dispatchIdOf(text)
+    const detail = `ok: false${code ? ` (error_code: ${code})` : ''}${dispatchId ? ` dispatch_id: ${dispatchId}` : ''} -- ${block || 'the reply names no error field'}`
     return detail.length > FAILED_REPLY_MAX_CHARS ? `${detail.slice(0, FAILED_REPLY_MAX_CHARS - 3)}...` : detail
 }
 
@@ -136,8 +143,10 @@ export function refuseMissingRequiredBodyKeys(name, verb, folded) {
     const schema = verbBodySchema(verb)
     if (!schema.declared) return
     const body = isPlainObject(folded.body) ? folded.body : {}
+    const claimOnly = verb === 'git_commit' && [true, 'true'].includes(body.claim_only)
     const missing = schema.required.filter((field) => {
         if (field === 'session_id') return false
+        if (claimOnly && field === 'message') return false
         if (body[field] !== undefined) return false
         return !(schema.fields[field]?.aliases ?? []).some((alias) => body[alias] !== undefined)
     })
@@ -255,7 +264,7 @@ function bindings(tools, { session_id, cwd }, extra, sink = null) {
         if (!sink) return pending
         const entry = { verb: tool.verb ?? name }
         sink.push(entry)
-        return pending.then((text) => { entry.text = text; return text })
+        return pending.then((text) => { entry.text = text; entry.dispatch_id = dispatchIdOf(text); return text })
     }
     let envelopeCache
     const dispatchEnvelopeSchema = () => {
@@ -372,12 +381,16 @@ export function registerCodeMode(server, tools) {
                 return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(joined, cap, CONTINUATION_RESERVE_CHARS)) }] }
             } catch (error) {
                 const detail = describeError(error)
-                appendDiagnostic('codemode-threw', { error: detail })
+                const dispatchId = `codemode-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`
+                const callIds = replies.map((entry) => entry.dispatch_id).filter(Boolean)
+                appendDiagnostic('codemode-threw', { dispatch_id: dispatchId, session_id, gm_dispatch_ids: callIds, error: detail })
                 const settled = replies.filter((entry) => entry.text !== undefined)
                 const partial = settled.map((entry, index) => `--- partial ${index + 1}/${replies.length}: gm.${entry.verb} completed before the throw ---\n${capCodemodeText(entry.text, UNRETURNED_REPLY_CHARS)}`)
                 const unsettled = replies.length - settled.length
                 const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettled ? `, ${unsettled} still pending or failed` : ''}; their replies follow`] : []
-                const text = [...logs, `gm-mcp: gm_codemode code threw -- ${detail}`, ...tally, ...partial].join('\n')
+                const ids = callIds.length ? [`gm_dispatch_ids: ${callIds.join(', ')}`] : []
+                const headline = detail.split('\n')[0]
+                const text = [`dispatch_id: ${dispatchId}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...ids, ...tally, ...partial].join('\n')
                 return { content: [{ type: 'text', text: continuedReply(session_id, text) }], isError: true }
             }
         }
