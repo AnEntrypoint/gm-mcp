@@ -47,7 +47,6 @@ export async function buildBundle(write = false, keep = new Set()) {
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {
     const keep = new Set((process.env.GM_MCP_BUILD_INCLUDE || '').split(',').map(s => s.trim()).filter(Boolean))
     const dirty = uncommittedSrcPaths(repoRoot).map(line => line.slice(3))
-    if (process.env.GM_MCP_BUILD_ALLOW_DIRTY) dirty.forEach(p => keep.add(p))
     const foreign = dirty.filter(p => !keep.has(p))
     if (foreign.length) console.error(`bundling committed HEAD for uncommitted src/ paths (name them in GM_MCP_BUILD_INCLUDE to ship them):\n${foreign.join('\n')}`)
     await buildBundle(true, keep)
