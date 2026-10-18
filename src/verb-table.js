@@ -353,6 +353,13 @@ const GIT_COMMIT_BODY = {
         hunks: { type: 'object', description: 'Hunk-scoped commit: {path: [1-based hunk numbers from git diff HEAD -- <path>]}, committed through a temp index. Exclusive with patch; does not combine with paths, files, add_all, amend or allow_empty.' },
     },
 }
+const GIT_ADD_BODY = {
+    required: [],
+    fields: {
+        paths: { type: 'array', aliases: ['files'], description: 'Pathspecs to stage with git add. Protected gm state paths are refused and named in the refusal.' },
+    },
+}
+
 const GIT_SUBMODULE_ADD_BODY = {
     required: ['url', 'path'],
     fields: {
@@ -571,7 +578,7 @@ const REGISTRY_ROWS = [
     { canonical: 'git_status', ...scopedGitRow('git_status') },
     { canonical: 'branch_status' },
     { canonical: 'git_push', aliases: GIT_PUSH_KEYS, fields: GIT_PUSH_FIELDS, description: GIT_PUSH_DESCRIPTION, body: GIT_PUSH_BODY },
-    { canonical: 'git_add' },
+    { canonical: 'git_add', body: GIT_ADD_BODY },
     { canonical: 'git_commit', aliases: GIT_COMMIT_VERB_KEYS, fields: GIT_COMMIT_FIELDS, description: GIT_COMMIT_DESCRIPTION, body: GIT_COMMIT_BODY },
     { canonical: 'git_amend' },
     { canonical: 'git_rewrite_authors' },
