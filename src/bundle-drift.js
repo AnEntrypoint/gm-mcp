@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { compareVersions, parseBundleVersion } from './self-update.js'
-import { launchedEntryPath } from './singleton.js'
+import { launchedEntryPath, serverEntryPath } from './singleton.js'
 import { appendDiagnostic } from './server-log.js'
 
 const DEFAULT_INTERVAL_MS = 30_000
@@ -61,7 +61,7 @@ export function runningBundle() {
 let installed = { size: -1, mtimeMs: -1, sha256: null, version: null }
 
 export function installedBundle() {
-    const path = bundleEntryPath()
+    const path = serverEntryPath()
     let stat = null
     try {
         stat = statSync(path)
@@ -110,6 +110,7 @@ export function bundleDrift({ transport = process.env.GM_MCP_TRANSPORT || 'stdio
         path: runningState.path,
         running_version: runningState.version,
         running_sha256: runningState.sha256,
+        installed_path: installedState?.path ?? null,
         installed_version: installedState?.version ?? null,
         installed_sha256: installedState?.sha256 ?? null,
     }
@@ -129,22 +130,23 @@ export function bundleDrift({ transport = process.env.GM_MCP_TRANSPORT || 'stdio
     }
 }
 
-export function restartCommand(path = bundleEntryPath()) {
+export function restartCommand(path = serverEntryPath()) {
     return `node "${path}"`
 }
 
 export function bundleStalenessLine(state = bundleDrift()) {
     if (!state?.stale) return null
+    const installedPath = state.installed_path ?? state.path
     const installed = `${state.installed_version ?? 'unknown version'} (sha ${shortHash(state.installed_sha256)})`
     const running = `${state.running_version} (sha ${shortHash(state.running_sha256)})`
     const action = state.reloadable
         ? 'reloading between dispatches now'
-        : `restart required (${state.refusal_reason}): run \`${restartCommand(state.path)}\` -- a running gm-mcp cannot replace itself, so only a fresh start serves the installed bundle`
-    return `gm-mcp: this server is serving bundle ${running} but ${installed} is installed at ${state.path} -- ${action}`
+        : `restart required (${state.refusal_reason}): run \`${restartCommand(installedPath)}\` -- a running gm-mcp cannot replace itself, so only a fresh start serves the installed bundle`
+    return `gm-mcp: this server is serving bundle ${running} but ${installed} is installed at ${installedPath} -- ${action}`
 }
 
 export function bundleStalenessNotice(state = bundleDrift()) {
-    return bundleStalenessLine(state)
+    return bundleStalenessAnnouncement(state)
 }
 
 const announcedBundles = new Set()

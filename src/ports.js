@@ -1,10 +1,21 @@
 import { execFileSync } from 'node:child_process'
 import net from 'node:net'
 
+const LISTENER_CACHE_TTL_MS = 1_000
+const listenerCache = new Map()
 
 export function portListenerState(port) {
     const wanted = Number(port)
     if (!Number.isInteger(wanted) || wanted <= 0) return { measured: false, hasListener: null, ownerPid: null }
+    const now = Date.now()
+    const cached = listenerCache.get(wanted)
+    if (cached !== undefined && now - cached.at < LISTENER_CACHE_TTL_MS) return cached.state
+    const state = measurePortListener(wanted)
+    listenerCache.set(wanted, { at: now, state })
+    return state
+}
+
+function measurePortListener(wanted) {
     try {
         if (process.platform === 'win32') {
             const text = execFileSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8', windowsHide: true, timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'] })

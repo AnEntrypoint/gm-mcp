@@ -6,6 +6,7 @@ import { tableRow, verbDescriptionLead } from './verb-table.js'
 
 const DISPATCH_ENVELOPE_NAME = 'dispatch_envelope'
 import { DISPATCH_BODY_FIELDS, GUEST_ENVELOPE_FIELDS, verbBodySchema } from './verb-bodies.js'
+import { fsReadRangeCanonicalBody } from './dispatch.js'
 import { NOTICES } from './notices.js'
 import { CONTINUATION_RESERVE_CHARS, continuedReply } from './continuation.js'
 
@@ -89,6 +90,11 @@ function proseFieldFor(verb) {
     return 'description' in schema.fields ? 'description' : 'body'
 }
 
+function canonicalFsReadArgs(verb, folded) {
+    if (verb !== 'fs_read' || !isPlainObject(folded?.body)) return folded
+    return { ...folded, body: fsReadRangeCanonicalBody(verb, folded.body) }
+}
+
 export function foldVerbArgs(tool, args) {
     if (!tool?.verb) return args
     if (!isPlainObject(args)) return args
@@ -130,7 +136,7 @@ export function refuseUndeclaredBodyKeys(name, verb, folded) {
     if (!isPlainObject(body)) return
     const schema = verbBodySchema(verb)
     if (!schema.declared) return
-    const known = new Set([...Object.keys(schema.fields), ...Object.keys(DISPATCH_BODY_FIELDS), ...GUEST_ENVELOPE_FIELDS])
+    const known = new Set([...Object.keys(schema.fields), ...Object.keys(DISPATCH_BODY_FIELDS), ...GUEST_ENVELOPE_FIELDS, ...(tableRow(verb)?.aliases ?? [])])
     for (const spec of Object.values(schema.fields)) for (const alias of spec.aliases ?? []) known.add(alias)
     const unknown = Object.keys(body).filter((key) => !known.has(key))
     if (unknown.length === 0) return
@@ -223,7 +229,13 @@ function capCodemodeText(text, cap, reserve = 0) {
     return `${text.slice(0, Math.max(0, room - notice.length))}${notice}`
 }
 
-function bindings(tools, { session_id, cwd }, extra, sink = null) {
+const ENVELOPE_KEYS = ['timeout_seconds', 'full_response', 'resume_task']
+
+function envelopeKeys(args) {
+    return Object.fromEntries(ENVELOPE_KEYS.filter((key) => args[key] !== undefined).map((key) => [key, args[key]]))
+}
+
+function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null) {
     const names = [...tools.keys()]
     const resolve = (name) => {
         const key = String(name)
@@ -251,13 +263,16 @@ function bindings(tools, { session_id, cwd }, extra, sink = null) {
         const merged = mergeEnvelope(name, args, envelope)
         const tool = tools.get(name)
         const defaults = {}
-        const folded = foldVerbArgs(tool, merged)
+        const folded = canonicalFsReadArgs(tool.verb, foldVerbArgs(tool, merged))
         refuseUndeclaredBodyKeys(name, tool.verb, folded)
         refuseMissingRequiredBodyKeys(name, tool.verb, folded)
         if ('session_id' in tool.inputSchema && folded.session_id === undefined) defaults.session_id = session_id
         if ('cwd' in tool.inputSchema && folded.cwd === undefined) {
             const defaultCwd = defaultCwdFor(merged, cwd)
             if (defaultCwd !== undefined) defaults.cwd = defaultCwd
+        }
+        for (const key of ENVELOPE_KEYS) {
+            if (topEnvelope[key] !== undefined && folded[key] === undefined && key in tool.inputSchema) defaults[key] = topEnvelope[key]
         }
         const pending = tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then((result) => replyText(result, tool.verb ?? name))
         if (!sink) return pending
@@ -361,6 +376,9 @@ export function registerCodeMode(server, tools) {
                 session_id: z.string().optional().describe('Default session_id for every gm call that does not pass its own.'),
                 cwd: z.string().optional().describe('Default cwd for every gm call that does not pass its own.'),
                 max_chars: z.number().optional().describe('Reply cap in characters for the returned text (default 24000). Past it the text is cut and reply_truncated is true.'),
+                timeout_seconds: z.number().optional().describe('Dispatch envelope key folded into every gm call that declares it (poll budget in seconds).'),
+                full_response: z.boolean().optional().describe('Dispatch envelope key folded into every gm call that declares it (bypass reply compaction).'),
+                resume_task: z.string().optional().describe('Dispatch envelope key folded into every gm call that declares it (resume an earlier dispatch by task id).'),
             },
         },
         async (args = {}, extra) => {
@@ -370,7 +388,7 @@ export function registerCodeMode(server, tools) {
             const replies = []
             const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
             try {
-                const gm = bindings(tools, { session_id, cwd: args.cwd }, extra, replies)
+                const gm = bindings(tools, { session_id, cwd: args.cwd, ...envelopeKeys(args) }, extra, replies)
                 const require = createRequire(resolvePath(args.cwd || process.cwd(), 'gm-codemode.js'))
                 const value = await withCodemodeDeadline(new AsyncFunction('gm', 'console', 'require', args.code)(gm, logger, require), codemodeTimeoutMs())
                 const unreturned = value === undefined
@@ -380,16 +398,16 @@ export function registerCodeMode(server, tools) {
                 return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(joined, cap, CONTINUATION_RESERVE_CHARS)) }] }
             } catch (error) {
                 const detail = describeError(error)
-                const dispatchId = `codemode-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`
+                const diagnosticId = `codemode-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`
                 const callIds = replies.map((entry) => entry.dispatch_id).filter(Boolean)
-                appendDiagnostic('codemode-threw', { dispatch_id: dispatchId, session_id, gm_dispatch_ids: callIds, error: detail })
+                appendDiagnostic('codemode-threw', { diagnostic_id: diagnosticId, session_id, gm_dispatch_ids: callIds, error: detail })
                 const settled = replies.filter((entry) => entry.text !== undefined)
                 const partial = settled.map((entry, index) => `--- partial ${index + 1}/${replies.length}: gm.${entry.verb} completed before the throw ---\n${capCodemodeText(entry.text, cap)}`)
                 const unsettled = replies.length - settled.length
                 const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettled ? `, ${unsettled} still pending or failed` : ''}; their replies follow`] : []
                 const ids = callIds.length ? [`gm_dispatch_ids: ${callIds.join(', ')}`] : []
                 const headline = detail.split('\n')[0]
-                const text = [`dispatch_id: ${dispatchId}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...ids, ...tally, ...partial].join('\n')
+                const text = [`diagnostic_id: ${diagnosticId}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...ids, ...tally, ...partial].join('\n')
                 return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(text, cap, CONTINUATION_RESERVE_CHARS)) }], isError: true }
             }
         }
