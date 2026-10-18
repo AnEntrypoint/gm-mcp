@@ -100,6 +100,7 @@ function incompleteScanReasons(source) {
 function searchShowsNoHits(source) {
     if (Array.isArray(source.matches)) return source.matches.length === 0
     if (Array.isArray(source.hits)) return source.hits.length === 0
+    if (Number.isFinite(source.comment_count)) return source.comment_count === 0
     const counts = source.counts
     if (isPlainObject(counts)) {
         const definitions = counts.definitions
