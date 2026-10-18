@@ -9,6 +9,7 @@ const MONITOR_TICK_MS = 15000
 const RELAY_KEY = 'relay'
 const PENDING_LINE = /^\s*prd_pending_count:\s*(\d+)\s*$/m
 const CONTINUATION_HEADS = /^continuation:\s*$/gm
+const COMPLETE_LINE = /^complete:\s*true\s*$/m
 
 const entries = new Map()
 
@@ -27,11 +28,11 @@ export function idleNotifyMs() {
     return Number.isFinite(value) && value >= 0 ? value : DEFAULT_IDLE_NOTIFY_MS
 }
 
-export function continuationSnapshot(key, now = Date.now()) {
+export function continuationSnapshot(key, now = Date.now(), done = false) {
     const entry = entryFor(key)
     const action = entry.stopped ? 'stop' : entry.pending_rows === null ? 'none' : entry.pending_rows === 0 ? 'stop' : 'continue'
     const snapshot = {
-        state: entry.stopped ? 'stopped' : 'running',
+        state: entry.stopped ? 'stopped' : done ? 'done' : 'running',
         pending_rows: entry.pending_rows,
         idle_ms: Math.max(0, now - entry.last_ms),
         action,
@@ -58,14 +59,17 @@ export function continuedReply(key, text, now = Date.now()) {
     const entry = entryFor(key)
     const seen = PENDING_LINE.exec(text)
     if (seen) entry.pending_rows = Number(seen[1])
-    const snapshot = continuationSnapshot(key, now)
-    entry.last_ms = now
     const json = parsedJsonOf(text)
+    const done = json?.value?.complete === true || COMPLETE_LINE.test(text)
+    const snapshot = continuationSnapshot(key, now, done)
+    entry.last_ms = now
     if (json && json.value && typeof json.value === 'object' && !Array.isArray(json.value)) return JSON.stringify({ ...json.value, continuation: snapshot })
     if (json) return text
+    const heads = [...text.matchAll(CONTINUATION_HEADS)]
+    const body = heads.length ? text.slice(0, heads[0].index) : text
     const block = yaml.dump({ continuation: snapshot }, { lineWidth: 100 })
-    const separator = text === '' || text.endsWith('\n') ? '' : '\n'
-    return `${text}${separator}${block}`
+    const separator = body === '' || body.endsWith('\n') ? '' : '\n'
+    return `${body}${separator}${block}`
 }
 
 export function continuationBlockOf(text) {

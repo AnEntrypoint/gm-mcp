@@ -55,8 +55,8 @@ async function stdioRelayTarget() {
     }
     const reason = started?.error ?? 'singleton start threw'
     appendDiagnostic('stdio-relay-no-singleton', { port, reason })
-    console.error('gm-mcp: no gm-mcp HTTP server answers on port ' + port + ' and none could start (' + reason + '); refusing to start a second standalone server -- see ' + logFilePath())
-    process.exit(1)
+    console.error('gm-mcp: no gm-mcp HTTP server answers on port ' + port + ' and none could start (' + reason + '); serving this session in-process over the spool -- see ' + logFilePath())
+    return null
 }
 
 function watchForStaleBundle({ handOver = null, transportKind = 'stdio' } = {}) {

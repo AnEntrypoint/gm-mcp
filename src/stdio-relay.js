@@ -13,6 +13,28 @@ const SSE_DATA_PREFIX = 'data:'
 const RETRY_DELAYS_MS = [250, 1000]
 const TRANSIENT_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_CLOSED'])
 const LOCAL_INIT_ID = 'gm-relay-local-init'
+const DEFAULT_CODEMODE_TIMEOUT_MS = 600000
+const RELAY_BUDGET_MS = (Number(process.env.GM_CODEMODE_TIMEOUT_MS) > 0 ? Number(process.env.GM_CODEMODE_TIMEOUT_MS) : DEFAULT_CODEMODE_TIMEOUT_MS) + 5000
+const HEALTH_PROBE_MS = 1500
+const RESTART_BUDGET_MS = 8000
+const LOCAL_START_BUDGET_MS = 15000
+
+function within(promise, ms, layer) {
+    let timer
+    const expired = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${layer} did not answer within ${ms} ms`)), ms)
+    })
+    return Promise.race([promise, expired]).finally(() => clearTimeout(timer))
+}
+
+async function httpLive(url) {
+    try {
+        const response = await fetch(new URL('/health', url), { signal: AbortSignal.timeout(HEALTH_PROBE_MS) })
+        return response.ok
+    } catch {
+        return false
+    }
+}
 
 function writeFrame(text) {
     const body = text.trim()
@@ -58,6 +80,14 @@ function post(url, line) {
         request.on('error', reject)
         request.end(line)
     })
+}
+
+function portOf(url) {
+    try {
+        return new URL(url).port || 'default'
+    } catch {
+        return 'unparsed'
+    }
 }
 
 function isTransient(error) {
@@ -130,14 +160,17 @@ function createLocalFallback(initializeParams) {
     return {
         active: () => ready !== null,
         async handle(request) {
-            ready ??= start()
+            ready ??= within(start(), LOCAL_START_BUDGET_MS, 'in-process fallback start').catch((error) => {
+                ready = null
+                throw error
+            })
             const local = await ready
             if (request.id === undefined || request.id === null) {
                 await local.notify(request)
                 return null
             }
-            if (request.method === 'initialize') return { jsonrpc: '2.0', id: request.id, result: (await local.exchange({ ...request, id: LOCAL_INIT_ID + '-again' })).result }
-            return local.exchange(request)
+            if (request.method === 'initialize') return { jsonrpc: '2.0', id: request.id, result: (await within(local.exchange({ ...request, id: LOCAL_INIT_ID + '-again' }), RELAY_BUDGET_MS, 'in-process fallback')).result }
+            return within(local.exchange(request), RELAY_BUDGET_MS, 'in-process fallback')
         },
     }
 }
@@ -154,15 +187,18 @@ async function forwardLine(line, recover, state) {
     if (request?.method === 'initialize') state.initializeParams = request.params
     const outbound = withDefaultCwd(request, line, state.defaultCwd)
     const routedRequest = outbound === line ? request : JSON.parse(outbound)
-    if (state.local.active()) return deliverLocal(state, routedRequest, expectsReply)
+    if (state.local.active() && !(await httpLive(state.url))) return deliverLocal(state, routedRequest, expectsReply)
     let target = state.url
-    let { reply, failure } = await postWithRetry(target, outbound, request?.method ?? null)
+    let { reply, failure } = await within(postWithRetry(target, outbound, request?.method ?? null), RELAY_BUDGET_MS, 'http singleton call').catch((error) => ({ reply: null, failure: error }))
     if (!reply && recover) {
-        const restarted = await recover().catch(() => null)
+        const restarted = await within(recover(), RESTART_BUDGET_MS, 'http singleton restart').catch((error) => {
+            appendDiagnostic('stdio-relay-restart-failed', { url: target, error: describeError(error) })
+            return null
+        })
         if (restarted) {
             target = restarted
             state.url = restarted
-            ;({ reply, failure } = await postWithRetry(target, outbound, request?.method ?? null))
+            ;({ reply, failure } = await within(postWithRetry(target, outbound, request?.method ?? null), RELAY_BUDGET_MS, 'http singleton call after restart').catch((error) => ({ reply: null, failure: error })))
         }
     }
     if (!reply) {
@@ -185,7 +221,7 @@ async function deliverLocal(state, request, expectsReply, relayFailure = null) {
         writeFrame(frame)
     } catch (error) {
         appendDiagnostic('stdio-relay-local-failed', { method: request?.method ?? null, error: describeError(error) })
-        if (expectsReply) writeFrame(errorFrame(request.id, RELAY_ERROR_CODE, `gm-mcp relay: HTTP server ${state.url} unreachable (${describeError(relayFailure)}) after ${RETRY_DELAYS_MS.length} retries and a restart, and the in-process fallback failed (${describeError(error)})`))
+        if (expectsReply) writeFrame(errorFrame(request.id, RELAY_ERROR_CODE, `gm-mcp relay failed at two layers. Layer 1, relay gm-mcp-stdio-relay to HTTP singleton ${state.url} (port ${portOf(state.url)}): unreachable (${describeError(relayFailure)}) after ${RETRY_DELAYS_MS.length} retries and one restart. Layer 2, in-process fallback: ${describeError(error)}. Next step: run \`gm-mcp ensure-http\` (or \`node <toolsDir>/gm-mcp-server.mjs self-update-status\`), then re-dispatch; reads answered empty during this window were not searched.`))
     }
 }
 

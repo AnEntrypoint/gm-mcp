@@ -211,6 +211,12 @@ function resolvedInlineMax(inlineMax, key) {
     return EXEC_OUTPUT_KEYS.has(key) ? EXEC_OUTPUT_FIELD_TRUNCATE_AT : LONG_TEXT_FIELD_TRUNCATE_AT
 }
 
+function cutAtWordBoundary(value, budget) {
+    if (value.length <= budget || /\s/.test(value[budget])) return value.slice(0, budget)
+    const space = value.slice(0, budget).search(/\s\S*$/)
+    return space > budget / 2 ? value.slice(0, space) : value.slice(0, budget)
+}
+
 export function truncateLongText(value, key, outPath, plainTextFile, untruncatedKeys = NO_KEYS, inlineMax) {
     if (typeof value !== 'string') return value
     const budget = resolvedInlineMax(inlineMax, key)
@@ -219,11 +225,11 @@ export function truncateLongText(value, key, outPath, plainTextFile, untruncated
         const where = plainTextFile
             ? `the full text is in ${plainTextFile}, plain text with a '## ${key}' section, readable directly`
             : `the full output is in ${outPath}, in the JSON string field 'data' (parse it, then read '${key}')`
-        return `${value.slice(0, budget)}... [OUTPUT TRUNCATED: showing ${budget} of ${value.length} chars of '${key}' -- ${where}]`
+        return `${cutAtWordBoundary(value, budget)}... [OUTPUT TRUNCATED: showing ${budget} of ${value.length} chars of '${key}' -- ${where}]`
     }
     if (value.length <= budget) return value
     if (NEVER_TRUNCATE_KEYS.has(key) || untruncatedKeys.has(key)) return value
-    return `${value.slice(0, budget)}... [${value.length} chars total, full text at ${outPath} field '${key}']`
+    return `${cutAtWordBoundary(value, budget)}... [${value.length} chars total, full text at ${outPath} field '${key}']`
 }
 
 function dropDuplicateRows(rows) {
