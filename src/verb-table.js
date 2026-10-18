@@ -190,9 +190,9 @@ const PRD_ADD_BODY = {
     fields: {
         id: { type: 'string', aliases: ['prd_id', 'slug'], description: 'Row id. Absent, it is slugged from subject, title, name, task, goal, description or notes. A row id is a claim until prd-list with that id resolves it.' },
         subject: { type: 'string', description: 'What the row asserts. Persisted verbatim, so the accepted subject spellings (title, name, task, goal, description, notes) land on the row as written.' },
-        description: { type: 'string', description: 'Long-form row prose: what the row asserts and why. Persisted on the row and served by prd-list and {"prd_full_detail":true}.' },
-        acceptance_criteria: { type: 'string', description: 'What closes the row. Persisted on the row and served by prd-list and {"prd_full_detail":true}.' },
-        witness_plan: { type: 'string', description: 'The observation that would close the row. Persisted on the row and served by prd-list and {"prd_full_detail":true}.' },
+        description: { type: 'string', description: 'Long-form row prose: what the row asserts and why. Persisted on the row and served by prd-list and {"full":true}.' },
+        acceptance_criteria: { type: 'string', description: 'What closes the row. Persisted on the row and served by prd-list and {"full":true}.' },
+        witness_plan: { type: 'string', description: 'The observation that would close the row. Persisted on the row and served by prd-list and {"full":true}.' },
         status: { type: 'string', enum: ['pending', 'ready', 'completed', 'blocked'], description: 'Row status; defaults to pending.' },
         blockedBy: { type: 'array', description: 'Row ids this row waits on.' },
         overwrite: { type: 'boolean', description: 'Rescopes an existing row; refused when that row is closed.' },
@@ -305,7 +305,7 @@ const FS_READ_BODY = {
     fields: {
         path: { type: 'string', description: 'Project-relative path. An absolute path is refused even inside the root, and so is any path carrying "..".' },
         allowOutsideRoot: { type: 'boolean', aliases: ['allow_outside_root', 'allowAbsolute'], description: 'Widens the read to another root; never applies to fs_write.' },
-        startLine: { type: 'integer', aliases: ['start_line'], description: 'First line to return, 1-based. start_line is accepted as an alias.' },
+        startLine: { type: 'integer', aliases: ['start_line', 'offset'], description: 'First line to return, 1-based. start_line and offset are accepted as aliases.' },
         endLine: { type: 'integer', aliases: ['end_line'], description: 'Last line to return, 1-based and inclusive. end_line is accepted as an alias.' },
         limit: { type: 'integer', description: 'Number of lines to return, not an end line.' },
         max_bytes: { type: 'integer', aliases: ['maxBytes'], description: 'Byte cap on the read.' },
@@ -358,6 +358,14 @@ const GIT_SUBMODULE_ADD_BODY = {
         url: { type: 'string', description: 'https:// URL of the submodule repository (no user:password@, no whitespace).' },
         path: { type: 'string', description: 'Relative path inside the repo root; no leading /, no . .. or .git segment.' },
         branch: { type: 'string', description: 'Optional branch to track (git submodule add -b). Letters, digits, . _ - /; not starting with -.' },
+    },
+}
+
+const GIT_SUBMODULE_UPDATE_BODY = {
+    required: ['path'],
+    fields: {
+        path: { type: 'string', description: 'Relative path of the submodule inside the repo root; no leading /, no . .. or .git segment.' },
+        recursive: { type: 'boolean', description: 'Also initialise nested submodules (git submodule update --recursive).' },
     },
 }
 
@@ -574,6 +582,7 @@ const REGISTRY_ROWS = [
     { canonical: 'git_branch' },
     { canonical: 'git_remote' },
     { canonical: 'git_submodule_add', description: 'Add a git submodule: git submodule add [-b branch] -- url path. Stages .gitmodules and the gitlink; does not commit. Protected-path gate as git_add.', body: GIT_SUBMODULE_ADD_BODY },
+    { canonical: 'git_submodule_update', description: 'Initialise and check out a submodule at the parent gitlink: git submodule update --init [--recursive] -- path. Protected-path gate as git_add.', body: GIT_SUBMODULE_UPDATE_BODY },
     { canonical: 'git_checkout', ...scopedGitRow('git_checkout') },
     { canonical: 'git_merge', ...scopedGitRow('git_merge') },
     { canonical: 'git_merge_abort' },
