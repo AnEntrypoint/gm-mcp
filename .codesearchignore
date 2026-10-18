@@ -1,0 +1,3 @@
+# Generated and vendored trees codesearch skips, read in addition to .gitignore.
+# .gm/ and .agentplug-kv/ are already dropped by the built-in gm_state_dir rule.
+node_modules/
