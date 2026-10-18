@@ -402,6 +402,8 @@ const CI_LOG_BODY = {
         ignore_case: { type: 'boolean', description: 'Folds case in every match.' },
         max_lines: { type: 'integer', description: 'Line cap, 1 through 500, default 40, so a whole multi-job run is never dumped into context.' },
         max_chars: { type: 'integer', description: 'Character cap, 1 through 40000, default 8000.' },
+        failed_only: { type: 'boolean', description: 'Returns failures per failing step: the error lines of each step, with a tail when tail_lines is set.' },
+        tail_lines: { type: 'integer', description: 'Trailing lines kept per failing step when failed_only is set; the guest default is 10 and its ceiling is 100.' },
     },
 }
 const FETCH_TYPES = {
