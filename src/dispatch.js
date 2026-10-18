@@ -1672,7 +1672,7 @@ function coldProjectLiveness() {
 
 const LIVENESS_STATUS_FIELDS = [
     ['shared_process', 'boolean'],
-    ['queue_wait_ms', 'number'],
+    ['last_claimed_queue_wait_ms', 'number'],
     ['queue_depth', 'number'],
     ['queue_position', 'number'],
     ['claimed_step_count', 'number'],
@@ -1736,7 +1736,7 @@ export function readDaemonLiveness(spoolDir) {
     if (typeof sharedProjects === 'number') liveness.daemon_active_projects = sharedProjects
     if (status.runner_update_in_progress) {
         liveness.runner_update_in_progress = true
-        liveness.runner_update_waiting_ms = status.runner_update_waiting_ms ?? null
+        liveness.runner_update_staged_age_ms = status.runner_update_staged_age_ms ?? null
     }
     const stuck = stuckQueueReport(spoolDir)
     if (stuck) Object.assign(liveness, stuck)
@@ -2031,9 +2031,17 @@ function withDispatchWait(out, waitedMs) {
     if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !isPlainObject(out)) return out
     const admitted = Number(out.admission_waited_ms)
     const admissionMs = Number.isFinite(admitted) && admitted > 0 ? Math.min(admitted, waitedMs) : 0
-    const executed = Number(out.duration_ms ?? out.data?.duration_ms)
-    const execMs = Number.isFinite(executed) && executed > 0 ? Math.min(executed, waitedMs - admissionMs) : 0
-    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, exec_ms: execMs, unattributed_ms: waitedMs - admissionMs - execMs } }
+    const executed = firstReportedMs(out, ['duration_ms', 'guest_elapsed_ms'])
+    const execMs = executed === null ? 0 : Math.min(executed, waitedMs - admissionMs)
+    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, exec_ms: execMs, exec_timed: executed !== null, unattributed_ms: waitedMs - admissionMs - execMs } }
+}
+
+function firstReportedMs(out, keys) {
+    for (const key of keys) {
+        const value = Number(out[key] ?? out.data?.[key])
+        if (Number.isFinite(value) && value > 0) return value
+    }
+    return null
 }
 
 function withResumeDisclosure(out, disclosure) {
