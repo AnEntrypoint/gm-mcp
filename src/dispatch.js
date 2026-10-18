@@ -32,7 +32,7 @@ function projectRootFor(dir) {
     return gitToplevel(resolved) || resolved
 }
 
-const DEFAULT_CWD_ENV_VARS = ['GM_MCP_DEFAULT_CWD', 'CLAUDE_PROJECT_DIR']
+const DEFAULT_CWD_ENV_VARS = ['GM_MCP_DEFAULT_CWD']
 
 function gitRootAt(dir) {
     return gitToplevel(dir) === dir ? dir : null

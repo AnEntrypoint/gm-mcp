@@ -1,11 +1,17 @@
 import { createInterface } from 'node:readline'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { CONTINUATION_LOGGER, observeRelayedReply, startContinuationMonitor } from './continuation.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { createServer } from './mcp-server.js'
+import { gitToplevel } from './git-adapter.js'
 
 const RELAY_ERROR_CODE = -32000
 const PARSE_ERROR_CODE = -32700
 const SSE_CONTENT_TYPE = 'text/event-stream'
 const SSE_DATA_PREFIX = 'data:'
+const RETRY_DELAYS_MS = [250, 1000]
+const TRANSIENT_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_CLOSED'])
+const LOCAL_INIT_ID = 'gm-relay-local-init'
 
 function writeFrame(text) {
     const body = text.trim()
@@ -46,12 +52,89 @@ async function post(url, line) {
     return { contentType: response.headers.get('content-type') || '', text: await response.text() }
 }
 
-function unreachableMessage(url, error) {
-    const port = new URL(url).port
-    return `gm-mcp relay: HTTP server "gm" on 127.0.0.1:${port} (${url}) is unreachable (${describeError(error)}) and an automatic restart did not bring it back. Restart it with: node "${process.argv[1]}" --http --port ${port}`
+function isTransient(error) {
+    const code = error?.cause?.code ?? error?.code
+    return TRANSIENT_CODES.has(code)
 }
 
-async function forwardLine(url, line, recover) {
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+async function postWithRetry(url, line, method) {
+    let failure = null
+    for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+        if (attempt > 0) {
+            if (!isTransient(failure)) break
+            await pause(RETRY_DELAYS_MS[attempt - 1])
+        }
+        try {
+            return { reply: await post(url, line), failure: null }
+        } catch (error) {
+            failure = error
+            appendDiagnostic('stdio-relay-forward-failed', { url, method, attempt, error: describeError(error) })
+        }
+    }
+    return { reply: null, failure }
+}
+
+function launchRootDefault() {
+    const launched = process.cwd()
+    try {
+        return gitToplevel(launched) === launched ? launched : null
+    } catch {
+        return null
+    }
+}
+
+function withDefaultCwd(request, line, defaultCwd) {
+    if (!defaultCwd || request?.method !== 'tools/call') return line
+    const args = request.params?.arguments
+    if (args !== undefined && (args === null || typeof args !== 'object' || Array.isArray(args))) return line
+    if (args && typeof args.cwd === 'string' && args.cwd.trim()) return line
+    return JSON.stringify({ ...request, params: { ...request.params, arguments: { ...(args ?? {}), cwd: defaultCwd } } })
+}
+
+function createLocalFallback(initializeParams) {
+    const pending = new Map()
+    let ready = null
+    const start = async () => {
+        const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+        clientSide.onmessage = (message) => {
+            const waiter = message?.id !== undefined ? pending.get(message.id) : undefined
+            if (waiter) {
+                pending.delete(message.id)
+                waiter(message)
+                return
+            }
+            if (message?.id === undefined) writeFrame(JSON.stringify(message))
+        }
+        await createServer().connect(serverSide)
+        await clientSide.start()
+        const exchange = (message) => new Promise((resolve) => {
+            pending.set(message.id, resolve)
+            clientSide.send(message)
+        })
+        await exchange({ jsonrpc: '2.0', id: LOCAL_INIT_ID, method: 'initialize', params: initializeParams() })
+        await clientSide.send({ jsonrpc: '2.0', method: 'notifications/initialized' })
+        appendDiagnostic('stdio-relay-local-fallback', { pid: process.pid })
+        console.error('gm-mcp: HTTP relay unreachable after retries; serving this session in-process over the spool')
+        return { exchange, notify: (message) => clientSide.send(message) }
+    }
+    return {
+        active: () => ready !== null,
+        async handle(request) {
+            ready ??= start()
+            const local = await ready
+            if (request.id === undefined || request.id === null) {
+                await local.notify(request)
+                return null
+            }
+            if (request.method === 'initialize') return { jsonrpc: '2.0', id: request.id, result: (await local.exchange({ ...request, id: LOCAL_INIT_ID + '-again' })).result }
+            return local.exchange(request)
+        },
+    }
+}
+
+async function forwardLine(line, recover, state) {
     let request
     try {
         request = JSON.parse(line)
@@ -60,22 +143,23 @@ async function forwardLine(url, line, recover) {
         return
     }
     const expectsReply = request && typeof request === 'object' && request.id !== undefined && request.id !== null
-    let target = url
-    let failure = null
-    let reply = await post(target, line).catch((error) => { failure = error; return null })
+    if (request?.method === 'initialize') state.initializeParams = request.params
+    const outbound = withDefaultCwd(request, line, state.defaultCwd)
+    const routedRequest = outbound === line ? request : JSON.parse(outbound)
+    if (state.local.active()) return deliverLocal(state, routedRequest, expectsReply)
+    let target = state.url
+    let { reply, failure } = await postWithRetry(target, outbound, request?.method ?? null)
     if (!reply && recover) {
-        appendDiagnostic('stdio-relay-forward-failed', { url, method: request?.method ?? null, error: describeError(failure) })
         const restarted = await recover().catch(() => null)
         if (restarted) {
             target = restarted
-            failure = null
-            reply = await post(target, line).catch((error) => { failure = error; return null })
+            state.url = restarted
+            ;({ reply, failure } = await postWithRetry(target, outbound, request?.method ?? null))
         }
     }
     if (!reply) {
-        appendDiagnostic('stdio-relay-forward-failed', { url: target, method: request?.method ?? null, error: describeError(failure) })
-        if (expectsReply) writeFrame(errorFrame(request.id, RELAY_ERROR_CODE, unreachableMessage(target, failure)))
-        return
+        appendDiagnostic('stdio-relay-unreachable', { url: target, method: request?.method ?? null, error: describeError(failure) })
+        return deliverLocal(state, routedRequest, expectsReply, failure)
     }
     if (!expectsReply) return
     for (const frame of framesFromResponse(reply.contentType, reply.text)) {
@@ -84,7 +168,22 @@ async function forwardLine(url, line, recover) {
     }
 }
 
+async function deliverLocal(state, request, expectsReply, relayFailure = null) {
+    try {
+        const message = await state.local.handle(request)
+        if (!expectsReply || !message) return
+        const frame = JSON.stringify(message)
+        observeFrame(frame)
+        writeFrame(frame)
+    } catch (error) {
+        appendDiagnostic('stdio-relay-local-failed', { method: request?.method ?? null, error: describeError(error) })
+        if (expectsReply) writeFrame(errorFrame(request.id, RELAY_ERROR_CODE, `gm-mcp relay: HTTP server ${state.url} unreachable (${describeError(relayFailure)}) after ${RETRY_DELAYS_MS.length} retries and a restart, and the in-process fallback failed (${describeError(error)})`))
+    }
+}
+
 export function serveStdioRelay({ url, recover = null }) {
+    const state = { url, defaultCwd: launchRootDefault(), initializeParams: null, local: null }
+    state.local = createLocalFallback(() => state.initializeParams ?? { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'gm-mcp-relay', version: '0' } })
     let inFlight = 0
     let inputClosed = false
     const finishIfDone = () => {
@@ -94,7 +193,7 @@ export function serveStdioRelay({ url, recover = null }) {
     input.on('line', (line) => {
         if (!line.trim()) return
         inFlight += 1
-        forwardLine(url, line, recover).finally(() => {
+        forwardLine(line, recover, state).finally(() => {
             inFlight -= 1
             finishIfDone()
         })
@@ -104,6 +203,6 @@ export function serveStdioRelay({ url, recover = null }) {
         finishIfDone()
     })
     startContinuationMonitor(emitContinuation)
-    appendDiagnostic('stdio-relay-start', { url, pid: process.pid, logger: CONTINUATION_LOGGER })
+    appendDiagnostic('stdio-relay-start', { url, pid: process.pid, logger: CONTINUATION_LOGGER, default_cwd: state.defaultCwd })
     console.error(`gm-mcp: connected, serving on stdio, relaying to ${url}`)
 }

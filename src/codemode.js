@@ -336,8 +336,8 @@ export function registerCodeMode(server, tools) {
             const logs = []
             const logger = { log: (...parts) => logs.push(parts.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' ')) }
             const session_id = args.session_id || PROCESS_CODEMODE_SESSION_ID
+            const replies = []
             try {
-                const replies = []
                 const gm = bindings(tools, { session_id, cwd: args.cwd }, extra, replies)
                 const require = createRequire(resolvePath(args.cwd || process.cwd(), 'gm-codemode.js'))
                 const value = await withCodemodeDeadline(new AsyncFunction('gm', 'console', 'require', args.code)(gm, logger, require), codemodeTimeoutMs())
@@ -350,7 +350,11 @@ export function registerCodeMode(server, tools) {
             } catch (error) {
                 const detail = describeError(error)
                 appendDiagnostic('codemode-threw', { error: detail })
-                const text = [...logs, `gm-mcp: gm_codemode code threw -- ${detail}`].join('\n')
+                const settled = replies.filter((entry) => entry.text !== undefined)
+                const partial = settled.map((entry, index) => `--- partial ${index + 1}/${replies.length}: gm.${entry.verb} completed before the throw ---\n${capCodemodeText(entry.text, UNRETURNED_REPLY_CHARS)}`)
+                const unsettled = replies.length - settled.length
+                const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettled ? `, ${unsettled} still pending or failed` : ''}; their replies follow`] : []
+                const text = [...logs, `gm-mcp: gm_codemode code threw -- ${detail}`, ...tally, ...partial].join('\n')
                 return { content: [{ type: 'text', text: continuedReply(session_id, text) }], isError: true }
             }
         }
