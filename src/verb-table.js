@@ -316,7 +316,7 @@ const FS_WRITE_BODY = {
     required: ['path', 'content'],
     fields: {
         path: { type: 'string', description: 'Project-relative path. allowOutsideRoot never widens a write.' },
-        content: { type: 'string or array of lines', aliases: ['data', 'text'], description: 'Complete file content: gm has no edit verb, so a whole-file write is the supported edit.' },
+        content: { type: 'string', aliases: ['data', 'text'], description: 'Complete file content: gm has no edit verb, so a whole-file write is the supported edit.' },
         allow_empty: { type: 'boolean', description: 'Empty content is refused without it.' },
         append: { type: 'boolean', description: 'Appends instead of replacing.' },
     },
