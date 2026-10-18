@@ -25,14 +25,17 @@ export function readOwnerText(file) {
     return fs.readFileSync(file, 'utf8').trim()
 }
 
+export const SPOOL_FILE_MODE = 0o600
+export const SPOOL_DIR_MODE = 0o700
+
 export function writeTextAtomically(file, text) {
     const tempPath = `${file}.tmp`
-    fs.writeFileSync(tempPath, text, 'utf8')
+    fs.writeFileSync(tempPath, text, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
     fs.renameSync(tempPath, file)
 }
 
 export function writeText(file, text) {
-    fs.writeFileSync(file, text, 'utf8')
+    fs.writeFileSync(file, text, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
 }
 
 export function readPidTsLock(file) {

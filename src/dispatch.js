@@ -2,7 +2,7 @@ import { isPlainObject } from './plain-object.js';
 import { agentplugDir, spoolDirOf, toolsDir } from './paths.js'
 import { createHash } from 'node:crypto'
 import { spoolFs as fs, spoolSpawn as spawn } from './spool-port.js'
-import { claimByCreate, claimByLink, readJsonOrNull, readLockHolderPid, readOwnerText, readPidTsLock, readStatusJson, readTextOrNull, reclaimLockByRename, replaceLockText, writeTextAtomically as writeFileAtomically } from './spool-store.js'
+import { claimByCreate, claimByLink, readJsonOrNull, readLockHolderPid, readOwnerText, readPidTsLock, readStatusJson, readTextOrNull, reclaimLockByRename, replaceLockText, writeTextAtomically as writeFileAtomically, SPOOL_DIR_MODE, SPOOL_FILE_MODE } from './spool-store.js'
 import os from 'node:os'
 import path from 'node:path'
 import * as yaml from 'js-yaml'
@@ -441,10 +441,19 @@ function gitShowCaptureFallback(verb, body, out, root) {
 }
 
 function withExecExitVerdict(verb, out) {
-    if (!EXEC_FAMILY_VERBS.includes(verb) || !isPlainObject(out) || !isPlainObject(out.data)) return out
-    const code = out.data.exit_code
+    if (!EXEC_FAMILY_VERBS.includes(verb) || !isPlainObject(out)) return out
+    const code = isPlainObject(out.data) ? out.data.exit_code : out.exit_code
     if (typeof code !== 'number' || code === 0) return out
     return { ...out, ok: false }
+}
+
+function liftStdoutFault(out) {
+    if (!isPlainObject(out) || out.ok !== false || (typeof out.error === 'string' && out.error)) return out
+    if (typeof out.stdout !== 'string') return out
+    let parsed
+    try { parsed = JSON.parse(out.stdout) } catch { return out }
+    if (!isPlainObject(parsed) || typeof parsed.error !== 'string' || !parsed.error) return out
+    return { ...out, error: parsed.error }
 }
 
 function withCheckoutCreateHint(verb, body, out) {
@@ -489,10 +498,10 @@ export function unsafeSpoolName(role, value) {
 function publishSpoolRequest(inDir, inPath, task, body) {
     const unsafe = unsafeSpoolName('task', task)
     if (unsafe) throw new Error(unsafe)
-    fs.mkdirSync(inDir, { recursive: true })
+    fs.mkdirSync(inDir, { recursive: true, mode: SPOOL_DIR_MODE })
     const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.tmp`)
     try {
-        fs.writeFileSync(tempPath, body, 'utf8')
+        fs.writeFileSync(tempPath, body, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
         fs.linkSync(tempPath, inPath)
     } finally {
         if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
@@ -708,28 +717,50 @@ const CODESEARCH_DEFAULT_K = 50
 const CODESEARCH_PATH_ALIASES = ['path', ...tableRow('codesearch').body.fields.path.aliases]
 
 // The guest scopes only the literal fallback of mode dual, so a dual scan runs unscoped here and its ranked hits are kept under the path.
-export function withCodesearchDualPathRouted(verb, body) {
+export function withCodesearchDualPathRouted(verb, body, cwd) {
     if (verb !== 'codesearch' || !isPlainObject(body) || body.mode !== 'dual') return { body, scope: null }
     const key = CODESEARCH_PATH_ALIASES.find((name) => typeof body[name] === 'string' && body[name].trim() !== '')
     if (key === undefined) return { body, scope: null }
-    const scope = body[key].trim().replace(/^(\.\/)+/, '').replace(/\/+$/, '')
+    let scope = body[key].trim().replace(/^(\.\/)+/, '').replace(/\/+$/, '')
+    const root = typeof cwd === 'string' ? cwd.replace(/\/+$/, '') : ''
+    if (root && scope.startsWith('/')) {
+        if (scope === root) scope = ''
+        else if (scope.startsWith(`${root}/`)) scope = scope.slice(root.length + 1)
+    }
     const routed = { ...body }
     for (const name of CODESEARCH_PATH_ALIASES) delete routed[name]
     return { body: routed, scope: scope === '' || scope === '.' ? null : scope }
 }
 
+const DUAL_SCOPE_CHANNELS = ['bm25_hits', 'vector_hits', 'definitions', 'references', 'files', 'top_files']
+
+function dualHitPath(hit) {
+    const raw = typeof hit === 'string' ? hit : isPlainObject(hit) ? (hit.at ?? hit.path) : undefined
+    if (typeof raw !== 'string') return undefined
+    const located = /^(.*?):\d+(?::|$)/.exec(raw)
+    return (located ? located[1] : raw.replace(/\s+\(\d+\)$/, '')).replace(/^(\.\/)+/, '')
+}
+
 export function withCodesearchDualPathScope(scope, out) {
     if (!scope || !isPlainObject(out)) return out
-    const inScope = (hit) => typeof hit?.at === 'string' && (hit.at === scope || hit.at.startsWith(`${scope}/`))
-    const scoped = { ...out }
+    const inScope = (hit) => {
+        const hitPath = dualHitPath(hit)
+        return hitPath !== undefined && (hitPath === scope || hitPath.startsWith(`${scope}/`))
+    }
     let kept = 0
     let dropped = 0
-    for (const channel of ['bm25_hits', 'vector_hits']) {
-        if (!Array.isArray(out[channel])) continue
-        scoped[channel] = out[channel].filter(inScope)
-        kept += scoped[channel].length
-        dropped += out[channel].length - scoped[channel].length
+    const scopeChannels = (source) => {
+        const next = { ...source }
+        for (const channel of DUAL_SCOPE_CHANNELS) {
+            if (!Array.isArray(source[channel])) continue
+            next[channel] = source[channel].filter(inScope)
+            kept += next[channel].length
+            dropped += source[channel].length - next[channel].length
+        }
+        return next
     }
+    const scoped = scopeChannels(out)
+    if (isPlainObject(out.data)) scoped.data = scopeChannels(out.data)
     scoped.path_scope = { path: scope, applied: 'post-filter', kept, dropped }
     return scoped
 }
@@ -905,7 +936,10 @@ function resultField(value, field) {
         const nested = atPath(value.data, segments)
         if (nested !== undefined) return { value: nested, path: `data.${field}` }
     }
-    throw new Error(`field "${field}" was not found; omit field to read the complete raw response`)
+    const keysOf = o => (o && typeof o === 'object' ? Object.keys(o).join(', ') : '')
+    const dataKeys = value && value.data && typeof value.data === 'object' ? keysOf(value.data) : ''
+    const available = `top-level keys: [${keysOf(value)}]${dataKeys ? `; data keys: [${dataKeys}]` : ''}`
+    throw new Error(`field "${field}" was not found; ${available}; omit field to read the complete raw response`)
 }
 
 function parseResultDocument(text) {
@@ -1431,8 +1465,25 @@ function sleep(ms, signal) {
 
 const SPOOL_WATCHED_FALLBACK_MS = 2000
 const SPOOL_RESPONSE_MAX_AGE_MS = 60 * 60 * 1000
+const SPOOL_REFUSED_MAX_AGE_MS = 15 * 60 * 1000
 const SPOOL_PRUNE_EVERY_MS = 10 * 60 * 1000
+const SPOOL_REFUSAL_HEAD_BYTES = 4096
+const SPOOL_REFUSAL_HEAD = /"refused"\s*:\s*true|"status"\s*:\s*"refused"|"outcome"\s*:\s*"refused"/
 const spoolPrunedAt = new Map()
+
+function isUnreadRefusalFile(file) {
+    let fd
+    try {
+        fd = fs.openSync(file, 'r')
+        const head = Buffer.alloc(SPOOL_REFUSAL_HEAD_BYTES)
+        const n = fs.readSync(fd, head, 0, SPOOL_REFUSAL_HEAD_BYTES, 0)
+        return SPOOL_REFUSAL_HEAD.test(head.toString('utf8', 0, n))
+    } catch {
+        return false
+    } finally {
+        if (fd !== undefined) fs.closeSync(fd)
+    }
+}
 
 function pruneSpoolResponsesOnce(outDir) {
     const now = Date.now()
@@ -1447,7 +1498,9 @@ function pruneSpoolResponsesOnce(outDir) {
     for (const name of names) {
         const file = path.join(outDir, name)
         try {
-            if (now - fs.statSync(file).mtimeMs > SPOOL_RESPONSE_MAX_AGE_MS) fs.unlinkSync(file)
+            const age = now - fs.statSync(file).mtimeMs
+            if (age > SPOOL_RESPONSE_MAX_AGE_MS) fs.unlinkSync(file)
+            else if (age > SPOOL_REFUSED_MAX_AGE_MS && isUnreadRefusalFile(file)) fs.unlinkSync(file)
         } catch {
         }
     }
@@ -2100,7 +2153,7 @@ function ownerHeaderRuntimeIdentity(root) {
         || !isFreshDaemonTimestamp(status.ts, Date.now())
         || typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)
         || !Array.isArray(slots) || !slots.some(value => value === hash)
-        || slots.some(value => value !== null && value !== hash)
+        || slots.some(value => value !== null && value !== hash && value !== 'busy-dispatch-in-flight')
         || status.pending_store_swaps?.gm
         || (Array.isArray(status.mixed_version_pools) && status.mixed_version_pools.length)) return null
     const project = readJsonFile(path.join(spoolDirOf(root), '.status.json'))
@@ -2148,8 +2201,6 @@ function withStaleBundleNotice(verb, text) {
     const drift = bundleDrift()
     if (!drift.stale) return text
     const withNewline = text.endsWith('\n') ? text : `${text}\n`
-    const line = bundleStalenessAnnouncement(drift)
-    if (!line) return `${withNewline}bundle_stale: true (restart pending; the full notice came with an earlier reply)\n`
     const block = yaml.dump({
         bundle_stale: true,
         bundle_served_version: drift.running_version,
@@ -2158,6 +2209,9 @@ function withStaleBundleNotice(verb, text) {
         bundle_installed_sha: drift.installed_sha256,
         bundle_reloadable: drift.reloadable === true,
     }, { lineWidth: 100 })
+    const line = bundleStalenessAnnouncement(drift)
+    if (!line) return `${withNewline}bundle_stale: true\n`
+    if (READ_ONLY_STATUS_VERBS.has(verb)) return `${withNewline}${block}\n`
     return `${withNewline}${block}\n${line}\n`
 }
 
@@ -2332,7 +2386,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             const diagnostic = objectBodyDiagnostic(verb, globCoerced.value) ?? fsWriteEnvelopeDiagnostic(verb, globCoerced.value)
             if (diagnostic) return `error: ${diagnostic}`
             const coerced = withCodesearchScalarsCoerced(verb, globCoerced.value)
-            const dualRouted = withCodesearchDualPathRouted(verb, coerced)
+            const dualRouted = withCodesearchDualPathRouted(verb, coerced, cwd)
             codesearchDualScope = dualRouted.scope
             const withDefaultK = withCodesearchDefaultK(verb, dualRouted.body)
             codesearchKDefaulted = withDefaultK.defaulted
@@ -2420,6 +2474,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 if (!collides) out = { ...rest, ...data }
             }
             out = withExecExitVerdict(verb, out)
+            out = liftStdoutFault(out)
             out = withCodesearchCompleteness(verb, out)
             if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }

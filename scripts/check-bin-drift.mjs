@@ -8,12 +8,15 @@ import { BUNDLE_VERSION } from '../src/bundle-version.js'
 import { parseBundleVersion } from '../src/self-update.js'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-const committedPath = path.join(repoRoot, 'bin', 'gm-mcp-server.js')
+const binRel = 'bin/gm-mcp-server.js'
+const committedPath = path.join(repoRoot, binRel)
 const includedSrc = (process.env.GM_MCP_BUILD_INCLUDE || '').split(',').map(s => s.trim()).filter(Boolean)
 
 const result = await buildBundle(false, new Set(includedSrc))
 
-const committed = readFileSync(committedPath, 'utf8')
+const shipsWorkingBin = includedSrc.includes(binRel)
+const headBin = spawnSync('git', ['show', `HEAD:${binRel}`], { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+const committed = shipsWorkingBin || headBin.status !== 0 ? readFileSync(committedPath, 'utf8') : headBin.stdout
 
 const fresh = result.outputFiles[0].text
 

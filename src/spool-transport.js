@@ -9,6 +9,8 @@ const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY'])
 const TIMEOUT_MARGIN_MS = 5000
 const VERB_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,254}$/
 const SESSION_PATTERN = /^[A-Za-z0-9_.-]{1,150}$/
+const WINDOWS_RESERVED_NAME = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i
+const WINDOWS_MAX_PATH = 259
 
 function spoolError(code, message, detail = {}) {
     return Object.assign(new Error(message), { code, ...detail })
@@ -139,10 +141,15 @@ function waitForReply({ outDir, replyPath, deadline, budgetMs, verb, name }) {
     return { promise, cancel: () => settle() }
 }
 
+function isWindowsReservedName(component) {
+    return WINDOWS_RESERVED_NAME.test(component.split('.')[0])
+}
+
 export async function dispatchSpool({ verb, body = {}, cwd, budgetMs = defaultBudgetMs(), sessionId = 'spool-transport' }) {
     if (typeof cwd !== 'string' || !cwd) throw spoolError('spool-no-cwd', 'dispatchSpool needs cwd, the project root that holds .gm/exec-spool')
     if (!VERB_PATTERN.test(verb)) throw spoolError('spool-bad-verb', `verb ${JSON.stringify(verb)} is not a spool verb name`)
     if (!SESSION_PATTERN.test(sessionId)) throw spoolError('spool-bad-session', `session_id ${JSON.stringify(sessionId)} is not a single spool name component`)
+    if (isWindowsReservedName(verb) || isWindowsReservedName(sessionId)) throw spoolError('spool-reserved-name', `verb or session_id ${JSON.stringify(verb)}/${JSON.stringify(sessionId)} names a Windows device (CON, PRN, AUX, NUL, COMn, LPTn) and cannot be a spool path component`)
     const health = spoolHealth(cwd)
     if (!health.alive) throw spoolError('spool-daemon-not-running', `runner is not alive (${health.reason}); nothing was written`, { health })
     const spoolDir = spoolDirOf(cwd)
@@ -150,6 +157,9 @@ export async function dispatchSpool({ verb, body = {}, cwd, budgetMs = defaultBu
     counter += 1
     const name = requestName(sessionId, counter)
     const replyPath = path.join(outDir, `${verb}-${name}.json`)
+    const tempPath = path.join(spoolDir, 'in', verb, `.${name}.${process.pid}.tmp`)
+    const longest = Math.max(replyPath.length, tempPath.length)
+    if (process.platform === 'win32' && longest > WINDOWS_MAX_PATH) throw spoolError('spool-path-too-long', `spool path would be ${longest} characters, over the Windows MAX_PATH limit of ${WINDOWS_MAX_PATH}; move the project to a shorter root or use a shorter session_id`, { path_chars: longest, limit: WINDOWS_MAX_PATH })
     fs.mkdirSync(outDir, { recursive: true })
     const waiter = waitForReply({ outDir, replyPath, deadline: Date.now() + budgetMs, budgetMs, verb, name })
     try {

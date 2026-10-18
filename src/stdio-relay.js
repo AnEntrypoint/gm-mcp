@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline'
+import { randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
-import { appendDiagnostic, describeError } from './server-log.js'
+import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { CONTINUATION_LOGGER, observeRelayedReply, startContinuationMonitor } from './continuation.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { createServer } from './mcp-server.js'
@@ -220,8 +221,9 @@ async function deliverLocal(state, request, expectsReply, relayFailure = null) {
         observeFrame(frame)
         writeFrame(frame)
     } catch (error) {
-        appendDiagnostic('stdio-relay-local-failed', { method: request?.method ?? null, error: describeError(error) })
-        if (expectsReply) writeFrame(errorFrame(request.id, RELAY_ERROR_CODE, `gm-mcp relay failed at two layers. Layer 1, relay gm-mcp-stdio-relay to HTTP singleton ${state.url} (port ${portOf(state.url)}): unreachable (${describeError(relayFailure)}) after ${RETRY_DELAYS_MS.length} retries and one restart. Layer 2, in-process fallback: ${describeError(error)}. Next step: run \`gm-mcp ensure-http\` (or \`node <toolsDir>/gm-mcp-server.mjs self-update-status\`), then re-dispatch; reads answered empty during this window were not searched.`))
+        const diagnosticId = randomUUID()
+        appendDiagnostic('stdio-relay-local-failed', { diagnostic_id: diagnosticId, method: request?.method ?? null, error: describeError(error) })
+        if (expectsReply) writeFrame(errorFrame(request.id, RELAY_ERROR_CODE, `gm-mcp relay failed at two layers. Layer 1, relay gm-mcp-stdio-relay to HTTP singleton ${state.url} (port ${portOf(state.url)}): unreachable (${describeError(relayFailure)}) after ${RETRY_DELAYS_MS.length} retries and one restart. Layer 2, in-process fallback: ${describeError(error)}. Diagnostic id ${diagnosticId} (log ${logFilePath()}, event stdio-relay-local-failed). Next step: run \`gm-mcp ensure-http\` (or \`node <toolsDir>/gm-mcp-server.mjs self-update-status\`), then re-dispatch; reads answered empty during this window were not searched.`))
     }
 }
 
