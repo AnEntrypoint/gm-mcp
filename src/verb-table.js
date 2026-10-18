@@ -42,8 +42,14 @@ const FS_READ_RANGE_FIELDS = Object.fromEntries(FS_READ_RANGE_ALIASES.map((key) 
 const FS_READ_PATH_RULE = ` "path" is resolved against the cwd you pass (the project root), never absolutely: an absolute path is refused even when it is inside that root, and so is any path carrying ".."; the refusal names the project-relative form to send instead. allowOutsideRoot:true widens a read verb to another root, never permission to climb out of one, and never applies to fs_write.`
 const FS_READ_DESCRIPTION = ` Line ranges are 1-based and inclusive on both ends: ${FS_READ_RANGE_ALIASES.join(', ')} are accepted at the top level and folded into body, and the same keys inside body work identically. ${FS_READ_RANGE_PAIR_HELP} A range-looking key that is not one of them is an error naming the accepted keys rather than a silent whole file. Without any of them the whole file is returned, unchanged.` + FS_READ_PATH_RULE
 
+const COMMIT_SUBJECT_LIMIT = 50
+const commitSubjectCheck = (message, ctx) => {
+    const length = [...message.split('\n', 1)[0]].length
+    if (length > COMMIT_SUBJECT_LIMIT) ctx.addIssue({ code: 'custom', message: `commit subject is ${length} characters; the limit is ${COMMIT_SUBJECT_LIMIT} characters (the subject is the first line of message). Shorten the first line and resend.` })
+}
+
 const GIT_COMMIT_TYPES = {
-    message: z.string(),
+    message: z.string().superRefine(commitSubjectCheck),
     paths: z.array(z.string()),
     files: z.array(z.string()),
     allow_whole_index: booleanLike,
@@ -60,7 +66,7 @@ const GIT_COMMIT_TYPES = {
 }
 const GIT_COMMIT_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'recover_remote_moved', 'source_ref', 'rev', 'author_name', 'author_email']
 const GIT_COMMIT_FIELDS = aliasFields('git_finalize/git_commit', GIT_COMMIT_TYPES, GIT_COMMIT_KEYS)
-const GIT_COMMIT_DESCRIPTION = ` ${GIT_COMMIT_KEYS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body.`
+const GIT_COMMIT_DESCRIPTION = ` ${GIT_COMMIT_KEYS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body. The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit.`
 
 const GIT_PUSH_KEYS = ['rev']
 const GIT_PUSH_FIELDS = aliasFields('git_push', GIT_COMMIT_TYPES, GIT_PUSH_KEYS)
@@ -186,6 +192,20 @@ const PRD_ADD_BODY = {
         repair: { type: 'boolean', description: 'Repairs the PRD store before the add.' },
     },
 }
+const PRD_ADD_TYPES = {
+    id: z.string(),
+    subject: z.string(),
+    description: z.string(),
+    acceptance_criteria: z.string(),
+    witness_plan: z.string(),
+    status: z.enum(['pending', 'ready', 'completed', 'blocked']),
+    blockedBy: z.array(z.string()),
+    overwrite: booleanLike,
+    repair: booleanLike,
+}
+const PRD_ADD_KEYS = ['id', 'subject', 'description', 'acceptance_criteria', 'witness_plan', 'status', 'blockedBy', 'overwrite', 'repair']
+const PRD_ADD_FIELDS = aliasFields('prd_add', PRD_ADD_TYPES, PRD_ADD_KEYS)
+const PRD_ADD_DESCRIPTION = ` ${PRD_ADD_KEYS.join(', ')} are accepted at the top level and folded into body, so {"subject":"<row intent>","description":"<row prose>"} and body:{"subject":"...","description":"..."} are the same call; a key named in both takes its value from body. description is the row prose: it is persisted on the row as description, never as the dispatch body. Without an id or any subject/title/name/task/goal/description/notes text the row is refused.`
 const PRD_RESOLVE_BODY = {
     required: ['id'],
     fields: {
@@ -254,7 +274,7 @@ const CODESEARCH_BODY = {
         exclude: { type: 'string', aliases: ['exclude_glob', 'exclude_globs'], description: 'Exclusion glob.' },
         combine: { type: 'string', aliases: ['term_combination'], enum: ['phrase', 'and', 'or'], description: 'Anything else is refused.' },
         output: { type: 'string', enum: ['matches', 'full', 'compact', 'content', 'files', 'count'], description: 'Output shape. "compact" is path:line: trimmed text and "content" is the same shape under grep\'s name for it; "full" is an alias of "matches".' },
-        case_insensitive: { type: 'boolean', description: 'Folds case.' },
+        case_insensitive: { type: 'boolean', description: 'Folds case. Literal and regex are case-sensitive by default (a mixed-case match is missed unless this is true); the reply echoes case_insensitive.' },
         whole_word: { type: 'boolean', description: 'Whole-word match; refused in filename mode.' },
         comments_only: { type: 'boolean', aliases: ['comments'], description: 'Scans comments only; refused in filename mode.' },
         verbatim: { type: 'boolean', description: 'Forces combine to phrase.' },
@@ -318,6 +338,22 @@ const GIT_COMMIT_BODY = {
         allow_foreign_rows: { type: 'boolean', aliases: ['allow_foreign_prd_rows'], description: 'Commits rows another session owns.' },
     },
 }
+const GIT_SUBMODULE_ADD_BODY = {
+    required: ['url', 'path'],
+    fields: {
+        url: { type: 'string', description: 'https:// URL of the submodule repository (no user:password@, no whitespace).' },
+        path: { type: 'string', description: 'Relative path inside the repo root; no leading /, no . .. or .git segment.' },
+        branch: { type: 'string', description: 'Optional branch to track (git submodule add -b). Letters, digits, . _ - /; not starting with -.' },
+    },
+}
+
+const BROWSER_LEASE_BODY = {
+    required: ['agent'],
+    fields: {
+        agent: { type: 'string', description: 'Name of the agent holding or releasing the shared browser lease.' },
+    },
+}
+
 const GIT_FINALIZE_BODY = {
     required: [],
     fields: {
@@ -499,6 +535,7 @@ const REGISTRY_ROWS = [
     { canonical: 'git_fetch' },
     { canonical: 'git_branch' },
     { canonical: 'git_remote' },
+    { canonical: 'git_submodule_add', description: 'Add a git submodule: git submodule add [-b branch] -- url path. Stages .gitmodules and the gitlink; does not commit. Protected-path gate as git_add.', body: GIT_SUBMODULE_ADD_BODY },
     { canonical: 'git_checkout', ...scopedGitRow('git_checkout') },
     { canonical: 'git_merge', ...scopedGitRow('git_merge') },
     { canonical: 'git_merge_abort' },
@@ -573,7 +610,7 @@ const REGISTRY_ROWS = [
     { canonical: 'component_loader_reconcile', hyphen: true },
     { canonical: 'component_loader_hmr', hyphen: true },
     { canonical: 'instruction', body: INSTRUCTION_BODY },
-    { canonical: 'prd_add', hyphen: true, body: PRD_ADD_BODY },
+    { canonical: 'prd_add', hyphen: true, aliases: PRD_ADD_KEYS, fields: PRD_ADD_FIELDS, description: PRD_ADD_DESCRIPTION, body: PRD_ADD_BODY },
     { canonical: 'prd_resolve', hyphen: true, body: PRD_RESOLVE_BODY },
     { canonical: 'prd_list', hyphen: true, aliases: PRD_LIST_KEYS, fields: PRD_LIST_FIELDS, description: PRD_LIST_DESCRIPTION, body: PRD_LIST_BODY },
     { canonical: 'prd_defer', hyphen: true },
@@ -598,7 +635,7 @@ const REGISTRY_ROWS = [
     { canonical: 'cache_put' },
     { canonical: 'cache_invalidate' },
     { canonical: 'cache_stats' },
-    { canonical: 'chrome' },
+    { canonical: 'chrome', description: 'The CDP crawl as a named verb: the same plain-text body as crawl, always on the cdp engine with a headful window. Answers the crawl host JSON object. Plain-text body, so pass raw_body.' },
     { canonical: 'crawl' },
     { canonical: 'scan_deps' },
     { canonical: 'code_index' },
@@ -613,9 +650,9 @@ const REGISTRY_ROWS = [
     { canonical: 'pool_observe', hyphen: true, body: POOL_OBSERVE_BODY },
     { canonical: 'subagent_start', hyphen: true },
     { canonical: 'subagent_end', hyphen: true },
-    { canonical: 'browser_lease_acquire' },
-    { canonical: 'browser_lease_release' },
-    { canonical: 'browser_lease_status' },
+    { canonical: 'browser_lease_acquire', description: 'Acquire the shared browser lease for body.agent, waiting up to 600 s. Answers port, chrome_pid and lease_file. A holder whose heartbeat is older than 120 s counts as dead.', body: BROWSER_LEASE_BODY },
+    { canonical: 'browser_lease_release', description: 'Release the shared browser lease held by body.agent. Answers the lease state with released set to that agent.', body: BROWSER_LEASE_BODY },
+    { canonical: 'browser_lease_status', description: 'Read the shared browser lease state. Takes no agent field; answers the lease state alone.' },
     { canonical: 'nodejs' },
     { canonical: 'javascript' },
     { canonical: 'node' },
