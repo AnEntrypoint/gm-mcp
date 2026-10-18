@@ -1292,6 +1292,12 @@ function runnerEnv() {
     return env
 }
 
+function callerLaneWait(body) {
+    if (!isPlainObject(body)) return null
+    const ms = Number(body.lane_wait_ms)
+    return body.lane_wait_ms !== undefined && Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : null
+}
+
 function spawnRunnerDetached(root, now) {
     try {
         const child = spawn(RUNNER_PATH, ['spool'], {
@@ -2251,7 +2257,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
 
     const requestedPollTimeoutMs = resume_task ? timeoutMilliseconds(timeout_seconds, DEFAULT_TIMEOUT_SECONDS) : pollTimeoutMs(verb, raw_body, timeout_seconds)
     const pollCeilingMs = pollTimeoutCeilingMs()
-    const timeoutMs = Math.min(requestedPollTimeoutMs, pollCeilingMs)
+    const callerLaneWaitMs = callerLaneWait(normalizedBody)
+    const timeoutMs = Math.min(Math.max(requestedPollTimeoutMs, callerLaneWaitMs ?? 0), pollCeilingMs)
     const execMs = EXEC_FAMILY_VERBS.includes(verb) ? execLimitMs(verb, raw_body, timeout_seconds) : null
 
     if (!resume_task) {
@@ -2269,8 +2276,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         } else if (rawBodyText !== undefined) {
             publishSpoolRequest(inDir, inPath, requestNumber, rawBodyText)
         } else {
-            const fullBody = { ...normalizedBody, session_id }
-            fullBody._agentplug_lane_wait_ms = timeoutMs
+            const { lane_wait_ms: _publicLaneWait, ...callerBody } = normalizedBody
+            const fullBody = { ...callerBody, session_id }
+            fullBody._agentplug_lane_wait_ms = callerLaneWaitMs === null ? timeoutMs : Math.min(callerLaneWaitMs, timeoutMs)
             if (verb === 'instruction') {
                 const leases = leaseSessionsFor(root)
                 if (leases) fullBody._lease_sessions = leases.filter(lease => lease.live).map(({ session_id: leaseSession, pid }) => ({ session_id: leaseSession, pid }))

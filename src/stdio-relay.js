@@ -1,4 +1,5 @@
 import { createInterface } from 'node:readline'
+import { request as httpRequest } from 'node:http'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { CONTINUATION_LOGGER, observeRelayedReply, startContinuationMonitor } from './continuation.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
@@ -43,13 +44,20 @@ function emitContinuation(params) {
     writeFrame(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/message', params }))
 }
 
-async function post(url, line) {
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
-        body: line,
+function post(url, line) {
+    return new Promise((resolve, reject) => {
+        const request = httpRequest(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'content-length': Buffer.byteLength(line) },
+        }, (response) => {
+            const chunks = []
+            response.on('data', (chunk) => chunks.push(chunk))
+            response.on('end', () => resolve({ contentType: String(response.headers['content-type'] || ''), text: Buffer.concat(chunks).toString('utf8') }))
+            response.on('error', reject)
+        })
+        request.on('error', reject)
+        request.end(line)
     })
-    return { contentType: response.headers.get('content-type') || '', text: await response.text() }
 }
 
 function isTransient(error) {

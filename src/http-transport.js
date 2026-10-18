@@ -190,6 +190,8 @@ export async function startHttpServer({ port, host, listenHandle = null, listenR
     const server = createHttpServer((req, res) => {
         void handleRequest(req, res, port)
     })
+    server.requestTimeout = 0
+    server.headersTimeout = 0
     server.on('clientError', (_error, socket) => {
         socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
     })
