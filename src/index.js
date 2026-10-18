@@ -87,7 +87,7 @@ export async function main() {
     }
 
     installStdioGuards()
-    const relayUrl = await stdioRelayTarget()
+    const relayUrl = (process.env.GM_MCP_RELAY || '').trim().toLowerCase() === 'http' ? await stdioRelayTarget() : null
     if (relayUrl) {
         recordRunningImage('stdio-relay', runningBundle())
         watchForStaleBundle({ transportKind: 'stdio-relay' })
@@ -104,7 +104,6 @@ export async function main() {
     console.error('gm-mcp: connected, serving on stdio')
     startContinuationMonitor((params) => server.server.sendLoggingMessage(params).catch((error) => appendDiagnostic('continuation-notify-failed', { error: describeError(error) })))
     recordRunningImage('stdio', runningBundle())
-    seedHttpSingletonInBackground()
     watchForStaleBundle({ transportKind: 'stdio' })
     scheduleStaleDeployedBundleChecks(null, runLeakWatchPass)
     runReleaseBridgeInBackground()

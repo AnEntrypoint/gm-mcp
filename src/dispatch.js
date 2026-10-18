@@ -161,6 +161,16 @@ function fsReadRequestedRange(body) {
     return { start: fsReadLineNumber(body[startKey]) ?? 1, end, count, startKey }
 }
 
+export function fsReadProjectRelativeBody(verb, body, cwd) {
+    if (verb !== 'fs_read' || !isPlainObject(body)) return body
+    if (typeof body.path !== 'string' || !path.isAbsolute(body.path)) return body
+    const root = resolveDispatchRoot(cwd).root
+    if (!root) return body
+    const rel = path.relative(root, path.resolve(body.path))
+    if (!rel || path.isAbsolute(rel) || rel.split(path.sep).includes('..')) return body
+    return { ...body, path: rel.split(path.sep).join('/') }
+}
+
 export function fsReadRangeCanonicalBody(verb, body) {
     if (verb !== 'fs_read') return body
     if (!isPlainObject(body)) return body
@@ -1423,6 +1433,38 @@ function pruneSpoolResponsesOnce(outDir) {
     }
 }
 
+const LATEST_ONLY_VERBS = new Set(['prd-list', 'prd_list'])
+
+function isRefusalReply(parsed) {
+    return isPlainObject(parsed) && (parsed.refused === true || parsed.status === 'refused' || parsed.outcome === 'refused')
+}
+
+function removeReadReply(outPath) {
+    try {
+        fs.unlinkSync(outPath)
+    } catch {
+    }
+}
+
+function pruneSupersededListings(outDir, verb, sessionId, keepPath, callStartedAtMs) {
+    const prefix = `${verb}-${sessionId}-`
+    let names
+    try {
+        names = fs.readdirSync(outDir)
+    } catch {
+        return
+    }
+    for (const name of names) {
+        if (!name.startsWith(prefix)) continue
+        const file = path.join(outDir, name)
+        if (file === keepPath) continue
+        try {
+            if (fs.statSync(file).mtimeMs < callStartedAtMs) fs.unlinkSync(file)
+        } catch {
+        }
+    }
+}
+
 function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
     return new Promise((resolve, reject) => {
         let outWatch
@@ -2259,7 +2301,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             codesearchDualScope = dualRouted.scope
             const withDefaultK = withCodesearchDefaultK(verb, dualRouted.body)
             codesearchKDefaulted = withDefaultK.defaulted
-            normalizedBody = withAssertedInstructionHash(verb, fsReadRangeCanonicalBody(verb, withDefaultK.body))
+            normalizedBody = withAssertedInstructionHash(verb, fsReadRangeCanonicalBody(verb, fsReadProjectRelativeBody(verb, withDefaultK.body, cwd)))
         }
     }
 
@@ -2322,10 +2364,12 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         if (!fs.existsSync(outPath)) return undefined
         let landedAtMs = null
         let opened
+        let readRefusal = false
         try {
             opened = openSpoolRegularFile(root, outPath)
             landedAtMs = opened.mtimeMs
             const original = JSON.parse(readAllBounded(opened.fd, opened.size))
+            readRefusal = isRefusalReply(original)
             responseValueObserver?.(original)
             const parsed = full_response ? original : unpackExecOutputEnvelope(verb, original)
             applySessionLeaseVerdict(parsed, { body: normalizedBody ?? body, root, verb })
@@ -2365,6 +2409,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             }
             const rendered = (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
             const spillNote = verb === 'fs_read' ? fsReadSpillNote(out, rendered) : ''
+            if (LATEST_ONLY_VERBS.has(verb)) pruneSupersededListings(outDir, verb, session_id, outPath, callStartedAtMs)
             const replyCap = replyMaxChars(max_chars)
             const spillPath = `${outPath}.reply.txt`
             if (rendered.length > replyCap) fs.writeFileSync(spillPath, rendered)
@@ -2374,6 +2419,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs)) : failed)
         } finally {
             if (opened) fs.closeSync(opened.fd)
+            if (readRefusal) removeReadReply(outPath)
         }
     }
 

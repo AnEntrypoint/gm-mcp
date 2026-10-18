@@ -236,22 +236,7 @@ node C:\Users\user\.gm-tools\gm-mcp-server.mjs http-status          # is it answ
 node C:\Users\user\.gm-tools\gm-mcp-server.mjs --http --port 8787   # run it in the foreground
 ```
 
-Every stdio start is a relay: it forwards each MCP frame to the shared server
-over HTTP and writes the reply to stdout, and starts no watchers of its own. A
-stdio start, an HTTP server started on another port and a `dispatch` run all
-health-probe the port and spawn the shared server detached when nothing answers
-(one spawner per port, see `claimSpawn` in `gm-mcp/AGENTS.md`), so the durable
-transport is up before any client asks for it and comes back by itself after a
-crash. A stdio start runs a local server with its watchers only when the
-singleton is opted out (`GM_MCP_NO_HTTP_SINGLETON=1`) or cannot start, and
-`GM_MCP_HTTP_PORT` moves the port. A relay whose singleton stops answering
-restarts it once (8 s budget), answers the call in-process over the spool when
-the restart does not answer in time, and probes `/health` before each later
-call so it routes back to HTTP as soon as the singleton answers. Each relayed
-call is bounded by `GM_CODEMODE_TIMEOUT_MS` (default 600000) plus 5 s; an error
-names the failing layer (HTTP singleton, or in-process fallback). Because no
-state is carried between requests, a restart of the HTTP server never loses an
-in-flight dispatch.
+A stdio start serves the session in-process over the spool and starts no watchers and no HTTP server: `main` in `src/index.js` runs `createServer` on stdio, and each dispatch is published to `.gm/exec-spool` by `dispatch.js`, so no port and no admin rights are needed on Windows, macOS or Linux. Set `GM_MCP_RELAY=http` to make a stdio start relay each MCP frame to the shared HTTP server instead (`serveStdioRelay`, `src/stdio-relay.js`). A relay whose singleton stops answering restarts it once (8 s budget), answers the call in-process over the spool when the restart does not answer in time, and probes `/health` before each later call. Each relayed call is bounded by `GM_CODEMODE_TIMEOUT_MS` (default 600000) plus 5 s; an error names the failing layer. Because no state is carried between requests, a restart of the HTTP server never loses an in-flight dispatch.
 
 The HTTP transport has its own stranding failure: if the port is empty when a
 session's client connects, that client answers `MCP server "gm" is not

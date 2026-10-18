@@ -15,7 +15,7 @@ import { resolve as resolvePath } from 'node:path'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
-const DEFAULT_CODEMODE_TIMEOUT_MS = 600000
+const DEFAULT_CODEMODE_TIMEOUT_MS = 540000
 const UNRETURNED_REPLY_CHARS = 6000
 
 function codemodeTimeoutMs() {
@@ -391,7 +391,8 @@ export function registerCodeMode(server, tools) {
                 const ids = callIds.length ? [`gm_dispatch_ids: ${callIds.join(', ')}`] : []
                 const headline = detail.split('\n')[0]
                 const text = [`dispatch_id: ${dispatchId}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...ids, ...tally, ...partial].join('\n')
-                return { content: [{ type: 'text', text: continuedReply(session_id, text) }], isError: true }
+                const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
+                return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(text, cap, CONTINUATION_RESERVE_CHARS)) }], isError: true }
             }
         }
     )

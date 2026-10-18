@@ -284,6 +284,10 @@ export function recordedServerPid(instance, supervisor, port = null) {
     return null
 }
 
+export function holderIsOwn(port, pid) {
+    return recordedServerPid(readStateFile(instanceFilePath(port), port), readStateFile(supervisorStateFilePath(port), port), port) === Number(pid)
+}
+
 export function establishedConnectionCount(port) {
     const wanted = Number(port)
     if (!Number.isInteger(wanted) || wanted <= 0) return null
@@ -620,7 +624,8 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
     }
 
     if (live) {
-        const retired = await retireHttpInstance({ port, pid: live.pid ?? null, reason: 'version-behind', version: live.version ?? null })
+        const ownHolder = holderIsOwn(port, live.pid)
+        const retired = ownHolder && await retireHttpInstance({ port, pid: live.pid ?? null, reason: 'version-behind', version: live.version ?? null })
         if (!retired) {
             appendDiagnostic('http-singleton-behind-kept', {
                 port,
