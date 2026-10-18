@@ -159,7 +159,7 @@ function parseDispatchArgv(argv) {
             body,
             raw_body: rawBody,
             session_id: dispatchFlag(argv, 'session-id') || `gm-cli-${process.pid}-${Date.now()}`,
-            cwd: dispatchFlag(argv, 'cwd') || process.cwd(),
+            cwd: dispatchFlag(argv, 'cwd') || undefined,
             timeout_seconds: numberOrUndefined(dispatchFlag(argv, 'timeout')),
             poll_interval_seconds: numberOrUndefined(dispatchFlag(argv, 'poll')),
             max_chars: numberOrUndefined(dispatchFlag(argv, 'max-chars')),
