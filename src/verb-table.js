@@ -65,12 +65,16 @@ const GIT_COMMIT_TYPES = {
     author_email: z.string(),
 }
 const GIT_COMMIT_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'recover_remote_moved', 'source_ref', 'rev', 'author_name', 'author_email']
-const GIT_COMMIT_FIELDS = aliasFields('git_finalize/git_commit', GIT_COMMIT_TYPES, GIT_COMMIT_KEYS)
-const GIT_COMMIT_DESCRIPTION = ` ${GIT_COMMIT_KEYS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body. The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit.`
+const GIT_FINALIZE_FIELDS = aliasFields('git_finalize', GIT_COMMIT_TYPES, GIT_COMMIT_KEYS)
+const GIT_COMMIT_VERB_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'author_name', 'author_email']
+const GIT_COMMIT_FIELDS = aliasFields('git_commit', GIT_COMMIT_TYPES, GIT_COMMIT_VERB_KEYS)
+const GIT_SINGLE_SHAPE = (verb, keys, sample) => ` ${keys.join(', ')} ${keys.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${sample}":...} and body:{"${sample}":...} are the same call (one accepted shape for ${verb}); a key named in both takes its value from body.`
+const GIT_COMMIT_DESCRIPTION = GIT_SINGLE_SHAPE('git_commit', GIT_COMMIT_VERB_KEYS, 'message') + ` The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit.`
+const GIT_FINALIZE_DESCRIPTION = ` ${GIT_COMMIT_KEYS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body. The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit.`
 
 const GIT_PUSH_KEYS = ['rev']
 const GIT_PUSH_FIELDS = aliasFields('git_push', GIT_COMMIT_TYPES, GIT_PUSH_KEYS)
-const GIT_PUSH_DESCRIPTION = ` ${GIT_PUSH_KEYS.join(', ')} is accepted at the top level and folded into body, so {"rev":"<sha>"} and body:{"rev":"<sha>"} are the same call; a key named in both takes its value from body.`
+const GIT_PUSH_DESCRIPTION = GIT_SINGLE_SHAPE('git_push', GIT_PUSH_KEYS, 'rev') + ' Every other push field (remote, branch, force, recover_remote_moved, allow_foreign_commits) goes under body only.'
 
 const GIT_SHOW_KEYS = ['rev', 'ref', 'sha', 'commit', 'stat', 'path', 'paths', 'files']
 const GIT_SHOW_FIELDS = aliasFields('git_show', GIT_COMMIT_TYPES, GIT_SHOW_KEYS)
@@ -336,6 +340,8 @@ const GIT_COMMIT_BODY = {
         add_all: { type: 'boolean', description: 'Stages everything first.' },
         allow_whole_index: { type: 'boolean', description: 'Commits the whole index when paths is absent.' },
         allow_foreign_rows: { type: 'boolean', aliases: ['allow_foreign_prd_rows'], description: 'Commits rows another session owns.' },
+        author_name: { type: 'string', description: 'Commit author name; overrides the configured identity.' },
+        author_email: { type: 'string', description: 'Commit author email; overrides the configured identity.' },
     },
 }
 const GIT_SUBMODULE_ADD_BODY = {
@@ -371,6 +377,7 @@ const GIT_PUSH_BODY = {
         force: { type: 'boolean', aliases: ['force_with_lease'], description: 'Forces the push.' },
         recover_remote_moved: { type: 'boolean', aliases: ['pull_first'], description: 'Pulls before pushing when the remote moved.' },
         allow_foreign_commits: { type: 'boolean', description: 'Pushes commits another session owns.' },
+        remote: { type: 'string', description: 'Configured remote name; defaults to origin.' },
     },
 }
 const CI_LOG_BODY = {
@@ -525,10 +532,10 @@ const REGISTRY_ROWS = [
     { canonical: 'branch_status' },
     { canonical: 'git_push', aliases: GIT_PUSH_KEYS, fields: GIT_PUSH_FIELDS, description: GIT_PUSH_DESCRIPTION, body: GIT_PUSH_BODY },
     { canonical: 'git_add' },
-    { canonical: 'git_commit', aliases: GIT_COMMIT_KEYS, fields: GIT_COMMIT_FIELDS, description: GIT_COMMIT_DESCRIPTION, body: GIT_COMMIT_BODY },
+    { canonical: 'git_commit', aliases: GIT_COMMIT_VERB_KEYS, fields: GIT_COMMIT_FIELDS, description: GIT_COMMIT_DESCRIPTION, body: GIT_COMMIT_BODY },
     { canonical: 'git_amend' },
     { canonical: 'git_rewrite_authors' },
-    { canonical: 'git_finalize', aliases: GIT_COMMIT_KEYS, fields: GIT_COMMIT_FIELDS, description: GIT_COMMIT_DESCRIPTION, body: GIT_FINALIZE_BODY },
+    { canonical: 'git_finalize', aliases: GIT_COMMIT_KEYS, fields: GIT_FINALIZE_FIELDS, description: GIT_FINALIZE_DESCRIPTION, body: GIT_FINALIZE_BODY },
     { canonical: 'git_log', ...scopedGitRow('git_log') },
     { canonical: 'git_diff', ...scopedGitRow('git_diff') },
     { canonical: 'git_show', aliases: GIT_SHOW_KEYS, fields: GIT_SHOW_FIELDS, description: GIT_SHOW_DESCRIPTION },

@@ -63,7 +63,8 @@ const JSON_OBJECT_TEXT = /^\s*\{/
 export function foldVerbArgs(tool, args) {
     if (!tool?.verb) return args
     if (!isPlainObject(args)) return args
-    const topLevel = new Set(Object.keys(tool.inputSchema ?? {}))
+    const verbAliases = new Set(tableRow(tool.verb)?.aliases ?? [])
+    const topLevel = new Set(Object.keys(tool.inputSchema ?? {}).filter((key) => !verbAliases.has(key)))
     const envelope = {}
     let extra = null
     for (const [key, value] of Object.entries(args)) {
