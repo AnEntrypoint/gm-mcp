@@ -9,7 +9,7 @@ const MONITOR_TICK_MS = 15000
 const RELAY_KEY = 'relay'
 const PENDING_LINE = /^\s*prd_pending_count:\s*(\d+)\s*$/m
 const CONTINUATION_HEADS = /^continuation:\s*$/gm
-const COMPLETE_LINE = /^complete:\s*true\s*$/m
+const COMPLETE_LINE = /^\s*complete:\s*true\s*$/m
 
 const entries = new Map()
 
@@ -60,7 +60,7 @@ export function continuedReply(key, text, now = Date.now()) {
     const seen = PENDING_LINE.exec(text)
     if (seen) entry.pending_rows = Number(seen[1])
     const json = parsedJsonOf(text)
-    const done = json?.value?.complete === true || COMPLETE_LINE.test(text)
+    const done = json?.value?.complete === true || json?.value?.data?.complete === true || COMPLETE_LINE.test(text)
     const snapshot = continuationSnapshot(key, now, done)
     entry.last_ms = now
     if (json && json.value && typeof json.value === 'object' && !Array.isArray(json.value)) return JSON.stringify({ ...json.value, continuation: snapshot })

@@ -142,6 +142,7 @@ export function withSearchIncompleteness(out) {
 function codesearchIncompleteReasons(out) {
     const data = out.data && typeof out.data === 'object' && !Array.isArray(out.data) ? out.data : {}
     const reasons = []
+    if (out.stale_tree || data.stale_tree) reasons.push('stale_tree')
     if (out.ok === false || out.error !== undefined || data.error !== undefined) reasons.push('error')
     if (searchScopeSize(data) === 0 || searchScopeSize(out) === 0) reasons.push('searched_zero_files')
     for (const source of [out, data]) {

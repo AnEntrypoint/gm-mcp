@@ -343,13 +343,24 @@ function establishedLocalPortsViaNetstat() {
     } catch {
         return null
     }
-    if (!text.includes('ESTABLISHED')) return []
-    const localFieldIndex = process.platform === 'win32' ? 1 : 3
+    return netstatEstablishedLocalPorts(text, process.platform === 'win32')
+}
+
+const WINDOWS_WILDCARD_FOREIGN = /^(0\.0\.0\.0|\[::\]):0$/
+const WINDOWS_NON_ESTABLISHED_STATE = /^(LISTEN|TIME_WAIT|CLOSE_WAIT|SYN_|FIN_|LAST_ACK|CLOSING|CLOSED)/i
+
+export function netstatEstablishedLocalPorts(text, win) {
+    if (!win && !text.includes('ESTABLISHED')) return []
+    const localFieldIndex = win ? 1 : 3
     const locals = []
     for (const line of text.split('\n')) {
         const fields = line.trim().split(/\s+/)
         if (fields.length < 4 || !/^tcp/i.test(fields[0])) continue
-        if (!fields.includes('ESTABLISHED')) continue
+        if (win) {
+            if (WINDOWS_WILDCARD_FOREIGN.test(fields[2]) || WINDOWS_NON_ESTABLISHED_STATE.test(fields[3])) continue
+        } else if (!fields.includes('ESTABLISHED')) {
+            continue
+        }
         const local = localPortOf(fields[localFieldIndex])
         if (local === null) return null
         locals.push(local)
