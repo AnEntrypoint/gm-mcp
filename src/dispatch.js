@@ -358,7 +358,7 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
         const lastBreak = cut.lastIndexOf('\n')
         head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
     }
-    let notice = `reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\nspill_file: ${spillPath}\n${spillNote}`
+    let notice = `reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: continuation_reserve_chars (${CONTINUATION_RESERVE_CHARS}, held back for the continuation block)\n` : ''}spill_file: ${spillPath}\n${spillNote}`
     if (matchesTotal !== undefined && matchesReturned < matchesTotal) {
         notice += `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n`
         notice += `matches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
@@ -426,7 +426,7 @@ function gitShowCaptureFallback(verb, body, out, root) {
         stat = execFileSync('git', argv, { cwd: repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000, windowsHide: true })
     } catch (error) {
         const detail = String(error?.stderr ?? error?.message ?? '').trim()
-        return { ...out, error_code: 'git_show_failed', error: `git show ${rev} failed in ${repo}: ${detail}` }
+        return { ...out, error_code: 'git_show_failed', error: `git ${argv.join(' ')} failed in cwd ${repo}: ${detail}` }
     }
     const truncated = stat.length > GIT_SHOW_INLINE_MAX
     return {
@@ -438,6 +438,13 @@ function gitShowCaptureFallback(verb, body, out, root) {
         truncated_reason: 'the full diff exceeded the host capture limit; output is the commit header and the per-file stat',
         paging: `read one file's diff with git_show {"rev":"${rev}","paths":["<path from the stat>"]}`,
     }
+}
+
+function withExecExitVerdict(verb, out) {
+    if (!EXEC_FAMILY_VERBS.includes(verb) || !isPlainObject(out) || !isPlainObject(out.data)) return out
+    const code = out.data.exit_code
+    if (typeof code !== 'number' || code === 0) return out
+    return { ...out, ok: false }
 }
 
 function withCheckoutCreateHint(verb, body, out) {
@@ -2024,7 +2031,9 @@ function withDispatchWait(out, waitedMs) {
     if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !isPlainObject(out)) return out
     const admitted = Number(out.admission_waited_ms)
     const admissionMs = Number.isFinite(admitted) && admitted > 0 ? Math.min(admitted, waitedMs) : 0
-    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, unattributed_ms: waitedMs - admissionMs } }
+    const executed = Number(out.duration_ms ?? out.data?.duration_ms)
+    const execMs = Number.isFinite(executed) && executed > 0 ? Math.min(executed, waitedMs - admissionMs) : 0
+    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, exec_ms: execMs, unattributed_ms: waitedMs - admissionMs - execMs } }
 }
 
 function withResumeDisclosure(out, disclosure) {
@@ -2395,6 +2404,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 const collides = Object.keys(data).some(k => k in rest)
                 if (!collides) out = { ...rest, ...data }
             }
+            out = withExecExitVerdict(verb, out)
             out = withCodesearchCompleteness(verb, out)
             if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }

@@ -56,7 +56,7 @@ function wmiStartedAt(text) {
 
 function failureReason(error) {
     if (error?.status != null) {
-        const stderr = typeof error.stderr === 'string' ? error.stderr.trim().slice(0, 300) : ''
+        const stderr = typeof error.stderr === 'string' ? error.stderr.trim() : ''
         return `powershell exit ${error.status}${stderr ? `: ${stderr}` : ''}`
     }
     return error?.code ?? error?.message ?? String(error)

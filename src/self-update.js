@@ -19,6 +19,8 @@ const DEFAULT_CHECK_INTERVAL_MS = 60 * 1000
 const FULL_FETCH_INTERVAL_MS = 10 * 60 * 1000
 const DEFER_RETRY_DELAY_MS = 20_000
 const MAX_DEFER_RETRIES_PER_TRIGGER = 4
+const SWAP_DEFER_LIMIT_MS = 120_000
+let swapDeferralStartedAt = null
 const FETCH_TIMEOUT_MS = 20_000
 const MIN_PLAUSIBLE_BUNDLE_BYTES = 100_000
 const BUNDLE_SHEBANG = '#!/usr/bin/env node'
@@ -361,7 +363,13 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     // Swapping the bundle under a dispatch that is running would cut that dispatch's reply off
     // mid-write, so the swap waits -- and the wait is retried soon instead of an interval later.
     const dispatchesInflight = countInflightDispatches()
-    if (dispatchesInflight > 0) return { outcome: 'deferred-dispatch-inflight', self, dispatches_inflight: dispatchesInflight }
+    if (dispatchesInflight > 0) {
+        swapDeferralStartedAt ??= Date.now()
+        const waitedMs = Date.now() - swapDeferralStartedAt
+        if (waitedMs < SWAP_DEFER_LIMIT_MS) return { outcome: 'deferred-dispatch-inflight', self, dispatches_inflight: dispatchesInflight, waited_ms: waitedMs }
+        appendDiagnostic('self-update-defer-expired', { dispatches_inflight: dispatchesInflight, waited_ms: waitedMs })
+    }
+    swapDeferralStartedAt = null
 
     replaceDeployedBundle(deployedPath, freshBytes)
     writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash, full_at: fullAt, checked_at: Date.now(), outcome: 'refreshed', ...record })

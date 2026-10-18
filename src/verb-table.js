@@ -67,6 +67,7 @@ const GIT_COMMIT_TYPES = {
     claim_only: booleanLike,
     patch: z.string(),
     hunks: z.record(z.string(), z.array(numberLike)),
+    offset: numberLike,
 }
 const GIT_COMMIT_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'recover_remote_moved', 'source_ref', 'rev', 'author_name', 'author_email']
 const GIT_FINALIZE_FIELDS = aliasFields('git_finalize', GIT_COMMIT_TYPES, GIT_COMMIT_KEYS)
@@ -80,7 +81,7 @@ const GIT_PUSH_KEYS = ['rev']
 const GIT_PUSH_FIELDS = aliasFields('git_push', GIT_COMMIT_TYPES, GIT_PUSH_KEYS)
 const GIT_PUSH_DESCRIPTION = GIT_SINGLE_SHAPE('git_push', GIT_PUSH_KEYS, 'rev') + ' Every other push field (remote, branch, force, recover_remote_moved, allow_foreign_commits) goes under body only.'
 
-const GIT_SHOW_KEYS = ['rev', 'ref', 'sha', 'commit', 'stat', 'path', 'paths', 'files']
+const GIT_SHOW_KEYS = ['rev', 'ref', 'sha', 'commit', 'stat', 'path', 'paths', 'files', 'offset']
 const GIT_SHOW_FIELDS = aliasFields('git_show', GIT_COMMIT_TYPES, GIT_SHOW_KEYS)
 const GIT_SHOW_DESCRIPTION = ` ${GIT_SHOW_KEYS.join(', ')} are accepted at the top level and folded into body, so {"rev":"<sha>", "stat": true} and body:{"rev":"<sha>", "stat": true} are the same call; a key named in both takes its value from body. Without a rev git_show reads HEAD, and without stat, path, paths or files it prints the whole commit, which is what a dropped field used to look like.`
 
@@ -99,7 +100,7 @@ const GIT_PATHSPEC = pathspec
 const GIT_SCOPED_TYPES = {
     git_log: {
         range: z.string(), ref: z.string(), rev: z.string(),
-        limit: z.number(), count: z.number(),
+        limit: z.number(), count: z.number(), max_count: z.number(),
         path: GIT_PATHSPEC, paths: GIT_PATHSPEC, files: GIT_PATHSPEC,
     },
     git_diff: {
