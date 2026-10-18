@@ -91,7 +91,8 @@ export async function main() {
     if (relayUrl) {
         recordRunningImage('stdio-relay', runningBundle())
         watchForStaleBundle({ transportKind: 'stdio-relay' })
-        return serveStdioRelay({ url: relayUrl })
+        const recover = () => ensureHttpSingleton({ port: defaultHttpPort(), wait: true, sweep: false }).then((started) => started?.url ?? null)
+        return serveStdioRelay({ url: relayUrl, recover })
     }
     appendDiagnostic('stdio-standalone-start', { pid: process.pid })
     const server = createServer()
