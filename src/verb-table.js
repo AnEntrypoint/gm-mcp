@@ -64,10 +64,12 @@ const GIT_COMMIT_TYPES = {
     author_name: z.string(),
     author_email: z.string(),
     claim_only: booleanLike,
+    patch: z.string(),
+    hunks: z.record(z.string(), z.array(numberLike)),
 }
 const GIT_COMMIT_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'recover_remote_moved', 'source_ref', 'rev', 'author_name', 'author_email']
 const GIT_FINALIZE_FIELDS = aliasFields('git_finalize', GIT_COMMIT_TYPES, GIT_COMMIT_KEYS)
-const GIT_COMMIT_VERB_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'author_name', 'author_email', 'claim_only']
+const GIT_COMMIT_VERB_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'author_name', 'author_email', 'claim_only', 'patch', 'hunks']
 const GIT_COMMIT_FIELDS = aliasFields('git_commit', GIT_COMMIT_TYPES, GIT_COMMIT_VERB_KEYS)
 const GIT_SINGLE_SHAPE = (verb, keys, sample) => ` ${keys.join(', ')} ${keys.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${sample}":...} and body:{"${sample}":...} are the same call (one accepted shape for ${verb}); a key named in both takes its value from body.`
 const GIT_COMMIT_DESCRIPTION = GIT_SINGLE_SHAPE('git_commit', GIT_COMMIT_VERB_KEYS, 'message') + ` The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit. claim_only:true only claims paths in .gm/lane-claims.json for SESSION_ID (needs a non-empty paths array) and does not commit or publish.`
@@ -345,6 +347,8 @@ const GIT_COMMIT_BODY = {
         allow_foreign_rows: { type: 'boolean', aliases: ['allow_foreign_prd_rows'], description: 'Commits rows another session owns.' },
         author_name: { type: 'string', description: 'Commit author name; overrides the configured identity.' },
         author_email: { type: 'string', description: 'Commit author email; overrides the configured identity.' },
+        patch: { type: 'string', description: 'Hunk-scoped commit: a unified diff against HEAD, committed through a temp index so only its hunks land. Exclusive with hunks; does not combine with paths, files, add_all, amend or allow_empty.' },
+        hunks: { type: 'object', description: 'Hunk-scoped commit: {path: [1-based hunk numbers from git diff HEAD -- <path>]}, committed through a temp index. Exclusive with patch; does not combine with paths, files, add_all, amend or allow_empty.' },
     },
 }
 const GIT_SUBMODULE_ADD_BODY = {
