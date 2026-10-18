@@ -7,10 +7,11 @@ import { BUNDLE_VERSION } from './bundle-version.js'
 import { runningBundle } from './bundle-drift.js'
 import { recordRunningImage } from './running-images.js'
 import { clearLocalBuildPin, deployedBundleVersion, describeSelfUpdateOutcome, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, refreshDeployedBundleNow, selfUpdateStatus } from './self-update.js'
-import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
+import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, holderIsOwn, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
 import { reapReport, formatFindings } from './leak-reaper.js'
 import { formatLeakWatchLine, formatOrphanLine, formatOrphanTreeLine, leakWatchReport } from './leak-watch.js'
 import { attributePid, globalLedgerPath } from './child-ledger.js'
+import { logFilePath } from './server-log.js'
 
 function repeatedFlag(name) {
     const values = []
@@ -242,7 +243,8 @@ const COMMANDS = {
             return 1
         }
         console.log(`gm-mcp ${BUNDLE_VERSION}: ${result.reused ? 'reusing' : 'started'} the shared HTTP server (pid ${result.pid}) -- ${result.url}`)
-        const supervision = ensureHttpSupervisor({ port })
+        const ours = !result.reused || holderIsOwn(port, result.pid)
+        const supervision = ours ? ensureHttpSupervisor({ port }) : { started: false, reason: 'foreign-holder-not-supervised' }
         if (supervision.started) {
             console.log(`gm-mcp ${BUNDLE_VERSION}: armed the http supervisor (pid ${supervision.pid}, probing every ${Math.round(supervisorIntervalMs() / 1000)}s) -- it restarts ${result.url} when /health stops answering`)
         } else {
@@ -377,7 +379,8 @@ if (command && COMMANDS[command]) {
     try {
         process.exit(await COMMANDS[command]())
     } catch (error) {
-        console.error(`gm-mcp: ${command} failed: ${error.message}`)
+        const dispatchNote = error?.dispatch_id ? ` dispatch_id=${error.dispatch_id}` : ''
+        console.error(`gm-mcp: ${command} failed: ${error.message}${dispatchNote} pid=${process.pid} log=${logFilePath()}`)
         process.exit(1)
     }
 }
