@@ -153,8 +153,11 @@ const report = {
     entry_mtime: existsSync(entry) ? statSync(entry).mtime.toISOString() : null,
 }
 
+report.platform = process.platform
 if (hasFlag('uninstall')) {
     report.uninstall = uninstall()
+} else if (process.platform === 'win32') {
+    report.unsupported = 'win32: the boot hook (sh) and crontab are POSIX mechanisms with no Windows equivalent here; nothing was written'
 } else {
     if (!hasFlag('no-hook')) report.hook = installHook()
     if (!hasFlag('no-cron')) report.cron = installCron()
@@ -163,4 +166,4 @@ if (hasFlag('uninstall')) {
 
 report.health = await health()
 console.log(JSON.stringify(report, null, 2))
-process.exit(report.health.ok ? 0 : 1)
+process.exit(report.unsupported || !report.health.ok ? 1 : 0)
