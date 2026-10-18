@@ -228,7 +228,20 @@ function bindings(tools, { session_id, cwd }, extra) {
         }
         return tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then(replyText)
     }
-    const dispatchEnvelopeSchema = () => z.toJSONSchema(z.object(tools.values().next().value.inputSchema))
+    let envelopeCache
+    const dispatchEnvelopeSchema = () => {
+        if (envelopeCache !== undefined) return envelopeCache
+        const counts = new Map()
+        for (const tool of tools.values()) {
+            const key = JSON.stringify(z.toJSONSchema(z.object(tool.inputSchema)))
+            counts.set(key, (counts.get(key) ?? 0) + 1)
+        }
+        let shared = null
+        let sharedCount = -1
+        for (const [key, count] of counts) if (count > sharedCount) { shared = key; sharedCount = count }
+        envelopeCache = JSON.parse(shared ?? 'null')
+        return envelopeCache
+    }
     const api = {
         list: (options) => listEntries(tools, options),
         help: () => ({ notices: NOTICES, list_options: { filter: 'substring of name, verb, alias or description', names_only: 'true returns names only', max_desc: `description chars (default ${DEFAULT_LIST_DESC_CHARS}, 0 = full)` }, codemode_max_chars: `reply cap (default ${DEFAULT_CODEMODE_MAX_CHARS})`, [DISPATCH_ENVELOPE_NAME]: dispatchEnvelopeSchema() }),
