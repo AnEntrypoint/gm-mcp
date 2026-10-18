@@ -106,6 +106,20 @@ export function refuseUndeclaredBodyKeys(name, verb, folded) {
     throw new Error(`${name} body has undeclared key ${unknown.join(', ')} -- declared body fields: ${[...known].join(', ')}`)
 }
 
+export function refuseMissingRequiredBodyKeys(name, verb, folded) {
+    if (!verb || !folded || typeof folded !== 'object') return
+    const schema = verbBodySchema(verb)
+    if (!schema.declared) return
+    const body = isPlainObject(folded.body) ? folded.body : {}
+    const missing = schema.required.filter((field) => {
+        if (field === 'session_id') return false
+        if (body[field] !== undefined) return false
+        return !(schema.fields[field]?.aliases ?? []).some((alias) => body[alias] !== undefined)
+    })
+    if (missing.length === 0) return
+    throw new Error(`${name} body field ${missing.join(', ')} required: error: ${missing.map((field) => `${field} required`).join('; ')} -- send ${missing.map((field) => `body.${field}`).join(', ')}`)
+}
+
 const DEFAULT_LIST_DESC_CHARS = 80
 const DEFAULT_CODEMODE_MAX_CHARS = 24000
 
@@ -206,6 +220,7 @@ function bindings(tools, { session_id, cwd }, extra) {
         const defaults = {}
         const folded = foldVerbArgs(tool, merged)
         refuseUndeclaredBodyKeys(name, tool.verb, folded)
+        refuseMissingRequiredBodyKeys(name, tool.verb, folded)
         if ('session_id' in tool.inputSchema && folded.session_id === undefined) defaults.session_id = session_id
         if ('cwd' in tool.inputSchema && folded.cwd === undefined) {
             const defaultCwd = defaultCwdFor(merged, cwd)
