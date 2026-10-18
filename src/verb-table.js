@@ -289,9 +289,11 @@ const CODESEARCH_BODY = {
     },
 }
 const GREP_BODY = {
-    required: CODESEARCH_BODY.required,
+    required: [],
     fields: {
         ...CODESEARCH_BODY.fields,
+        mode: { type: 'string', enum: ['pattern', 'literal', 'regex', 'comments', 'content', 'files', 'files_with_matches', 'count'], description: 'grep mode: "pattern" (default) reads regex metacharacters as a regex, "literal" matches verbatim, "regex" always compiles, "comments" finds comment spans and needs no pattern. An output shape is accepted as mode and sets output_mode.' },
+        context: { type: 'number', description: 'Lines of context around each content hit.' },
         output_mode: { type: 'string', aliases: ['outputMode'], enum: ['content', 'files_with_matches', 'count'], description: 'grep output shape: "content" (default) is path:line: text per hit, "files_with_matches" each matching path once, "count" path:count.' },
     },
 }
@@ -517,6 +519,27 @@ const WEBSEARCH_BODY = {
     },
 }
 
+const PRD_WITNESS_REQUEST_BODY = {
+    required: ['id'],
+    fields: {
+        id: { type: 'string', aliases: ['prd_id', 'row'], description: 'PRD row id that needs a verifier witness.' },
+        note: { type: 'string', aliases: ['expect', 'observe'], description: 'What the verifier must observe.' },
+    },
+}
+
+const EXPANSION_AUDIT_BODY = {
+    required: [],
+    fields: {
+        scope: { type: 'string', aliases: ['goal', 'subject'], description: 'What the sweep covered. Required unless list is true.' },
+        rows_added: { type: 'number', description: 'Rows this sweep filed with prd-add. Required unless list is true.' },
+        unknowns_added: { type: 'number', description: 'Unknowns this sweep filed with mutable-add. Required unless list is true.' },
+        result: { type: 'string', enum: ['fixed_point', 'expanded'], description: 'Optional claim; refused when it disagrees with the counts (both zero = fixed_point).' },
+        note: { type: 'string', description: 'Free text kept on the audit entry.' },
+        list: { type: 'boolean', description: 'true reads .gm/expansion-audit.jsonl instead of appending.' },
+        limit: { type: 'number', description: 'With list, how many latest entries to return (default 5).' },
+    },
+}
+
 const REGISTRY_ROWS = [
     { canonical: 'fs_read', aliases: FS_READ_RANGE_ALIASES, fields: FS_READ_RANGE_FIELDS, description: FS_READ_DESCRIPTION, body: FS_READ_BODY },
     { canonical: 'fs_write', body: FS_WRITE_BODY },
@@ -622,6 +645,8 @@ const REGISTRY_ROWS = [
     { canonical: 'prd_resolve', hyphen: true, body: PRD_RESOLVE_BODY },
     { canonical: 'prd_list', hyphen: true, aliases: PRD_LIST_KEYS, fields: PRD_LIST_FIELDS, description: PRD_LIST_DESCRIPTION, body: PRD_LIST_BODY },
     { canonical: 'prd_defer', hyphen: true },
+    { canonical: 'prd_witness_request', hyphen: true, description: 'Ask a separate verifier session to witness a PRD row: records the request on the row with the requesting session.', body: PRD_WITNESS_REQUEST_BODY },
+    { canonical: 'expansion_audit', hyphen: true, description: 'Record one traversal sweep (scope, rows_added, unknowns_added) in .gm/expansion-audit.jsonl; both counts zero with no open rows or unknowns is the verifiable end state. {list:true} reads the log.', body: EXPANSION_AUDIT_BODY },
     { canonical: 'prd_repair', hyphen: true },
     { canonical: 'task_spawn', hyphen: true, body: TASK_SPAWN_BODY },
     { canonical: 'task_list', hyphen: true },

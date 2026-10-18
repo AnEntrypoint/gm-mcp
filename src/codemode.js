@@ -5,7 +5,7 @@ import { canonicalToolName, nearestNames } from './verbs.js'
 import { tableRow, verbDescriptionLead } from './verb-table.js'
 
 const DISPATCH_ENVELOPE_NAME = 'dispatch_envelope'
-import { verbBodySchema } from './verb-bodies.js'
+import { DISPATCH_BODY_FIELDS, GUEST_ENVELOPE_FIELDS, verbBodySchema } from './verb-bodies.js'
 import { NOTICES } from './notices.js'
 import { CONTINUATION_RESERVE_CHARS, continuedReply } from './continuation.js'
 
@@ -108,7 +108,7 @@ export function refuseUndeclaredBodyKeys(name, verb, folded) {
     if (!isPlainObject(body)) return
     const schema = verbBodySchema(verb)
     if (!schema.declared) return
-    const known = new Set(Object.keys(schema.fields))
+    const known = new Set([...Object.keys(schema.fields), ...Object.keys(DISPATCH_BODY_FIELDS), ...GUEST_ENVELOPE_FIELDS])
     for (const spec of Object.values(schema.fields)) for (const alias of spec.aliases ?? []) known.add(alias)
     const unknown = Object.keys(body).filter((key) => !known.has(key))
     if (unknown.length === 0) return
