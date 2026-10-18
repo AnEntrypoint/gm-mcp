@@ -1,4 +1,4 @@
-export const GUEST_BODY_SOURCE = {"repo":"AnEntrypoint/rs-plugkit","sha":"74ba797b9bf2bcfb54d76ab15ff69a20c77d4e16"}
+export const GUEST_BODY_SOURCE = {"repo":"AnEntrypoint/rs-plugkit","sha":"49de8e3d90be32d8aeddf68b244790219ea9846f"}
 
 export const GUEST_ENVELOPE_FIELDS = ["SESSION_ID","session_id","sessionId","cwd","repo","root","projectPath","git_root_override","full_response"]
 
@@ -80,7 +80,9 @@ export const GUEST_ACCEPTED_FIELDS = {
         "max_chars",
         "sha",
         "rev",
-        "ref"
+        "ref",
+        "failed_only",
+        "tail_lines"
     ],
     "git_branch": [
         "remote",
