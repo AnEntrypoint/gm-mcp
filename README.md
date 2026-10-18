@@ -47,7 +47,7 @@ trips Claude Code's 30s connect timeout under load.
 
 Any running copy checks the deployed `~/.gm-tools/gm-mcp-server.mjs` (or
 `$GM_TOOLS_DIR`) against `bin/gm-mcp-server.js` on `main` in the background
-after it connects, at most once per hour — not only a process started from that
+after it connects, at most once per hour, not only a process started from that
 file, so a server launched from a repo build keeps the deployment current
 instead of leaving it behind upstream. A process that refreshed a deployment it
 is not does not hand its own transport over to it; only the deployed copy's own
@@ -327,7 +327,7 @@ gm-mcp: leak watch -- 27 gm-mcp process(es) on this host (warn at 8); 19 server(
 ```
 
 **The population warning is the early signal.** `gm_processes` counts every
-`gm-mcp-server` process alive on the host — servers and supervisors — and
+`gm-mcp-server` process alive on the host, servers and supervisors, and
 `above_warn` trips at `GM_MCP_LEAK_POPULATION_WARN` (default `8`), long before
 the count becomes memory pressure. It is a warning, never a kill: nothing is
 refused a start.
@@ -337,11 +337,11 @@ default the pass reports and stops. `GM_MCP_LEAK_AUTO_APPLY=1` lets it signal,
 and then only an unattributed **stdio** server that is also:
 
 - not the pid answering `/health` and not the owner of a registered port's
-  listening socket — one shared HTTP server carries every session on the box;
+  listening socket, one shared HTTP server carries every session on the box;
 - free of any live MCP-client ancestor (`claude`, `code`, `cursor`, ...), so a
   server a session is driving is never touched;
 - free of any live desktop-session ancestor (`selkies`, `xfdesktop`,
-  `xfce4-session`, `s6-svscan`, `Xvfb`, ...) — those look exactly like multi-day
+  `xfce4-session`, `s6-svscan`, `Xvfb`, ...), those look exactly like multi-day
   orphans and are the live session;
 - of a **measured** start time at least 30 minutes old, and at most 3 per pass.
 
@@ -351,13 +351,12 @@ are counted and reported; retiring them stays with the supervisor sweep
 (`GM_MCP_HTTP_SUPERVISOR_DUPE_REAP`).
 
 **Orphans are the leaks the ledger cannot see.** The reaper assesses only pids
-the child ledger knows, so a process gm never spawned piles up invisibly — 11
+the child ledger knows, so a process gm never spawned piles up invisibly, 11
 reparented runners held 3367 MB of a 7.8 GB box on 2026-10-15 without one line
 from the watch. The same pass now also scans for processes whose `ppid` is `1`
 (reparented to init), that no ledger row claims, that are **heavyweight** (RSS at
-or above `GM_MCP_LEAK_ORPHAN_RSS_MB`, default 150 MB) and **idle** — CPU seconds
-burned divided by seconds alive below `GM_MCP_LEAK_ORPHAN_DUTY` (default `0.02`)
-— after `GM_MCP_LEAK_ORPHAN_MIN_AGE_MS` (default 900000 ms, 15 minutes) alive.
+or above `GM_MCP_LEAK_ORPHAN_RSS_MB`, default 150 MB) and **idle**, CPU seconds
+burned divided by seconds alive below `GM_MCP_LEAK_ORPHAN_DUTY` (default `0.02`), after `GM_MCP_LEAK_ORPHAN_MIN_AGE_MS` (default 900000 ms, 15 minutes) alive.
 The duty ratio is the discriminator: the 11 real leaks sat near 0.01 while the
 one live run of the same binary was still burning CPU.
 
@@ -367,9 +366,9 @@ one live run of the same binary was still burning CPU.
 
 An orphan is reported, never signalled: gm did not spawn it, so gm does not
 classify whether it may be killed. Detection reads `/proc/<pid>/stat` and
-`/proc/<pid>/status` directly — a `ps` on a box loaded enough to grow orphans
+`/proc/<pid>/status` directly, a `ps` on a box loaded enough to grow orphans
 can take over 120 s and time out, which is exactly the box this scan exists to
-diagnose — so on mac and Windows, which have no `/proc`, the section is simply
+diagnose, so on mac and Windows, which have no `/proc`, the section is simply
 empty rather than wrongly quiet about a number it never measured.
 
 | Env var | Effect | Default |
