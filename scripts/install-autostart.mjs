@@ -156,8 +156,8 @@ const report = {
 report.platform = process.platform
 if (hasFlag('uninstall')) {
     report.uninstall = uninstall()
-} else if (process.platform === 'win32') {
-    report.unsupported = 'win32: the boot hook (sh) and crontab are POSIX mechanisms with no Windows equivalent here; nothing was written'
+} else if (process.platform !== 'linux') {
+    report.unsupported = `${process.platform}: the boot hook (~/beforestart) and crontab @reboot are only read by linux cron here; nothing was written`
 } else {
     if (!hasFlag('no-hook')) report.hook = installHook()
     if (!hasFlag('no-cron')) report.cron = installCron()
