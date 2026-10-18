@@ -16,6 +16,7 @@ import { resolve as resolvePath } from 'node:path'
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
 const DEFAULT_CODEMODE_TIMEOUT_MS = 600000
+const UNRETURNED_REPLY_CHARS = 6000
 
 function codemodeTimeoutMs() {
     const configured = Number(process.env.GM_CODEMODE_TIMEOUT_MS)
@@ -30,7 +31,7 @@ function withCodemodeDeadline(pending, timeoutMs) {
     return Promise.race([pending, deadline]).finally(() => clearTimeout(timer))
 }
 
-const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A second object argument is folded into the first, so gm.<verb>({...}, {cwd: "<root>", max_chars: 800}) is the same call; a second argument that is not an object is refused rather than dropped, because a dropped cwd silently runs the dispatch against another project. A verb that names a field `body` of its own (the row prose of prd-add) follows the same rule: a top-level `body` is the dispatch body only when it is an object or JSON object text, so gm.prd_add({id, subject, body}) reaches the verb as body:{id, subject, body}. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns one entry per verb as {name, aliases?, description?}: the description is the verb text cut to 80 chars, without the boilerplate every runner verb shares, and it is omitted when the verb has none; `gm.describe(name)` gives the runner spelling of the verb, its input schema and its body schema. `gm.list({filter, names_only, max_desc})` narrows it (max_desc 0 gives full descriptions). `gm.help()` returns the notice codes that replies carry. The reply is capped at max_chars (default 24000). `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
+const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A second object argument is folded into the first, so gm.<verb>({...}, {cwd: "<root>", max_chars: 800}) is the same call; a second argument that is not an object is refused rather than dropped, because a dropped cwd silently runs the dispatch against another project. A verb that names a field `body` of its own (the row prose of prd-add) follows the same rule: a top-level `body` is the dispatch body only when it is an object or JSON object text, so gm.prd_add({id, subject, body}) reaches the verb as body:{id, subject, body}. Each call returns that tool\'s text reply and throws when the tool fails. `return gm.list()` returns one entry per verb as {name, aliases?, description?}: the description is the verb text cut to 80 chars, without the boilerplate every runner verb shares, and it is omitted when the verb has none; `gm.describe(name)` gives the runner spelling of the verb, its input schema and its body schema. `gm.list({filter, names_only, max_desc})` narrows it (max_desc 0 gives full descriptions). `gm.help()` returns the notice codes that replies carry. The reply is capped at max_chars (default 24000). `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). If the body returns nothing, the text of every gm call reply is returned in call order, so a git_commit or git_push without a return still reports its result. Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
 
 function replyText(result) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
@@ -191,7 +192,7 @@ function capCodemodeText(text, cap, reserve = 0) {
     return `${text.slice(0, Math.max(0, room - notice.length))}${notice}`
 }
 
-function bindings(tools, { session_id, cwd }, extra) {
+function bindings(tools, { session_id, cwd }, extra, sink = null) {
     const names = [...tools.keys()]
     const resolve = (name) => {
         const key = String(name)
@@ -227,7 +228,11 @@ function bindings(tools, { session_id, cwd }, extra) {
             const defaultCwd = defaultCwdFor(merged, cwd)
             if (defaultCwd !== undefined) defaults.cwd = defaultCwd
         }
-        return tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then(replyText)
+        const pending = tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then(replyText)
+        if (!sink) return pending
+        const entry = { verb: tool.verb ?? name }
+        sink.push(entry)
+        return pending.then((text) => { entry.text = text; return text })
     }
     let envelopeCache
     const dispatchEnvelopeSchema = () => {
@@ -332,10 +337,14 @@ export function registerCodeMode(server, tools) {
             const logger = { log: (...parts) => logs.push(parts.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' ')) }
             const session_id = args.session_id || PROCESS_CODEMODE_SESSION_ID
             try {
-                const gm = bindings(tools, { session_id, cwd: args.cwd }, extra)
+                const replies = []
+                const gm = bindings(tools, { session_id, cwd: args.cwd }, extra, replies)
                 const require = createRequire(resolvePath(args.cwd || process.cwd(), 'gm-codemode.js'))
                 const value = await withCodemodeDeadline(new AsyncFunction('gm', 'console', 'require', args.code)(gm, logger, require), codemodeTimeoutMs())
-                const joined = [...logs, formatValue(value)].filter((line) => line !== '').join('\n')
+                const unreturned = value === undefined
+                    ? replies.filter((entry) => entry.text !== undefined).map((entry) => `--- gm.${entry.verb} (body returned nothing, so each gm reply follows) ---\n${capCodemodeText(entry.text, UNRETURNED_REPLY_CHARS)}`)
+                    : []
+                const joined = [...logs, formatValue(value), ...unreturned].filter((line) => line !== '').join('\n')
                 const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
                 return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(joined, cap, CONTINUATION_RESERVE_CHARS)) }] }
             } catch (error) {
