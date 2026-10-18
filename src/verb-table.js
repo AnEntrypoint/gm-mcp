@@ -39,7 +39,8 @@ const FS_READ_RANGE_LINE_HELP = {
     lines: 'Number of lines to return.',
 }
 const FS_READ_RANGE_FIELDS = Object.fromEntries(FS_READ_RANGE_ALIASES.map((key) => [key, numberLike.optional().describe(FS_READ_RANGE_LINE_HELP[key])]))
-const FS_READ_PATH_RULE = ` "path" is resolved against the cwd you pass (the project root), never absolutely: an absolute path is refused even when it is inside that root, and so is any path carrying ".."; the refusal names the project-relative form to send instead. allowOutsideRoot:true widens a read verb to another root, never permission to climb out of one, and never applies to fs_write.`
+const FS_READ_PATH_RULE = ` "path" is resolved against the cwd you pass (the project root). An absolute path inside that root is rewritten to its project-relative form; an absolute path outside it, and any path carrying "..", is refused, and the refusal names the project-relative form to send instead. allowOutsideRoot:true widens a read verb to another root, never permission to climb out of one, and never applies to fs_write.`
+const FS_READDIR_PATH_RULE = ` "path" is resolved against the cwd you pass (the project root), never absolutely: an absolute path is refused even when it is inside that root, and so is any path carrying ".."; the refusal names the project-relative form to send instead. allowOutsideRoot:true widens a read verb to another root, never permission to climb out of one, and never applies to fs_write.`
 const FS_READ_DESCRIPTION = ` Line ranges are 1-based and inclusive on both ends: ${FS_READ_RANGE_ALIASES.join(', ')} are accepted at the top level and folded into body, and the same keys inside body work identically. ${FS_READ_RANGE_PAIR_HELP} A range-looking key that is not one of them is an error naming the accepted keys rather than a silent whole file. Without any of them the whole file is returned, unchanged.` + FS_READ_PATH_RULE
 
 const COMMIT_SUBJECT_LIMIT = 50
@@ -303,7 +304,7 @@ const GREP_BODY = {
 const FS_READ_BODY = {
     required: ['path'],
     fields: {
-        path: { type: 'string', description: 'Project-relative path. An absolute path is refused even inside the root, and so is any path carrying "..".' },
+        path: { type: 'string', description: 'Project-relative path. An absolute path inside the root is rewritten to project-relative; an absolute path outside it, and any path carrying "..", is refused.' },
         allowOutsideRoot: { type: 'boolean', aliases: ['allow_outside_root', 'allowAbsolute'], description: 'Widens the read to another root; never applies to fs_write.' },
         startLine: { type: 'integer', aliases: ['start_line', 'offset'], description: 'First line to return, 1-based. start_line and offset are accepted as aliases.' },
         endLine: { type: 'integer', aliases: ['end_line'], description: 'Last line to return, 1-based and inclusive. end_line is accepted as an alias.' },
@@ -558,7 +559,7 @@ const EXPANSION_AUDIT_BODY = {
 const REGISTRY_ROWS = [
     { canonical: 'fs_read', aliases: FS_READ_RANGE_ALIASES, fields: FS_READ_RANGE_FIELDS, description: FS_READ_DESCRIPTION, body: FS_READ_BODY },
     { canonical: 'fs_write', body: FS_WRITE_BODY },
-    { canonical: 'fs_readdir', description: FS_READ_PATH_RULE, body: FS_READDIR_BODY },
+    { canonical: 'fs_readdir', description: FS_READDIR_PATH_RULE, body: FS_READDIR_BODY },
     { canonical: 'fs_stat', body: FS_STAT_BODY },
     { canonical: 'fetch', aliases: FETCH_KEYS, fields: FETCH_FIELDS, description: FETCH_DESCRIPTION, body: FETCH_BODY },
     { canonical: 'websearch', aliases: WEBSEARCH_KEYS, fields: WEBSEARCH_FIELDS, description: WEBSEARCH_DESCRIPTION, body: WEBSEARCH_BODY },
