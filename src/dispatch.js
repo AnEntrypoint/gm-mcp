@@ -1134,10 +1134,23 @@ export function explicitBodySessionId(body) {
     return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
-export function applySessionLeaseVerdict(reply, { body, root }) {
+const READ_ONLY_STATUS_VERBS = new Set(['phase-status', 'prd-list', 'pool-observe', 'health'])
+
+export function isReadOnlyStatusDispatch(verb, body) {
+    if (READ_ONLY_STATUS_VERBS.has(verb)) return true
+    return verb === 'instruction' && !(isPlainObject(body) && typeof body.prompt === 'string' && body.prompt.trim() !== '')
+}
+
+export function applySessionLeaseVerdict(reply, { body, root, verb }) {
     const target = reply && typeof reply === 'object' && isPlainObject(reply.data) ? reply.data : reply
     if (!isPlainObject(target)) return reply
     if (!('session_owner_before_this_dispatch' in target) && !('session_mismatch' in target)) return reply
+    if (isReadOnlyStatusDispatch(verb, body)) {
+        target.session_mismatch = false
+        target.session_read_only = true
+        target.session_owner_before_this_dispatch = typeof target.session_owner_before_this_dispatch === 'string' ? target.session_owner_before_this_dispatch : null
+        return reply
+    }
     const owner = typeof target.session_owner_before_this_dispatch === 'string' && target.session_owner_before_this_dispatch ? target.session_owner_before_this_dispatch : null
     const incoming = explicitBodySessionId(body) || (typeof target.session_id === 'string' && target.session_id ? target.session_id : null)
     const leases = leaseSessionsFor(root)
@@ -2272,7 +2285,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             const original = JSON.parse(readAllBounded(opened.fd, opened.size))
             responseValueObserver?.(original)
             const parsed = full_response ? original : unpackExecOutputEnvelope(verb, original)
-            applySessionLeaseVerdict(parsed, { body: normalizedBody ?? body, root })
+            applySessionLeaseVerdict(parsed, { body: normalizedBody ?? body, root, verb })
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
             const ranged = full_response ? parsed : applyFsReadRangeFallback(verb, normalizedBody, parsed)
