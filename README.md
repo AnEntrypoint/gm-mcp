@@ -228,7 +228,7 @@ claude mcp remove gm -s user && claude mcp add --transport http gm http://127.0.
 
 The HTTP side is **stateless** (no session id, one request per call), so a
 client that disappears and comes back is just another request, and it binds
-`127.0.0.1` only. Manage it with:
+`127.0.0.1` only. Manage it with (`gm-mcp-server.mjs` is the deployed copy under `~/.gm-tools`; the tree ships `gm-mcp/bin/gm-mcp-server.js`):
 
 ```
 node C:\Users\user\.gm-tools\gm-mcp-server.mjs ensure-http          # start if nothing answers, arm the supervisor, print the url
