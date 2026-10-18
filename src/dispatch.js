@@ -15,7 +15,7 @@ import { gitToplevel } from './git-adapter.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { tableRow } from './verb-table.js'
 import { execFileSync } from './process-port.js'
-import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withCodesearchCompleteness, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING } from './response-compact.js'
+import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withCodesearchCompleteness, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING, VERBATIM_TEXT_MARKER } from './response-compact.js'
 
 let inflightDispatches = 0
 
@@ -169,6 +169,15 @@ export function fsReadProjectRelativeBody(verb, body, cwd) {
     const rel = path.relative(root, path.resolve(body.path))
     if (!rel || path.isAbsolute(rel) || rel.split(path.sep).includes('..')) return body
     return { ...body, path: rel.split(path.sep).join('/') }
+}
+
+const VERBATIM_HEADER_SCAN_LINES = 12
+
+export function fsWriteEnvelopeDiagnostic(verb, body) {
+    if (verb !== 'fs_write' || !isPlainObject(body) || typeof body.content !== 'string') return null
+    const head = body.content.split('\n', VERBATIM_HEADER_SCAN_LINES)
+    if (!head[0].startsWith('dispatch_id: ') || !head.includes(VERBATIM_TEXT_MARKER)) return null
+    return `fs_write refused: content begins with an fs_read reply envelope (a dispatch_id header and the "${VERBATIM_TEXT_MARKER}" line), so writing it would prepend that wrapper to the file. Send only the file text that follows the marker line, which is what fs_read returns in its data.`
 }
 
 export function fsReadRangeCanonicalBody(verb, body) {
@@ -2296,7 +2305,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         } else {
             const globCoerced = withGlobFiltersCoerced(verb, normalized.value)
             if (globCoerced.error) return `error: ${globCoerced.error}`
-            const diagnostic = objectBodyDiagnostic(verb, globCoerced.value)
+            const diagnostic = objectBodyDiagnostic(verb, globCoerced.value) ?? fsWriteEnvelopeDiagnostic(verb, globCoerced.value)
             if (diagnostic) return `error: ${diagnostic}`
             const coerced = withCodesearchScalarsCoerced(verb, globCoerced.value)
             const dualRouted = withCodesearchDualPathRouted(verb, coerced)
