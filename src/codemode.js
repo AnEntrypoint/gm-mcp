@@ -114,7 +114,8 @@ export function foldVerbArgs(tool, args) {
     const named = envelope.body
     if (typeof named === 'string' && !JSON_OBJECT_TEXT.test(named)) {
         const proseField = proseFieldFor(tool.verb)
-        return { ...envelope, body: { [proseField]: named, ...extra } }
+        const prose = extra?.[proseField] !== undefined ? [extra[proseField], named].join('\n\n') : named
+        return { ...envelope, body: { ...extra, [proseField]: prose } }
     }
     if (extra === null) return args
     if (named === undefined) return { ...envelope, body: extra }
