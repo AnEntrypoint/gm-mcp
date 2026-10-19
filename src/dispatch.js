@@ -2297,10 +2297,16 @@ const DISPATCH_WAIT_DISCLOSED_AT_MS = 2000
 
 function withDispatchWait(out, waitedMs, claimedAtMs, daemonSpanMs) {
     if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !isPlainObject(out)) return out
-    const starved = out.error_code === 'dispatch_starved_waiting_for_admission'
+    const admissionStarved = out.error_code === 'dispatch_starved_waiting_for_admission'
+    const laneStarved = out.error_code === 'dispatch_starved_waiting_for_serial_lane'
+    const starved = admissionStarved || laneStarved
     const admitted = Number(starved ? out.waited_ms : out.admission_waited_ms)
     const admissionMs = Number.isFinite(admitted) && admitted > 0 ? Math.min(admitted, waitedMs) : 0
-    const lane = starved ? { admission_kind: out.admission_kind, admission_in_flight: out.admission_in_flight, admission_limit: out.admission_limit, admission_holders: out.admission_holders } : {}
+    const lane = admissionStarved
+        ? { admission_kind: out.admission_kind, admission_in_flight: out.admission_in_flight, admission_limit: out.admission_limit, admission_holders: out.admission_holders }
+        : laneStarved
+            ? { lane_waiters: out.lane_waiters, lane_position: out.lane_position, lane_holder_task: out.lane_holder_task, lane_holder_verb: out.lane_holder_verb, lane_holder_held_ms: out.lane_holder_held_ms }
+            : {}
     const executed = firstReportedMs(out, ['duration_ms', 'guest_elapsed_ms'])
     const beforeGuestCapMs = waitedMs - admissionMs
     const claimMs = claimedAtMs !== null
