@@ -182,18 +182,26 @@ const SEARCH_PROSE_NOTICE_KEYS = new Map([
     ['file_source_detail', 'file_source_git'],
 ])
 
-function withNoticeCodesAt(level) {
+const CAP_CUT_REASON_RE = /hit cap|match cap|max_matches|matches_truncated/i
+
+function isCapCut(levels) {
+    return levels.some(level => isPlainObject(level) && (level.matches_truncated === true || CAP_CUT_REASON_RE.test(String(level.partial_reason ?? ''))))
+}
+
+function withNoticeCodesAt(level, capCut) {
     const replaced = {}
     for (const [key, value] of Object.entries(level)) {
-        replaced[key] = SEARCH_PROSE_NOTICE_KEYS.has(key) && typeof value === 'string' ? SEARCH_PROSE_NOTICE_KEYS.get(key) : value
+        if (key === 'exhaustive_note' && capCut && typeof value === 'string') replaced[key] = 'exhaustive_cap'
+        else replaced[key] = SEARCH_PROSE_NOTICE_KEYS.has(key) && typeof value === 'string' ? SEARCH_PROSE_NOTICE_KEYS.get(key) : value
     }
     return replaced
 }
 
 export function withNoticeCodes(out) {
     if (!isPlainObject(out)) return out
-    const top = withNoticeCodesAt(out)
-    if (isPlainObject(top.data)) return { ...top, data: withNoticeCodesAt(top.data) }
+    const capCut = isCapCut([out, out.data])
+    const top = withNoticeCodesAt(out, capCut)
+    if (isPlainObject(top.data)) return { ...top, data: withNoticeCodesAt(top.data, capCut) }
     return top
 }
 
