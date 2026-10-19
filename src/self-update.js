@@ -298,10 +298,13 @@ async function probeHeadOrNull(cached) {
     }
 }
 
+const BUNDLE_CHECK_TIMEOUT_MS = 10000
+
 function assertLoadableBundle(bytes, candidatePath) {
     if (bytes.length < MIN_PLAUSIBLE_BUNDLE_BYTES) throw new Error(`candidate bundle is only ${bytes.length} bytes`)
     if (!bytes.subarray(0, BUNDLE_SHEBANG.length).toString('utf8').startsWith(BUNDLE_SHEBANG)) throw new Error('candidate bundle has no node shebang')
-    const syntaxCheck = spawnSync(process.execPath, ['--check', candidatePath], { encoding: 'utf8', windowsHide: true })
+    const syntaxCheck = spawnSync(process.execPath, ['--check', candidatePath], { encoding: 'utf8', windowsHide: true, timeout: BUNDLE_CHECK_TIMEOUT_MS })
+    if (syntaxCheck.error?.code === 'ETIMEDOUT') throw new Error(`candidate bundle node --check timed out after ${BUNDLE_CHECK_TIMEOUT_MS} ms`)
     if (syntaxCheck.status !== 0) {
         const lines = syntaxCheck.stderr.trim().split('\n')
         const message = lines.find((line) => /^\w*Error\b/.test(line.trim())) || lines.at(-1)
