@@ -2292,7 +2292,7 @@ function carriedNoFailure(out) {
         && (!isPlainObject(out.data) || carriedNoFailure(out.data))
 }
 
-const DISPATCH_WAIT_DISCLOSED_AT_MS = 250
+const DISPATCH_WAIT_DISCLOSED_AT_MS = 2000
 
 function withDispatchWait(out, waitedMs, claimedAtMs, daemonSpanMs) {
     if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !isPlainObject(out)) return out
@@ -2371,7 +2371,7 @@ function ownerHeaderRuntimeIdentity(root) {
     if (!status || !Number.isSafeInteger(status.pid) || pidAlive(status.pid) !== true
         || !isFreshDaemonTimestamp(status.ts, Date.now())
         || typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)
-        || !Array.isArray(slots) || !slots.some(value => value === hash)
+        || !Array.isArray(slots) || !slots.some(value => value === hash || value === 'busy-dispatch-in-flight')
         || slots.some(value => value !== null && value !== hash && value !== 'busy-dispatch-in-flight')
         || (Array.isArray(status.mixed_version_pools) && status.mixed_version_pools.length)) return null
     const project = readJsonFile(path.join(spoolDirOf(root), '.status.json'))
