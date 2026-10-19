@@ -102,7 +102,7 @@ const GIT_PATHSPEC = pathspec
 const GIT_SCOPED_TYPES = {
     git_log: {
         range: z.string(), ref: z.string(), rev: z.string(),
-        limit: z.number(), count: z.number(), max_count: z.number(),
+        limit: z.number(), max_count: z.number(),
         path: GIT_PATHSPEC, paths: GIT_PATHSPEC, files: GIT_PATHSPEC,
     },
     git_diff: {
@@ -152,7 +152,7 @@ function scopedGitRow(verb) {
         description: verb === 'git_reset'
             ? description + ' hard:true is the boolean form of mode:"hard" and rev is an alias of ref; paths scope the index only, so hard:true together with paths is refused. mode accepts soft|mixed|hard and hard must be a boolean -- anything else is refused with error_code invalid_args, never coerced to a default. Every ok reply carries mode, hard, reset_to and scope, so the operation that ran is readable without re-reading the repo.'
             : verb === 'git_log'
-            ? description + ' When several count keys are sent, limit wins over count, count over max_count, and max_count over n.'
+            ? description + ' When several count keys are sent, limit wins, then max_count.'
             : description,
     }
 }
