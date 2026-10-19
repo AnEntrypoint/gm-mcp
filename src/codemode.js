@@ -396,19 +396,19 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             const tool = tools.get(name)
             const defaults = {}
             const folded = canonicalFsReadArgs(tool.verb, sessionAliasArgs(foldVerbArgs(verbShapedTool(tool, merged), merged)))
-            const refuse = (check) => {
+            const refuse = (code, check) => {
                 try {
                     check()
                 } catch (error) {
                     const refusalId = `refusal-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`
                     if (entry) entry.dispatch_id = refusalId
-                    appendDiagnostic('codemode-refused', { refusal_id: refusalId, verb: tool.verb ?? name, session_id, error: describeError(error) })
-                    throw error
+                    appendDiagnostic('codemode-refused', { refusal_id: refusalId, error_code: code, verb: tool.verb ?? name, session_id, error: describeError(error) })
+                    throw new Error(`${error.message} -- error_code: ${code} dispatch_id: ${refusalId}`, { cause: error })
                 }
             }
-            refuse(() => refuseUndeclaredBodyKeys(name, tool.verb, folded))
-            refuse(() => refuseMissingRequiredBodyKeys(name, tool.verb, folded))
-            refuse(() => refuseSelectorlessCodeinsight(name, tool.verb, folded))
+            refuse('body_undeclared_key', () => refuseUndeclaredBodyKeys(name, tool.verb, folded))
+            refuse('body_missing_required_key', () => refuseMissingRequiredBodyKeys(name, tool.verb, folded))
+            refuse('codeinsight_selectorless', () => refuseSelectorlessCodeinsight(name, tool.verb, folded))
             if ('session_id' in tool.inputSchema && folded.session_id === undefined) defaults.session_id = session_id
             if ('cwd' in tool.inputSchema && folded.cwd === undefined) {
                 const defaultCwd = defaultCwdFor(merged, cwd)
