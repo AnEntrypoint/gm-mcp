@@ -311,7 +311,8 @@ function capCodemodeText(text, cap, reserve = 0) {
     const room = Math.max(1, cap - reserve)
     if (text.length <= room) return text
     const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${cap}\n`
-    return `${text.slice(0, Math.max(0, room - notice.length))}${notice}`
+    const flagged = text.replace(/^(\s*)truncated: false$/gm, "$1truncated: true")
+    return `${flagged.slice(0, Math.max(0, room - notice.length))}${notice}`
 }
 
 const PARTIAL_REPLY_MIN_CHARS = 200
