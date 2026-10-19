@@ -2414,6 +2414,7 @@ async function plainTextOwnerTransport(root, session_id, signal) {
 const VERBATIM_REPLY_VERBS = new Set(['fs_read', 'result', 'gm_result'])
 
 function bundleNoticeTail(verb, drift) {
+    const installedPath = drift.installed_path ?? drift.path
     const block = yaml.dump({
         bundle_stale: true,
         bundle_stale_reason: drift.installed_version === drift.running_version ? 'sha-only (same version, rebuilt bundle)' : 'version-differs',
@@ -2421,8 +2422,10 @@ function bundleNoticeTail(verb, drift) {
         bundle_served_sha: drift.running_sha256,
         bundle_installed_version: drift.installed_version,
         bundle_installed_sha: drift.installed_sha256,
+        bundle_installed_path: installedPath,
         bundle_reloadable: drift.reloadable === true,
         bundle_action: drift.reloadable === true ? 'reload_pending' : 'none',
+        bundle_restart: drift.reloadable === true ? 'not needed: reloading between dispatches' : `restart the MCP client that launched this server (or reconnect the gm MCP server) so it relaunches from ${installedPath}`,
         bundle_answer_from: 'served-bundle',
     }, { lineWidth: 100 })
     if (READ_ONLY_STATUS_VERBS.has(verb)) return block + '\n'
