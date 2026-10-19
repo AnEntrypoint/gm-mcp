@@ -2127,7 +2127,9 @@ function withDispatchWait(out, waitedMs, claimedAtMs) {
         : beforeGuestCapMs - (executed === null ? 0 : Math.min(executed, beforeGuestCapMs))
     const postClaimMs = waitedMs - admissionMs - claimMs
     const execMs = executed === null ? postClaimMs : Math.min(executed, postClaimMs)
-    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, unattributed_ms: waitedMs - admissionMs - claimMs - execMs, ...lane } }
+    const guestMs = firstReportedMs(out, ['guest_elapsed_ms'])
+    const embedMs = firstReportedMs(out, ['embed_ms', 'embed_query'])
+    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, guest_elapsed_ms: guestMs, embed_ms: embedMs, lane_wait_ms: claimMs, unattributed_ms: waitedMs - admissionMs - claimMs - execMs, ...lane } }
 }
 
 function firstReportedMs(out, keys) {
