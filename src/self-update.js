@@ -260,7 +260,6 @@ async function fetchBundle(url, cached) {
 // The API probe is the freshness signal: a 304 on the stored validator means the main tip is unchanged and costs no
 // body; a 200 names the tip sha, which the bundle is then fetched by (commit-addressed URLs are immutable).
 let headProbeBackoffUntilMs = 0
-let headProbeFailureLogged = false
 
 async function probeHead(cached) {
     const headers = { accept: 'application/vnd.github+json', 'user-agent': 'gm-mcp-self-update' }
@@ -282,17 +281,14 @@ async function probeHead(cached) {
 }
 
 // A rate-limited API probe backs off until GitHub's reset time; the raw-main fallback in refreshStaleDeployedBundle covers the gap.
-// The failure is logged once per process, not on every check.
+// Every failure is logged; appendDiagnostic suppresses only identical repeats within its window.
 async function probeHeadOrNull(cached) {
     if (Date.now() < headProbeBackoffUntilMs) return null
     try {
         return await probeHead(cached)
     } catch (error) {
         if (error.rateLimitResetMs) headProbeBackoffUntilMs = error.rateLimitResetMs
-        if (!headProbeFailureLogged) {
-            headProbeFailureLogged = true
-            appendDiagnostic('self-update-probe-failed', { error: describeError(error), backoff_until_ms: headProbeBackoffUntilMs || null })
-        }
+        appendDiagnostic('self-update-probe-failed', { error: describeError(error), backoff_until_ms: headProbeBackoffUntilMs || null })
         return null
     }
 }
