@@ -259,23 +259,40 @@ async function fetchBundle(url, cached) {
 
 // The API probe is the freshness signal: a 304 on the stored validator means the main tip is unchanged and costs no
 // body; a 200 names the tip sha, which the bundle is then fetched by (commit-addressed URLs are immutable).
+let headProbeBackoffUntilMs = 0
+let headProbeFailureLogged = false
+
 async function probeHead(cached) {
     const headers = { accept: 'application/vnd.github+json', 'user-agent': 'gm-mcp-self-update' }
+    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
+    if (token) headers.authorization = `Bearer ${token}`
     const validated = Boolean(cached?.api_etag && cached?.commit_sha)
     if (validated) headers['if-none-match'] = cached.api_etag
     const response = await fetch(HEAD_PROBE_URL, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
     if (response.status === 304 && validated) return { notModified: true, sha: cached.commit_sha, etag: cached.api_etag }
-    if (!response.ok) throw new Error(`HTTP ${response.status} from ${HEAD_PROBE_URL}`)
+    if (!response.ok) {
+        const error = new Error(`HTTP ${response.status} from ${HEAD_PROBE_URL}`)
+        const resetEpochSec = Number(response.headers.get('x-ratelimit-reset'))
+        if ((response.status === 403 || response.status === 429) && resetEpochSec > 0) error.rateLimitResetMs = resetEpochSec * 1000
+        throw error
+    }
     const head = await response.json()
     if (typeof head?.sha !== 'string' || !COMMIT_SHA_PATTERN.test(head.sha)) throw new Error('commits API reply names no head sha')
     return { notModified: false, sha: head.sha, etag: response.headers.get('etag') }
 }
 
+// A rate-limited API probe backs off until GitHub's reset time; the raw-main fallback in refreshStaleDeployedBundle covers the gap.
+// The failure is logged once per process, not on every check.
 async function probeHeadOrNull(cached) {
+    if (Date.now() < headProbeBackoffUntilMs) return null
     try {
         return await probeHead(cached)
     } catch (error) {
-        appendDiagnostic('self-update-probe-failed', { error: describeError(error) })
+        if (error.rateLimitResetMs) headProbeBackoffUntilMs = error.rateLimitResetMs
+        if (!headProbeFailureLogged) {
+            headProbeFailureLogged = true
+            appendDiagnostic('self-update-probe-failed', { error: describeError(error), backoff_until_ms: headProbeBackoffUntilMs || null })
+        }
         return null
     }
 }
