@@ -4,13 +4,19 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildBundle, headBundleVersion } from './build.mjs'
+import { buildBundle, headBundleVersion, uncommittedSrcPaths } from './build.mjs'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const BUNDLE_VERSION = headBundleVersion(repoRoot)
 const binRel = 'bin/gm-mcp-server.js'
 const committedPath = path.join(repoRoot, binRel)
 const includedSrc = (process.env.GM_MCP_BUILD_INCLUDE || '').split(',').map(s => s.trim()).filter(Boolean)
+
+const foreignSrc = uncommittedSrcPaths(repoRoot).map(line => line.slice(3)).filter(p => !includedSrc.includes(p))
+if (foreignSrc.length) {
+    console.error(`refusing drift check: uncommitted src/ paths not named in GM_MCP_BUILD_INCLUDE (the working-tree build would mix them with HEAD's banner; a clean clone gives a different verdict):\n${foreignSrc.join('\n')}`)
+    process.exit(1)
+}
 
 const result = await buildBundle(false, new Set(includedSrc))
 
