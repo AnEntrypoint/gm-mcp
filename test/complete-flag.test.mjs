@@ -67,13 +67,22 @@ test('complete scoped search carries complete:true and no complete_reason', () =
     assert.equal(out.data.match_count, 10)
 })
 
+test('binary-skipped files alone keep complete:true with the skip count kept in its own field', () => {
+    const reply = scopedCompleteReply()
+    reply.data.files_skipped_binary = 18
+    const out = withCodesearchCompleteness('codesearch', reply)
+    assert.equal(out.complete, true)
+    assert.equal(out.complete_reason, undefined)
+    assert.equal(out.data.files_skipped_binary, 18)
+})
+
 test('capped repo-wide search carries complete:false with complete_reason and keeps partial fields', () => {
     const out = withCodesearchCompleteness('codesearch', cappedRepoWideReply())
     assert.equal(out.complete, false)
     assert.equal(typeof out.complete_reason, 'string')
     assert.match(out.complete_reason, /partial/)
     assert.match(out.complete_reason, /exhaustive:false/)
-    assert.match(out.complete_reason, /files_skipped_binary:6/)
+    assert.doesNotMatch(out.complete_reason, /files_skipped_binary/)
     assert.equal(out.partial, true)
     assert.equal(out.partial_reason, cappedRepoWideReply().partial_reason)
     assert.equal(out.dropped, 2)
