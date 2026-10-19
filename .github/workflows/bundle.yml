@@ -44,13 +44,23 @@ jobs:
         run: GM_MCP_BUILD_INCLUDE=bin/gm-mcp-server.js node scripts/check-bin-drift.mjs
       - name: commit the rebuilt bundle to main
         run: |
-          if git diff --quiet -- bin/gm-mcp-server.js; then
-            echo "bin/gm-mcp-server.js already matches src/"
-            exit 0
-          fi
           git config user.name "lanmower"
           git config user.email "almagestfraternite@gmail.com"
-          git add bin/gm-mcp-server.js
-          git commit -m "bundle: rebuild gm-mcp-server.js [skip ci]"
-          git pull --rebase origin main
-          git push origin HEAD:main
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin main
+            git reset -q --hard origin/main
+            node scripts/build.mjs
+            if git diff --quiet -- bin/gm-mcp-server.js; then
+              echo "bin/gm-mcp-server.js already matches src/"
+              exit 0
+            fi
+            git add bin/gm-mcp-server.js
+            git commit -m "bundle: rebuild gm-mcp-server.js [skip ci]"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt); refetching origin/main and rebuilding"
+            sleep $((attempt * 2))
+          done
+          echo "bundle push still rejected after 5 attempts"
+          exit 1
