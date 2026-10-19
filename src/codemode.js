@@ -546,7 +546,7 @@ export function registerCodeMode(server, tools) {
                 const headline = headlineWithPrefix.replace(/^Error: /, '')
                 const failingVerb = /^verb=\S+ error_code=/.test(headline) ? [headline] : []
                 const wrapper = failingVerb.length ? [] : [`gm-mcp: gm_codemode code threw -- ${headline}`]
-                const echoed = replies.some((entry) => entry.failed && entry.error === detail)
+                const echoed = replies.some((entry) => entry.failed)
                 const lead = echoed ? [] : [...failingVerb, ...wrapper]
                 const tail = echoed ? [] : detailLines
                 const text = [...lead, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id; search log for it)`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
