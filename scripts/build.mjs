@@ -4,10 +4,16 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { BUNDLE_VERSION } from '../src/bundle-version.js'
 
 const scriptPath = fileURLToPath(import.meta.url)
 const repoRoot = path.dirname(path.dirname(scriptPath))
+
+export function headBundleVersion(root) {
+    const src = execFileSync('git', ['show', 'HEAD:src/bundle-version.js'], { cwd: root, encoding: 'utf8' })
+    const m = src.match(/BUNDLE_VERSION\s*=\s*'([^']+)'/)
+    if (!m) throw new Error('HEAD:src/bundle-version.js has no BUNDLE_VERSION literal')
+    return m[1]
+}
 
 export function bundleDepManifest(root) {
     const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
@@ -46,7 +52,7 @@ export async function buildBundle(write = false, keep = new Set()) {
         platform: 'node',
         format: 'esm',
         external: ['node:*'],
-        banner: { js: `#!/usr/bin/env node\nvar BUNDLE_VERSION = ${JSON.stringify(BUNDLE_VERSION)};\nvar BUNDLE_DEPS = ${JSON.stringify(bundleDepManifest(repoRoot))};` },
+        banner: { js: `#!/usr/bin/env node\nvar BUNDLE_VERSION = ${JSON.stringify(headBundleVersion(repoRoot))};\nvar BUNDLE_DEPS = ${JSON.stringify(bundleDepManifest(repoRoot))};` },
         preserveSymlinks: true,
         outfile: path.join(repoRoot, 'bin', 'gm-mcp-server.js'),
         plugins: [headSrcPlugin(repoRoot, keep)],
