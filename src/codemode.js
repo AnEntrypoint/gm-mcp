@@ -86,6 +86,13 @@ function failedReplyDetail(text, verb) {
     return `verb=${verb} error_code=${code ?? 'none'} dispatch_id=${dispatchId ?? 'none'}\n${block || stdoutError || `no error field; reply head: ${head}`}`
 }
 
+function failedVerbLine(entry) {
+    const first = (entry.error ?? '').split('\n')[0].replace(CONTINUATION_TAIL, '')
+    if (/^verb=\S+ error_code=/.test(first)) return first
+    const code = /error_code: ([^\s)]+)/.exec(entry.error ?? '')?.[1] ?? 'none'
+    return `verb=${entry.verb} error_code=${code} dispatch_id=${entry.dispatch_id ?? 'none'}`
+}
+
 function compactFailureDetail(text, verb) {
     const match = /^\S+ ok: false \(error_code: ([^)]*)\)(?: dispatch_id: (\S+))?(?: -- error: ([\s\S]*))?$/.exec(text.trim())
     if (match === null) return null
@@ -313,7 +320,17 @@ function listSummary(row, maxDesc) {
 function capCodemodeText(text, cap, reserve = 0) {
     const room = Math.max(1, cap - reserve)
     if (text.length <= room) return text
-    const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${cap}\ndispatch_id: ${text.match(/^dispatch_id: (\S+)/m)?.[1] ?? 'not reported'}\nspool_file: ${text.match(SPOOL_FILE_PATTERN)?.[0] ?? 'not reported'}\n`
+    const lastBefore = (pattern, group) => {
+        let found = null
+        for (const m of text.matchAll(pattern)) {
+            if (m.index >= room) break
+            found = m[group]
+        }
+        return found
+    }
+    const dispatchId = lastBefore(/^[ \t-]*dispatch_id: (\S+)/gm, 1)
+    const spoolFile = lastBefore(new RegExp(SPOOL_FILE_PATTERN.source, 'g'), 0)
+    const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${cap}\ndispatch_id: ${dispatchId ?? 'not reported'}\nspool_file: ${spoolFile ?? 'not reported'}\n`
     const flagged = text.replace(/^(\s*)truncated: false$/gm, "$1truncated: true")
     return `${flagged.slice(0, Math.max(0, room - notice.length))}${notice}`
 }
@@ -551,7 +568,7 @@ export function registerCodeMode(server, tools) {
                         const head = `--- partial ${label} completed before the throw dispatch_id: ${entry.dispatch_id ?? 'none'} ---`
                         return args.full_response === true ? `${head}\n${completedReplyText(entry.text, replyBudget)}` : head
                     }
-                    if (entry.failed) return `--- partial ${label} failed ---\n${capCodemodeText(withFrameLimit(withoutContinuation(entry.error)), cap)}`
+                    if (entry.failed) return `--- partial ${label} failed ---\n${capCodemodeText(withFrameLimit(withoutContinuation(entry.error).split('\n').map((line) => line.replace(CONTINUATION_TAIL, '')).join('\n')), cap)}`
                     return `--- partial ${label} still pending ---`
                 })
                 const failedCount = replies.filter((entry) => entry.failed).length
@@ -563,8 +580,10 @@ export function registerCodeMode(server, tools) {
                 const headline = headlineWithPrefix.replace(/^Error: /, '')
                 const failingVerb = /^verb=\S+ error_code=/.test(headline) ? [headline] : []
                 const wrapper = failingVerb.length ? [] : [`gm-mcp: gm_codemode code threw -- ${headline}`]
-                const echoed = replies.some((entry) => entry.failed)
-                const lead = echoed ? [] : [...failingVerb, ...wrapper]
+                const failedEntry = replies.find((entry) => entry.failed)
+                const echoed = failedEntry !== undefined
+                const failedHead = echoed ? failedVerbLine(failedEntry) : null
+                const lead = echoed ? (failedHead === null ? [] : [failedHead]) : [...failingVerb, ...wrapper]
                 const tail = echoed ? [] : detailLines
                 const text = [...lead, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id)`, `diagnostic_record: ${diagnosticRecord}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
                 return { content: [{ type: 'text', text: capWithContinuation(session_id, text, cap) }], isError: true }
