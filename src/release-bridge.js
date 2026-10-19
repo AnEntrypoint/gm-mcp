@@ -7,6 +7,7 @@ import { compareVersions, noSelfUpdateReason } from './self-update.js'
 import { agentplugDir, toolsDir } from './paths.js'
 import { inflightDispatchCount, pidAlive } from './dispatch.js'
 import { appendDiagnostic } from './server-log.js'
+import { readProcessTable } from './process-table.js'
 
 const RUNNER_REPO = 'AnEntrypoint/agentplug-bin'
 const GUEST_REPO = 'AnEntrypoint/plugkit-bin'
@@ -318,6 +319,9 @@ async function reconcileGuest(release) {
 
 function processIsRunner(pid) {
     const isRunnerName = name => path.basename(name.trim()).startsWith('agentplug-runner')
+    if (process.platform === 'win32') {
+        return readProcessTable().some(row => row.pid === pid && isRunnerName(row.command))
+    }
     if (existsSync('/proc/self/exe')) {
         try {
             return isRunnerName(readlinkSync(`/proc/${pid}/exe`))
