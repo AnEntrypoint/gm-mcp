@@ -11,7 +11,8 @@ import { NOTICES } from './notices.js'
 import { CONTINUATION_RESERVE_CHARS, continuedReply } from './continuation.js'
 import { DEFAULT_CODEMODE_TIMEOUT_MS } from './codemode-budget.js'
 
-const PROCESS_CODEMODE_SESSION_ID = `mcp-codemode-${process.pid}-${Date.now()}`
+let codemodeInvocationSeq = 0
+const newCodemodeSessionId = () => `mcp-codemode-${process.pid}-${Date.now()}-${++codemodeInvocationSeq}`
 import { createRequire } from 'node:module'
 import { resolve as resolvePath } from 'node:path'
 
@@ -428,7 +429,7 @@ export function registerCodeMode(server, tools) {
         async (args = {}, extra) => {
             const logs = []
             const logger = { log: (...parts) => logs.push(parts.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' ')) }
-            const session_id = args.session_id || PROCESS_CODEMODE_SESSION_ID
+            const session_id = args.session_id || newCodemodeSessionId()
             const replies = []
             const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
             try {
