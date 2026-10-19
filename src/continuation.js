@@ -3,7 +3,8 @@ import * as yaml from 'js-yaml'
 export const CONTINUATION_STOP_VERB = 'continuation-stop'
 export const CONTINUATION_LOGGER = 'gm.continuation'
 const MAX_WORKERS = 4
-export const CONTINUATION_RESERVE_CHARS = 256
+const WORST_CASE_CONTINUATION_BLOCK = { continuation: { state: 'stopped', pending_rows: 999999, idle_ms: 9999999999999, action: 'continue', max_concurrency: 4 } }
+export const CONTINUATION_RESERVE_CHARS = yaml.dump(WORST_CASE_CONTINUATION_BLOCK, { lineWidth: 100 }).length + 1
 const DEFAULT_IDLE_NOTIFY_MS = 300000
 const MONITOR_TICK_MS = 15000
 const RELAY_KEY = 'relay'
@@ -83,6 +84,22 @@ export function continuedReply(key, text, now = Date.now()) {
     const block = yaml.dump({ continuation: snapshot }, { lineWidth: 100 })
     const separator = body === '' || body.endsWith('\n') ? '' : '\n'
     return `${body}${separator}${block}`
+}
+
+export function continuationReserveFor(key) {
+    const entry = entryFor(key)
+    return entry.stopped || entry.pending_rows !== null ? CONTINUATION_RESERVE_CHARS : 0
+}
+
+export function continuedReplyWithin(key, text, cap, cut, now = Date.now()) {
+    if (typeof text !== 'string') return text
+    const continued = continuedReply(key, text, now)
+    if (continued.length <= cap) return continued
+    if (continued === text) return cut(text, cap)
+    const body = textBeforeTrailingBlock(text)
+    if (!continued.startsWith(body)) return continuedReply(key, cut(text, cap - CONTINUATION_RESERVE_CHARS), now)
+    const tail = continued.slice(body.length)
+    return cut(body, cap - tail.length) + tail
 }
 
 export function continuationBlockOf(text) {
