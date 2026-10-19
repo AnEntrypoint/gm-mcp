@@ -1,5 +1,5 @@
-import { toolsDir } from './paths.js'
-import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs'
+import { agentplugDir, spoolDirOf, toolsDir } from './paths.js'
+import { appendFileSync, mkdirSync, readdirSync, renameSync, statSync } from 'node:fs'
 import path from 'node:path'
 
 const LOG_FILE_NAME = 'gm-mcp-server.log'
@@ -13,6 +13,39 @@ export function logFilePath() {
     const override = (process.env.GM_MCP_LOG_PATH || '').trim()
     if (override) return path.resolve(override)
     return path.join(toolsDir(), LOG_FILE_NAME)
+}
+
+function fileFacts(file) {
+    try {
+        const stat = statSync(file)
+        return { path: file, bytes: stat.size, mtime: stat.mtime.toISOString() }
+    } catch {
+        return { path: file, bytes: null, mtime: null }
+    }
+}
+
+function dirFacts(dir) {
+    try {
+        let bytes = 0
+        let files = 0
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            if (!entry.isFile()) continue
+            bytes += statSync(path.join(dir, entry.name)).size
+            files += 1
+        }
+        return { path: dir, files, bytes, mtime: statSync(dir).mtime.toISOString() }
+    } catch {
+        return { path: dir, files: null, bytes: null, mtime: null }
+    }
+}
+
+export function logLocations(projectRoot = process.cwd()) {
+    return {
+        gm_mcp_server_log: fileFacts(logFilePath()),
+        gm_mcp_server_log_rotated: fileFacts(`${logFilePath()}.1`),
+        runner_daemon_log: fileFacts(path.join(agentplugDir(), 'daemon.log')),
+        exec_spool_out: dirFacts(path.join(spoolDirOf(projectRoot), 'out')),
+    }
 }
 
 function rotateOversizedLog(file) {

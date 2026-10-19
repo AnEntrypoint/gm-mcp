@@ -1,6 +1,6 @@
-export const GUEST_BODY_SOURCE = {"repo":"AnEntrypoint/rs-plugkit","sha":"104dcfc919b4a7423c720c4ed3ae7af5c318d485"}
+export const GUEST_BODY_SOURCE = {"repo":"AnEntrypoint/rs-plugkit","sha":"1d999296f192e9186a4421f40361b65bc362744a"}
 
-export const GUEST_ENVELOPE_FIELDS = ["SESSION_ID","session_id","sessionId","cwd","repo","root","projectPath","git_root_override","full_response"]
+export const GUEST_ENVELOPE_FIELDS = ["SESSION_ID","session_id","sessionId","cwd","repo","root","projectPath","git_root_override","full_response","lean_node"]
 
 export const GUEST_ACCEPTED_FIELDS = {
     "git_status": [
@@ -13,9 +13,7 @@ export const GUEST_ACCEPTED_FIELDS = {
     ],
     "git_log": [
         "limit",
-        "count",
         "max_count",
-        "n",
         "range",
         "ref",
         "rev",
@@ -43,7 +41,8 @@ export const GUEST_ACCEPTED_FIELDS = {
         "path",
         "paths",
         "files",
-        "offset"
+        "offset",
+        "full"
     ],
     "git_fetch": [
         "remote",

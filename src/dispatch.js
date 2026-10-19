@@ -330,12 +330,18 @@ function renderMatchesKept(out, holder, kept, toYaml) {
         : toYaml({ ...out, data: { ...out.data, matches: keptMatches } })
 }
 
-function largestMatchesKeptWithinBudget(out, holder, budget, toYaml) {
+function matchesCutNotice(matchesReturned, matchesTotal, maxChars) {
+    if (matchesTotal === undefined || matchesReturned >= matchesTotal) return ''
+    return `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\nmatches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
+}
+
+function largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice) {
     let low = 0
     let high = holder.matches.length
     while (low < high) {
         const mid = Math.ceil((low + high) / 2)
-        if (renderMatchesKept(out, holder, mid, toYaml).length <= budget) low = mid
+        const head = renderMatchesKept(out, holder, mid, toYaml)
+        if (head.length + buildNotice(mid, matchesTotal).length <= maxChars) low = mid
         else high = mid - 1
     }
     return low
@@ -343,25 +349,22 @@ function largestMatchesKeptWithinBudget(out, holder, budget, toYaml) {
 
 function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', requestedMaxChars = maxChars) {
     if (text.length <= maxChars) return text
-    const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
     const holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
+    const buildNotice = (matchesReturned, matchesTotal) => `reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: continuation_reserve_chars (${CONTINUATION_RESERVE_CHARS}, held back for the continuation block)\n` : ''}spill_file: ${spillPath}\n${spillNote}${matchesCutNotice(matchesReturned, matchesTotal, maxChars)}`
     let head = text
     let matchesTotal
     let matchesReturned
     if (holder) {
-        matchesReturned = largestMatchesKeptWithinBudget(out, holder, budget, toYaml)
         matchesTotal = scanMatchesTotal(holder, holder.matches.length)
+        matchesReturned = largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice)
         head = renderMatchesKept(out, holder, matchesReturned, toYaml)
     }
+    const notice = buildNotice(matchesReturned, matchesTotal)
+    const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
     if (head.length > budget) {
         const cut = head.slice(0, budget)
         const lastBreak = cut.lastIndexOf('\n')
         head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
-    }
-    let notice = `reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: continuation_reserve_chars (${CONTINUATION_RESERVE_CHARS}, held back for the continuation block)\n` : ''}spill_file: ${spillPath}\n${spillNote}`
-    if (matchesTotal !== undefined && matchesReturned < matchesTotal) {
-        notice += `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n`
-        notice += `matches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
     }
     const room = Math.max(0, maxChars - notice.length)
     if (head.length > room) {
@@ -2221,11 +2224,16 @@ async function plainTextOwnerTransport(root, session_id, signal) {
 
 const VERBATIM_REPLY_VERBS = new Set(['fs_read', 'result', 'gm_result'])
 
+const noticedBundleKeys = new Set()
+
 function withStaleBundleNotice(verb, text) {
     if (VERBATIM_REPLY_VERBS.has(verb)) return text
     if (typeof text !== 'string' || text === '') return text
     const drift = bundleDrift()
     if (!drift.stale) return text
+    const key = `${drift.installed_sha256 ?? ''}|${drift.refusal_code ?? ''}|${drift.running_sha256 ?? ''}`
+    if (noticedBundleKeys.has(key)) return text
+    noticedBundleKeys.add(key)
     const withNewline = text.endsWith('\n') ? text : `${text}\n`
     const line = bundleStalenessAnnouncement(drift)
     const block = yaml.dump({
