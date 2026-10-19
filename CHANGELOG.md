@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.185 - a long gm_codemode body reports that it is alive
+
+A `gm_codemode` body that awaits gm calls for longer than the client's idle window was aborted with no reply, because nothing reached the client between the call and its final reply. While a body runs, `startHeartbeat` (`src/codemode.js`) now sends a `notifications/message` log line every `CODEMODE_HEARTBEAT_MS` (60000, `src/codemode-budget.js`) naming the elapsed seconds, and also a `notifications/progress` when the client supplied a `progressToken`. The timer is cleared in a `finally`, so the reply is returned exactly as before, and a failed heartbeat send is swallowed so it cannot change the reply. A body that blocks the event loop with synchronous calls (for example `execFileSync` in a loop) still emits nothing, because no timer can fire; only bodies that await gm calls get the heartbeat. `BUNDLE_VERSION` and `package.json` move to 0.2.185.
+
 ## 0.2.72 - an orphaned leak is reported as its whole tree
 
 `orphan-scan.js` reported only processes whose `ppid` was `1`, so the children of a leaked root were invisible: the 2026-10-15 litebox run left a tree of 12 processes whose root was flagged while its children, several of them the hottest and largest, were not orphans by that rule. Each orphan root now also gets a `trees` entry, one per `items` entry in the same order, built by walking its descendants through the `ppid` field of `/proc/<pid>/stat` (depth 16 and 512 members at most; `truncated` names the bound that cut a walk). A tree is one finding: `leak-watch --json` shows `orphans.trees[]` with `member_count`, `rss_mb` (root included), `max_depth` and the member pids, the one-line summary names each tree beside its root, and the CLI prints a `TREE` line under each root. `orphans.items` keeps its shape. The walk never counts the scanning process or its ancestors. Detection only: nothing signals a pid. `BUNDLE_VERSION` moves to 0.2.72.
