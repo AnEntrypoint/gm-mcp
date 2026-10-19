@@ -8,6 +8,7 @@ on:
       - 'scripts/build.mjs'
       - 'package.json'
       - 'package-lock.json'
+      - '.github/workflows/bundle.yml'
   workflow_dispatch:
 
 concurrency:
