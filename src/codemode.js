@@ -9,7 +9,7 @@ import { DISPATCH_BODY_FIELDS, GUEST_ENVELOPE_FIELDS, verbBodySchema } from './v
 import { fsReadRangeCanonicalBody } from './dispatch.js'
 import { NOTICES } from './notices.js'
 import { CONTINUATION_RESERVE_CHARS, continuedReply } from './continuation.js'
-import { DEFAULT_CODEMODE_TIMEOUT_MS } from './codemode-budget.js'
+import { CODEMODE_HEARTBEAT_MS, DEFAULT_CODEMODE_TIMEOUT_MS } from './codemode-budget.js'
 
 let codemodeInvocationSeq = 0
 const newCodemodeSessionId = () => `mcp-codemode-${process.pid}-${Date.now()}-${++codemodeInvocationSeq}`
@@ -29,6 +29,25 @@ function withCodemodeDeadline(pending, timeoutMs) {
         timer = setTimeout(() => reject(new Error(`gm_codemode code did not finish within ${timeoutMs} ms. A gm call it awaited never returned, or a loop of calls outlived the budget. Calls already dispatched keep running in the spool: resume one with resume_task, bound the loop, or raise GM_CODEMODE_TIMEOUT_MS.`)), timeoutMs)
     })
     return Promise.race([pending, deadline]).finally(() => clearTimeout(timer))
+}
+
+function startHeartbeat(extra, startedAt) {
+    const notify = extra?.sendNotification
+    if (typeof notify !== 'function') return () => {}
+    const progressToken = extra?._meta?.progressToken
+    let beat = 0
+    const send = (notification) => {
+        try {
+            Promise.resolve(notify(notification)).catch(() => {})
+        } catch {}
+    }
+    const timer = setInterval(() => {
+        beat += 1
+        const message = `gm_codemode still running after ${Math.round((Date.now() - startedAt) / 1000)} s`
+        send({ method: 'notifications/message', params: { level: 'info', logger: 'gm_codemode', data: message } })
+        if (progressToken !== undefined) send({ method: 'notifications/progress', params: { progressToken, progress: beat, message } })
+    }, CODEMODE_HEARTBEAT_MS)
+    return () => clearInterval(timer)
 }
 
 const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A second object argument is folded into the first, so gm.<verb>({...}, {cwd: "<root>", max_chars: 800}) is the same call; a second argument that is not an object is refused rather than dropped, because a dropped cwd silently runs the dispatch against another project. A top-level `body` is the dispatch body only when it is an object or JSON object text; any other text is row prose, sent as the verb\'s own `body` field when it declares one and as `description` otherwise, so gm.prd_add({id, subject, body}) reaches prd-add as body:{id, subject, description} (an explicit description wins). Each call returns that tool\'s reply as a plain text string, never a parsed object, so a read such as `r.data.matches` is undefined; parse the text or match it instead (for example `r.includes("needle")`). Each call throws when the tool fails, except an exec child that exits nonzero: its reply (exit_code, stdout, stderr) is returned as data.`return gm.list()` returns one entry per verb as {name, aliases?, description?}: the description is the verb text cut to 80 chars, without the boilerplate every runner verb shares, and it is omitted when the verb has none; `gm.describe(name)` gives the runner spelling of the verb, its input schema and its body schema. `gm.list({filter, names_only, max_desc})` narrows it (max_desc 0 gives full descriptions). `gm.help()` returns the notice codes that replies carry. The reply is capped at max_chars (default 24000). `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). If the body returns nothing, the text of every gm call reply is returned in call order, so a git_commit or git_push without a return still reports its result. Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
@@ -439,6 +458,7 @@ export function registerCodeMode(server, tools) {
             const session_id = args.session_id || newCodemodeSessionId()
             const replies = []
             const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
+            const stopHeartbeat = startHeartbeat(extra, Date.now())
             try {
                 const gm = bindings(tools, { session_id, cwd: args.cwd, ...envelopeKeys(args) }, extra, replies)
                 const require = createRequire(resolvePath(args.cwd || process.cwd(), 'gm-codemode.js'))
@@ -470,6 +490,8 @@ export function registerCodeMode(server, tools) {
                 const [headline, ...detailLines] = detail.split('\n')
                 const text = [`diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id; search log for it)`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...ids, ...tally, ...partial, ...detailLines].join('\n')
                 return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(text, cap, CONTINUATION_RESERVE_CHARS)) }], isError: true }
+            } finally {
+                stopHeartbeat()
             }
         }
     )
