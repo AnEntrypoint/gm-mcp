@@ -7,6 +7,11 @@ const OWNED_PREFIXES = [
   'freddie-spill-',
   'casey-gui-check-store-',
   'gm-prune-witness-',
+  'gm-witness-',
+  'gm-mcp-transport-test',
+  'org.chromium',
+  'gm-exec',
+  'bunx',
 ];
 const SCRATCH_ROOT = '/config/tmp';
 const DEFAULT_CAP_HOURS = 24;
@@ -32,7 +37,7 @@ if (resolvedRoot !== SCRATCH_ROOT && !resolvedRoot.startsWith(SCRATCH_ROOT + sep
 }
 
 const cutoff = Date.now() - capHours * 3_600_000;
-const isStale = (st) => st.isDirectory() && st.mtimeMs <= cutoff;
+const isStale = (st) => st.mtimeMs <= cutoff;
 
 const candidates = [];
 for (const name of await readdir(resolvedRoot)) {
@@ -50,4 +55,6 @@ if (apply) {
   }
 }
 
-console.log(JSON.stringify({ root: resolvedRoot, cap_hours: capHours, apply, candidates: candidates.map((c) => c.name), removed }, null, 2));
+const byPrefix = Object.fromEntries(OWNED_PREFIXES.map((prefix) => [prefix, candidates.filter((c) => c.name.startsWith(prefix)).length]));
+
+console.log(JSON.stringify({ root: resolvedRoot, cap_hours: capHours, apply, by_prefix: byPrefix, candidates: candidates.map((c) => c.name), removed }, null, 2));
