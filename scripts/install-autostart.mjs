@@ -13,7 +13,7 @@ const END = `# <<< ${MARKER} <<<`
 
 const hasFlag = (name) => process.argv.slice(2).includes(`--${name}`)
 
-const home = process.env.HOME || homedir()
+const home = homedir()
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoBundle = path.join(path.dirname(scriptDir), 'bin', 'gm-mcp-server.js')
 
