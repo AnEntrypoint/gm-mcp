@@ -269,6 +269,14 @@ function cleanHit(hit, outPath, plainTextFile, untruncatedKeys, inlineMax) {
     return out
 }
 
+const MATCH_WINDOW_CHARS = 160
+
+function matchWindowed(row) {
+    if (typeof row.column !== 'number' || typeof row.text !== 'string' || row.text.length <= LONG_TEXT_FIELD_TRUNCATE_AT) return row
+    const start = Math.min(Math.max(0, row.column - 1 - MATCH_WINDOW_CHARS / 2), row.text.length - MATCH_WINDOW_CHARS)
+    return { ...row, text: row.text.slice(start, start + MATCH_WINDOW_CHARS) }
+}
+
 export function cleanResponse(value, keyHint, outPath, plainTextFile, untruncatedKeys = NO_KEYS, inlineMax) {
     if (Array.isArray(value)) {
         if (HIT_ARRAY_KEYS.has(keyHint)) return dropDuplicateRows(value.map(h => cleanHit(h, outPath, plainTextFile, untruncatedKeys, inlineMax)))
@@ -277,7 +285,7 @@ export function cleanResponse(value, keyHint, outPath, plainTextFile, untruncate
     }
     if (value && typeof value === 'object') {
         const out = {}
-        for (const [k, v] of Object.entries(value)) {
+        for (const [k, v] of Object.entries(matchWindowed(value))) {
             if (NOISE_KEYS.has(k)) continue
             if (v === null && NULL_IS_THE_ANSWER_KEYS.has(k)) {
                 out[k] = null
