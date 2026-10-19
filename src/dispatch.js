@@ -1,6 +1,6 @@
 import { isPlainObject } from './plain-object.js';
 import { agentplugDir, spoolDirOf, toolsDir } from './paths.js'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spoolFs as fs, spoolSpawn as spawn } from './spool-port.js'
 import { claimByCreate, claimByLink, readJsonOrNull, readLockHolderPid, readOwnerText, readPidTsLock, readStatusJson, readTextOrNull, reclaimLockByRename, replaceLockText, writeTextAtomically as writeFileAtomically, SPOOL_DIR_MODE, SPOOL_FILE_MODE } from './spool-store.js'
 import os from 'node:os'
@@ -570,16 +570,31 @@ export function unsafeSpoolName(role, value) {
     return `${role} ${JSON.stringify(value)} still carries the unexpanded interpolation ${JSON.stringify(found[0])} -- the spool ABI is in/<verb>/<session_id>-<N>.txt, so this would land as a literal path component that no daemon ever claims; pass the expanded value`
 }
 
+const SPOOL_PUBLISH_ATTEMPTS = 3
+
+function removeIfPresent(file) {
+    try {
+        fs.unlinkSync(file)
+    } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+    }
+}
+
 function publishSpoolRequest(inDir, inPath, task, body) {
     const unsafe = unsafeSpoolName('task', task)
     if (unsafe) throw new Error(unsafe)
-    fs.mkdirSync(inDir, { recursive: true, mode: SPOOL_DIR_MODE })
-    const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.tmp`)
-    try {
-        fs.writeFileSync(tempPath, body, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
-        fs.linkSync(tempPath, inPath)
-    } finally {
-        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
+    for (let attempt = 1; ; attempt += 1) {
+        const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`)
+        try {
+            fs.mkdirSync(inDir, { recursive: true, mode: SPOOL_DIR_MODE })
+            fs.writeFileSync(tempPath, body, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
+            fs.linkSync(tempPath, inPath)
+            return
+        } catch (error) {
+            if (error?.code !== 'ENOENT' || attempt >= SPOOL_PUBLISH_ATTEMPTS) throw error
+        } finally {
+            removeIfPresent(tempPath)
+        }
     }
 }
 
