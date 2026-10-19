@@ -16,6 +16,8 @@ const STRIPPED_KEYS = new Set([
     'pid', 'admission_waited_ms', 'mtimeMs', 'mtime_ms', 'guest_elapsed_ms', 'duration_ms',
     'uptime_ms', 'started_at', 'updated_at', 'requested_at',
     'admission_band', 'admission_decision', 'admission_waited_ms', 'request_fingerprint',
+    'dispatch_waited_ms', 'dispatch_wait_split', 'claim_observed', 'exec_timed',
+    'bundle_stale', 'bundle_served_version', 'bundle_served_sha', 'bundle_installed_version', 'bundle_installed_sha', 'bundle_reloadable',
 ])
 const TIMING_KEY = /(^|_)(ms|age_ms|at)$|^last_event(_|$)/
 const SPOOL_NAME = /-\d{10,}-\d+(?=\.json|\b)/g
@@ -24,6 +26,7 @@ const PID_PATH = /([\\/][\w.-]*?)-\d{2,7}(?=[-.\\/])/g
 
 const normalize = text => text
     .split(/\r?\n/)
+    .filter(line => line.trim() !== '')
     .filter(line => {
         const key = /^\s*-?\s*([A-Za-z_][\w-]*)\s*:/.exec(line)
         return !(key && (STRIPPED_KEYS.has(key[1]) || TIMING_KEY.test(key[1])))
