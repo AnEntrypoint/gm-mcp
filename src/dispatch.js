@@ -2416,6 +2416,7 @@ const VERBATIM_REPLY_VERBS = new Set(['fs_read', 'result', 'gm_result'])
 function bundleNoticeTail(verb, drift) {
     const block = yaml.dump({
         bundle_stale: true,
+        bundle_stale_reason: drift.installed_version === drift.running_version ? 'sha-only (same version, rebuilt bundle)' : 'version-differs',
         bundle_served_version: drift.running_version,
         bundle_served_sha: drift.running_sha256,
         bundle_installed_version: drift.installed_version,
