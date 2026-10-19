@@ -24,6 +24,7 @@ const RUNNER_VERSION_FILE = 'agentplug-runner.version'
 const LAST_RUNNER_SWAP_FILE = 'last-completed-runner-swap.json'
 const SOURCE_HEAD_LINE = /^source-head:\s*([0-9a-f]{7,40})\s*$/im
 const OFF_VALUES = new Set(['0', 'false', 'no', 'off'])
+const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY'])
 const DEFAULT_INTERVAL_MS = 10 * 60 * 1000
 const LOCK_STALE_MS = 15 * 60 * 1000
 const API_TIMEOUT_MS = 10_000
@@ -274,7 +275,13 @@ async function reconcileRunner(release) {
         rmSync(tempPath, { force: true })
         throw error
     }
-    const backup = swapIn(runnerPath, tempPath, `bak-${installed.version}`)
+    let backup
+    try {
+        backup = swapIn(runnerPath, tempPath, `bak-${installed.version}`)
+    } catch (error) {
+        if (RETRYABLE_RENAME_CODES.has(error?.code)) return { outcome: 'deferred', reason: 'runner-in-use', code: error.code }
+        throw error
+    }
     recordRunnerSwap(release.version, newSha)
     return { outcome: 'swapped', from: installed.version, to: release.version, sha256: newSha, previous_sha256: installedSha, backup }
 }

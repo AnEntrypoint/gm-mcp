@@ -56,6 +56,15 @@ function parsedJsonOf(text) {
     }
 }
 
+function textBeforeTrailingBlock(text) {
+    const heads = [...text.matchAll(CONTINUATION_HEADS)]
+    for (const head of heads.reverse()) {
+        const rest = text.slice(head.index + head[0].length)
+        if (rest.split('\n').every(line => line === '' || /^\s/.test(line))) return text.slice(0, head.index)
+    }
+    return text
+}
+
 export function continuedReply(key, text, now = Date.now()) {
     if (typeof text !== 'string') return text
     const entry = entryFor(key)
@@ -67,10 +76,10 @@ export function continuedReply(key, text, now = Date.now()) {
     const done = json?.value?.complete === true || json?.value?.data?.complete === true || COMPLETE_LINE.test(text)
     const snapshot = continuationSnapshot(key, now, done)
     entry.last_ms = now
+    if (snapshot.action === 'none') return text
     if (json && json.value && typeof json.value === 'object' && !Array.isArray(json.value)) return JSON.stringify({ ...json.value, continuation: snapshot })
     if (json) return text
-    const heads = [...text.matchAll(CONTINUATION_HEADS)]
-    const body = heads.length ? text.slice(0, heads[0].index) : text
+    const body = textBeforeTrailingBlock(text)
     const block = yaml.dump({ continuation: snapshot }, { lineWidth: 100 })
     const separator = body === '' || body.endsWith('\n') ? '' : '\n'
     return `${body}${separator}${block}`

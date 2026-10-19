@@ -99,6 +99,8 @@ function isTransient(error) {
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+const remainingMs = (deadline) => Math.max(1, deadline - Date.now())
+
 async function postWithRetry(url, line, method) {
     let failure = null
     for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
@@ -162,7 +164,7 @@ function createLocalFallback(initializeParams) {
     }
     return {
         active: () => ready !== null,
-        async handle(request) {
+        async handle(request, budgetMs = RELAY_BUDGET_MS) {
             ready ??= within(start(), LOCAL_START_BUDGET_MS, 'in-process fallback start').catch((error) => {
                 ready = null
                 throw error
@@ -172,8 +174,8 @@ function createLocalFallback(initializeParams) {
                 await local.notify(request)
                 return null
             }
-            if (request.method === 'initialize') return { jsonrpc: '2.0', id: request.id, result: (await within(local.exchange({ ...request, id: LOCAL_INIT_ID + '-again' }), RELAY_BUDGET_MS, 'in-process fallback')).result }
-            return within(local.exchange(request), RELAY_BUDGET_MS, 'in-process fallback')
+            if (request.method === 'initialize') return { jsonrpc: '2.0', id: request.id, result: (await within(local.exchange({ ...request, id: LOCAL_INIT_ID + '-again' }), budgetMs, 'in-process fallback')).result }
+            return within(local.exchange(request), budgetMs, 'in-process fallback')
         },
     }
 }
@@ -202,19 +204,20 @@ async function forwardLine(line, recover, state) {
     if (request?.method === 'initialize') state.initializeParams = request.params
     const outbound = withDefaultCwd(request, line, state.defaultCwd)
     const routedRequest = outbound === line ? request : JSON.parse(outbound)
-    if (state.local.active() && !(await httpLive(state.url)) && !(await restartSingleton(recover, state))) return deliverLocal(state, routedRequest, expectsReply)
+    const deadline = Date.now() + RELAY_BUDGET_MS
+    if (state.local.active() && !(await httpLive(state.url)) && !(await restartSingleton(recover, state))) return deliverLocal(state, routedRequest, expectsReply, null, deadline)
     let target = state.url
-    let { reply, failure } = await within(postWithRetry(target, outbound, request?.method ?? null), RELAY_BUDGET_MS, 'http singleton call').catch((error) => ({ reply: null, failure: error }))
+    let { reply, failure } = await within(postWithRetry(target, outbound, request?.method ?? null), remainingMs(deadline), 'http singleton call').catch((error) => ({ reply: null, failure: error }))
     if (!reply) {
         const restarted = await restartSingleton(recover, state)
         if (restarted) {
             target = restarted
-            ;({ reply, failure } = await within(postWithRetry(target, outbound, request?.method ?? null), RELAY_BUDGET_MS, 'http singleton call after restart').catch((error) => ({ reply: null, failure: error })))
+            ;({ reply, failure } = await within(postWithRetry(target, outbound, request?.method ?? null), remainingMs(deadline), 'http singleton call after restart').catch((error) => ({ reply: null, failure: error })))
         }
     }
     if (!reply) {
         appendDiagnostic('stdio-relay-unreachable', { url: target, method: request?.method ?? null, error: describeError(failure) })
-        return deliverLocal(state, routedRequest, expectsReply, failure)
+        return deliverLocal(state, routedRequest, expectsReply, failure, deadline)
     }
     if (!expectsReply) return
     for (const frame of framesFromResponse(reply.contentType, reply.text)) {
@@ -223,9 +226,9 @@ async function forwardLine(line, recover, state) {
     }
 }
 
-async function deliverLocal(state, request, expectsReply, relayFailure = null) {
+async function deliverLocal(state, request, expectsReply, relayFailure = null, deadline = Date.now() + RELAY_BUDGET_MS) {
     try {
-        const message = await state.local.handle(request)
+        const message = await state.local.handle(request, remainingMs(deadline))
         if (!expectsReply || !message) return
         const frame = JSON.stringify(message)
         observeFrame(frame)

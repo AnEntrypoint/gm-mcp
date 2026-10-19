@@ -5,13 +5,14 @@ import { spoolFs as fs, spoolSpawn as spawn } from './spool-port.js'
 import { claimByCreate, claimByLink, readJsonOrNull, readLockHolderPid, readOwnerText, readPidTsLock, readStatusJson, readTextOrNull, reclaimLockByRename, replaceLockText, writeTextAtomically as writeFileAtomically, SPOOL_DIR_MODE, SPOOL_FILE_MODE } from './spool-store.js'
 import os from 'node:os'
 import path from 'node:path'
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
 import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessAnnouncement } from './bundle-drift.js'
 import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuedReply, setContinuationStopped } from './continuation.js'
 import { maybeStartDevSync } from './dev-sync.js'
-import { gitToplevel } from './git-adapter.js'
+import { gitToplevel, runGit } from './git-adapter.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { tableRow } from './verb-table.js'
 import { execFileSync } from './process-port.js'
@@ -29,7 +30,12 @@ export function dispatchVerdict() {
 
 function projectRootFor(dir) {
     const resolved = path.resolve(dir)
-    return gitToplevel(resolved) || resolved
+    const start = isRegularFile(resolved) ? path.dirname(resolved) : resolved
+    return gitToplevel(start) || start
+}
+
+function isRegularFile(p) {
+    try { return statSync(p).isFile() } catch { return false }
 }
 
 const DEFAULT_CWD_ENV_VARS = ['GM_MCP_DEFAULT_CWD']
@@ -38,8 +44,36 @@ function gitRootAt(dir) {
     return gitToplevel(dir) === dir ? dir : null
 }
 
+const LAST_PROJECT_FILE = 'last-project-root'
+
+let rememberedProjectRoot = null
+
+function rememberProjectRoot(root) {
+    if (root === rememberedProjectRoot || gitRootAt(root) !== root) return
+    rememberedProjectRoot = root
+    try {
+        mkdirSync(agentplugDir(), { recursive: true })
+        writeFileSync(path.join(agentplugDir(), LAST_PROJECT_FILE), root)
+    } catch (error) {
+        appendDiagnostic('last-project-root-write-failed', { root, error: String(error?.message || error) })
+    }
+}
+
+function lastProjectRoot() {
+    try {
+        const root = readFileSync(path.join(agentplugDir(), LAST_PROJECT_FILE), 'utf8').trim()
+        return root && gitRootAt(root) === root ? root : null
+    } catch {
+        return null
+    }
+}
+
 function resolveDispatchRoot(cwd) {
-    if (typeof cwd === 'string' && cwd.trim()) return { root: projectRootFor(cwd.trim()), root_source: 'cwd' }
+    if (typeof cwd === 'string' && cwd.trim()) {
+        const root = projectRootFor(cwd.trim())
+        rememberProjectRoot(root)
+        return { root, root_source: 'cwd' }
+    }
     for (const name of DEFAULT_CWD_ENV_VARS) {
         const value = process.env[name]
         if (typeof value !== 'string' || !value.trim()) continue
@@ -49,6 +83,8 @@ function resolveDispatchRoot(cwd) {
     const launched = path.resolve(process.cwd())
     const top = gitToplevel(launched)
     if (top && top === launched) return { root: launched, root_source: 'process_cwd' }
+    const remembered = lastProjectRoot()
+    if (remembered) return { root: remembered, root_source: 'last_project' }
     return {
         error: 'cwd-required',
         refused_root: launched,
@@ -171,6 +207,20 @@ export function fsReadProjectRelativeBody(verb, body, cwd) {
     return { ...body, path: rel.split(path.sep).join('/') }
 }
 
+const SIBLING_ROOT_READ_VERBS = ['fs_stat', 'fs_readdir']
+
+export function outsideRootReadRefusal(verb, body, cwd) {
+    if (!SIBLING_ROOT_READ_VERBS.includes(verb) || !isPlainObject(body)) return null
+    if (typeof body.path !== 'string' || !path.isAbsolute(body.path)) return null
+    if (body.allowOutsideRoot === true || body.allow_outside_root === true) return null
+    const root = resolveDispatchRoot(cwd).root
+    if (!root) return null
+    const rel = path.relative(root, path.resolve(body.path))
+    const outside = rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)
+    if (!outside) return null
+    return `${verb} path ${body.path} is outside the project root ${root}: pass allowOutsideRoot:true with the same path to read this sibling root (a read-only verb; allowOutsideRoot never applies to fs_write)`
+}
+
 const VERBATIM_HEADER_SCAN_LINES = 12
 
 export function fsWriteEnvelopeDiagnostic(verb, body) {
@@ -225,14 +275,45 @@ function fsReadTruncation(verb, body, out) {
     const extra = { truncated: byteCut || clamped }
     if (requestedLast !== undefined) extra.requested_range = { start_line: requested.start, end_line: requestedLast }
     if (hasReturned) extra.returned_range = { start_line: Number.isFinite(returnedStart) ? returnedStart : requested?.start ?? 1, end_line: returnedLast }
+    if (Number.isFinite(returnedStart)) {
+        extra.offset = returnedStart
+        extra.zero_based_offset = returnedStart - 1
+    }
     return { ...out, ...extra }
 }
 
-export function applyFsReadRangeFallback(verb, body, out) {
-    return fsReadTruncation(verb, body, applyFsReadRangeFallbackRaw(verb, body, out))
+export function applyFsReadRangeFallback(verb, body, out, inlineMax) {
+    return fsReadTruncation(verb, body, applyFsReadRangeFallbackRaw(verb, body, out, inlineMax))
 }
 
-function applyFsReadRangeFallbackRaw(verb, body, out) {
+function fsReadUnrangedPage(out, inlineMax) {
+    if (!(inlineMax > 0) || out.ok === false || typeof out.data !== 'string' || out.data.length <= inlineMax) return out
+    const lines = out.data.replace(/\n$/, '').split('\n')
+    let count = 0
+    let size = 0
+    while (count < lines.length) {
+        const next = size + lines[count].length + (count > 0 ? 1 : 0)
+        if (count > 0 && next > inlineMax) break
+        size = next
+        count += 1
+    }
+    const more = count < lines.length
+    return {
+        ...out,
+        data: lines.slice(0, count).join('\n'),
+        range_basis: FS_READ_RANGE_BASIS,
+        total_lines: lines.length,
+        start_line: 1,
+        end_line: count,
+        returned_lines: count,
+        has_more_lines: more,
+        truncated_at_bytes: more,
+        offset: 0,
+        ...(more ? { next_start_line: count + 1 } : {}),
+    }
+}
+
+function applyFsReadRangeFallbackRaw(verb, body, out, inlineMax) {
     if (verb !== 'fs_read') return out
     if (!isPlainObject(out)) return out
     const fields = fsReadReplyFields(out)
@@ -241,7 +322,7 @@ function applyFsReadRangeFallbackRaw(verb, body, out) {
     const requested = fsReadRequestedRange(body)
     if (!requested) {
         const unknown = fsReadUnknownRangeKeys(body)
-        return unknown.length === 0 ? out : fsReadUnknownRangeReply(verb, unknown)
+        return unknown.length === 0 ? fsReadUnrangedPage(out, inlineMax) : fsReadUnknownRangeReply(verb, unknown)
     }
     if (out.ok === false) return out
     const requestedNote = `${requested.startKey} ${requested.start}${requested.end !== undefined ? ` to ${requested.end}` : requested.count !== undefined ? ` plus ${requested.count} lines` : ''}`
@@ -1106,7 +1187,7 @@ function prdAddIdDiagnostic(body) {
         return `prd-add requires a non-empty body.id: body.id is present but blank. Send ${PRD_ADD_MINIMAL_BODY}, or drop id and send {"subject":"one line of intent"} so the id is derived from it. Send {"help": true} for every field.`
     }
     if (PRD_ADD_SLUG_SOURCE_FIELDS.some(field => typeof body[field] === 'string' && body[field].trim())) return undefined
-    return `prd-add requires body.id -- the missing key is "id". Send ${PRD_ADD_MINIMAL_BODY}, or omit id and send {"subject":"one line of intent"}: the id is then derived from the first non-empty one of ${PRD_ADD_SLUG_SOURCE_FIELDS.join(', ')}, and a body with no text anywhere cannot derive one. Send {"help": true} for every field.`
+    return `prd-add requires body.id -- the missing key is "id". Send ${PRD_ADD_MINIMAL_BODY}, or omit id and send {"subject":"one line of intent"}: the id is then derived from the first non-empty one of ${PRD_ADD_SLUG_SOURCE_FIELDS.join(', ')}, and a body with no text anywhere cannot derive one. The fields sit at the top level of the body, not nested under a body key. Send {"help": true} for every field.`
 }
 
 function objectBodyDiagnostic(verb, body) {
@@ -2388,6 +2469,21 @@ const CI_STATUS_WAIT_DEFAULT_MS = 300000
 const CI_STATUS_WAIT_CEILING_MS = 900000
 const CI_STATUS_WAIT_POLL_MS = 15000
 const CI_STATUS_NON_TERMINAL = new Set(['pending', 'in_progress', 'queued', 'waiting', 'requested'])
+const CI_STATUS_ORIGIN_TIMEOUT_MS = 10000
+const GITHUB_REMOTE_PATH = /[:/]([^/:]+)\/([^/]+?)(?:\.git)?\/?$/
+
+function withCiStatusRepo(body, root) {
+    const dir = typeof body.cwd === 'string' && body.cwd.trim() ? body.cwd.trim() : root
+    const explicit = [body.github_repo, body.repo].find((value) => typeof value === 'string' && value.trim())
+    if (explicit) return { body: { ...body, github_repo: explicit.trim(), cwd: dir } }
+    const origin = runGit(dir, ['remote', 'get-url', 'origin'], CI_STATUS_ORIGIN_TIMEOUT_MS)
+    const match = origin.ok ? GITHUB_REMOTE_PATH.exec(origin.out) : null
+    if (!match) {
+        const found = origin.ok && origin.out ? `origin is ${origin.out}` : 'no origin remote'
+        return { error: `ci-status cannot resolve owner/name for ${dir} (${found}); pass github_repo as owner/name` }
+    }
+    return { body: { ...body, github_repo: `${match[1]}/${match[2]}`, cwd: dir } }
+}
 
 function ciStatusReplyRunStatus(reply) {
     if (typeof reply !== 'string') return undefined
@@ -2437,17 +2533,21 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     }
     inflightDispatches += 1
     const startedAtMs = Date.now()
-    appendDiagnostic('dispatch-start', { verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
+    const sessionId = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : null) || null
+    const callId = nextN(sessionId || 'no-session')
+    let replyDispatchId = null
+    appendDiagnostic('dispatch-start', { call_id: callId, session_id: sessionId, verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
     try {
         const waits = CI_STATUS_VERBS.has(args?.verb) && isPlainObject(args?.body) && args.body.wait === true
         const reply = withStaleBundleNotice(args?.verb, waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver))
+        if (typeof reply === 'string') replyDispatchId = /^dispatch_id: (\S+)/m.exec(reply)?.[1] ?? null
         if (VERBATIM_REPLY_VERBS.has(args?.verb)) return reply
         return continuedReply(continuationKeyOf(args), reply)
     } catch (error) {
-        appendDiagnostic('dispatch-error', { verb: args?.verb ?? null, error: error?.message ? String(error.message) : String(error) })
+        appendDiagnostic('dispatch-error', { call_id: callId, session_id: sessionId, verb: args?.verb ?? null, error: error?.message ? String(error.message) : String(error), stack: error?.stack ? String(error.stack) : null })
         throw error
     } finally {
-        appendDiagnostic('dispatch-end', { verb: args?.verb ?? null, ms: Date.now() - startedAtMs, inflight: inflightDispatches - 1 })
+        appendDiagnostic('dispatch-end', { call_id: callId, session_id: sessionId, dispatch_id: replyDispatchId, verb: args?.verb ?? null, ms: Date.now() - startedAtMs, inflight: inflightDispatches - 1 })
         inflightDispatches -= 1
     }
 }
@@ -2521,8 +2621,16 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             codesearchDualScope = dualRouted.scope
             const withDefaultK = withCodesearchDefaultK(verb, dualRouted.body)
             codesearchKDefaulted = withDefaultK.defaulted
+            const siblingRefusal = outsideRootReadRefusal(verb, withDefaultK.body, cwd)
+            if (siblingRefusal) return `error: ${siblingRefusal}`
             normalizedBody = withAssertedInstructionHash(verb, fsReadRangeCanonicalBody(verb, fsReadProjectRelativeBody(verb, withDefaultK.body, cwd)))
         }
+    }
+
+    if (!resume_task && CI_STATUS_VERBS.has(verb) && normalizedBody !== undefined) {
+        const scoped = withCiStatusRepo(normalizedBody, root)
+        if (scoped.error) return `error: ${scoped.error}`
+        normalizedBody = scoped.body
     }
 
     let ownerTransport
@@ -2602,7 +2710,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             applySessionLeaseVerdict(parsed, { body: normalizedBody ?? body, root, verb })
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
-            const ranged = full_response ? parsed : applyFsReadRangeFallback(verb, normalizedBody, parsed)
+            const ranged = full_response ? parsed : applyFsReadRangeFallback(verb, normalizedBody, parsed, inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars, body: normalizedBody }))
             const named = withSearchIncompleteness(ranged)
             const cleaned = full_response ? named : cleanResponse(named, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars, body: normalizedBody }))
             let out = cleaned
@@ -2623,6 +2731,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
+            if (verb === 'prd-list' && isPlainObject(out) && out.ledger === undefined) out = { ...out, ledger: root, ledger_source: resolvedRoot.root_source }
             out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, gitShowCaptureFallback(verb, normalizedBody, out, root))))
             out = withCodesearchDualPathScope(codesearchDualScope, out)
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)

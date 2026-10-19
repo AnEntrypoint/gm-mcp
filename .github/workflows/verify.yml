@@ -7,6 +7,7 @@ on:
       - 'src/**'
       - 'bin/**'
       - 'scripts/**'
+      - 'test/**'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/verify.yml'
@@ -39,6 +40,16 @@ jobs:
           fetch-depth: 0
       - name: a src/ change ships with a bumped BUNDLE_VERSION and a rebuilt bundle
         run: node scripts/check-version-bump.mjs ${{ github.event.before }} ${{ github.sha }}
+      - name: no new file lands under test/ (existing test files may change; new ones are refused)
+        run: |
+          base="${{ github.event.before }}"
+          if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]]; then base="${{ github.sha }}^"; fi
+          added=$(git diff --name-only --no-renames --diff-filter=A "$base" "${{ github.sha }}" -- test/)
+          if [ -n "$added" ]; then
+            echo "new files under test/ are refused on main:"
+            echo "$added"
+            exit 1
+          fi
 
   verify:
     name: verify (${{ matrix.os }})

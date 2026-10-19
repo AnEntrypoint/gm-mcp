@@ -166,6 +166,7 @@ export function selfUpdateStatus() {
     const pin = readLocalBuildPin()
     const deployedSha = bytes ? sha256(bytes) : null
     const deployedVersion = bytes ? parseBundleVersion(bytes) : null
+    const deployedMtimeMs = bytes ? statSync(deployedPath).mtimeMs : null
     const recorded = liveRunningImages()
     const runningImages = [
         ...recorded.map((image) => ({
@@ -176,7 +177,7 @@ export function selfUpdateStatus() {
             started_at: image.started_at,
             stale: Boolean(deployedSha) && (image.version !== deployedVersion || image.sha256 !== deployedSha),
         })),
-        ...unrecordedBundleProcesses(new Set(recorded.map((image) => image.pid))),
+        ...unrecordedBundleProcesses(new Set(recorded.map((image) => image.pid)), deployedMtimeMs),
     ]
     return {
         installed_version: BUNDLE_VERSION,

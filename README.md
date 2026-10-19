@@ -102,8 +102,8 @@ The self-update above compares the deployed file against a URL, so it answers
 `current` whenever those two agree -- whatever bytes the running process
 actually started from. A bundle installed over `~/.gm-tools/gm-mcp-server.mjs`
 by any other route (a lane build, `dev-sync`, a manual copy) therefore never
-reaches a long-lived server through it, and a process runs the bytes it was
-started from. Every 30 seconds the server instead compares the deployed file
+reaches a long-lived server through it, and a process runs the bytes it starts
+from. Every 30 seconds the server instead compares the deployed file
 against the file it launched from (`launchedEntryPath()`), size+mtime first and
 sha256 only when that moved:
 
@@ -414,6 +414,10 @@ against the source version, and fails on committed-bundle byte drift.
 `npm install` points this checkout's git hooks at `.githooks/`
 (`core.hooksPath`, local to this checkout, never committed) so `pre-push` runs
 it automatically and blocks a push carrying a stale bundle.
+
+`scripts/publish-api.mjs` lands files on `main` through the GitHub Git Data API (blobs, a tree on the remote tip, a commit parented on it, then PATCH `refs/heads/main`). When no `push` run appears for the new sha within 60 s, it dispatches each active `workflow_dispatch` workflow on that sha, so a docs-only commit still gets CI. Usage: `node scripts/publish-api.mjs <owner>/<repo> "<message>" <repoPath>=<localFile>...`.
+
+`scripts/prune-scratch.mjs --root <dir> [--cap-hours 24] [--apply]` removes the directories directly under `<dir>` whose name starts with a gm-owned prefix (`gm-agentplug-home-`) and whose mtime is older than the cap. It is a dry run unless `--apply` is given, and `--apply` removes exactly the directories the dry run listed.
 
 Bundling exists because `npx github:...` installs have been observed to
 produce a corrupted transitive-dependency install (a `node_modules/ajv`
