@@ -96,4 +96,4 @@ Repo-source facts that structure and naming cannot carry. The exec-family `timeo
 ## Verbs, witnesses and probes
 
 - **Verb list.** The verb set is one table in `src/verb-table.js`. `RUNNER_REGISTRY_VERBS` (`src/verbs.js`) derives from it, and `runnerVerb(row)` is the only place the runner's hyphen spelling is produced. Each entry is a `gm.<verb>` binding inside the single MCP tool `gm_codemode` (`src/codemode.js`), named by `verbToolName`. A verb missing from the list has no binding.
-- **Witness and probe scripts.** `scripts/pool-observe-served-witness.mjs` checks the served pool-observe output against the candidate contract in rs-plugkit `crates/plugkit-core/src/orchestrator/pool_rank.rs`. `test/mcp-http-probe.mjs` is a manual probe outside `npm test`.
+- **Witness and probe scripts.** `scripts/pool-observe-served-witness.mjs` checks the served pool-observe output against the candidate contract in `../rs-plugkit/crates/plugkit-core/src/orchestrator/pool_rank.rs`. `test/mcp-http-probe.mjs` is a manual probe outside `npm test`.
