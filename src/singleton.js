@@ -260,21 +260,21 @@ export function liveSupervisorPid(port, instance = null, now = Date.now()) {
     return null
 }
 
-export function portOwnerPid(port) {
-    const state = portListenerState(port)
+export async function portOwnerPid(port) {
+    const state = await portListenerState(port)
     if (state.measured !== true || state.hasListener !== true) return null
     return pidAlive(state.ownerPid) === true ? state.ownerPid : null
 }
 
-export function portHasListener(port) {
-    const state = portListenerState(port)
+export async function portHasListener(port) {
+    const state = await portListenerState(port)
     return state.measured === true ? state.hasListener : null
 }
 
-export function recordedServerPid(instance, supervisor, port = null) {
-    const state = port === null ? null : portListenerState(port)
+export async function recordedServerPid(instance, supervisor, port = null) {
+    const state = port === null ? null : await portListenerState(port)
     if (state?.measured === true && state.hasListener === false) return null
-    const ownerPid = port === null ? null : portOwnerPid(port)
+    const ownerPid = port === null ? null : await portOwnerPid(port)
     for (const candidate of [Number(instance?.pid), Number(supervisor?.server_pid)]) {
         if (!Number.isInteger(candidate) || candidate <= 0) continue
         if (pidAlive(candidate) !== true) continue
@@ -284,8 +284,8 @@ export function recordedServerPid(instance, supervisor, port = null) {
     return null
 }
 
-export function holderIsOwn(port, pid) {
-    return recordedServerPid(readStateFile(instanceFilePath(port), port), readStateFile(supervisorStateFilePath(port), port), port) === Number(pid)
+export async function holderIsOwn(port, pid) {
+    return (await recordedServerPid(readStateFile(instanceFilePath(port), port), readStateFile(supervisorStateFilePath(port), port), port)) === Number(pid)
 }
 
 export function establishedConnectionCount(port) {
@@ -442,7 +442,7 @@ export async function reapDeadHttpInstances() {
     for (const port of registeredHttpPorts()) {
         const instance = readStateFile(instanceFilePath(port), port)
         const supervisor = readStateFile(supervisorStateFilePath(port), port)
-        if (recordedServerPid(instance, supervisor, port) !== null) continue
+        if (await recordedServerPid(instance, supervisor, port) !== null) continue
         if (await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS)) continue
         dropInstanceFiles(port)
         appendDiagnostic('http-instance-reaped-dead', {
@@ -461,7 +461,7 @@ export async function replaceBehindHttpInstances({ now = Date.now() } = {}) {
     for (const port of registeredHttpPorts()) {
         const instance = readStateFile(instanceFilePath(port), port)
         const supervisor = readStateFile(supervisorStateFilePath(port), port)
-        if (recordedServerPid(instance, supervisor, port) === null) continue
+        if (await recordedServerPid(instance, supervisor, port) === null) continue
         if (instance === null && supervisor === null) continue
         const health = await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS)
         if (!health) continue
@@ -517,9 +517,9 @@ export async function reclaimDeadPortRegistries() {
     for (const port of registeredHttpPorts()) {
         const instance = readStateFile(instanceFilePath(port), port)
         const supervisor = readStateFile(supervisorStateFilePath(port), port)
-        if (recordedServerPid(instance, supervisor, port) !== null) continue
+        if (await recordedServerPid(instance, supervisor, port) !== null) continue
         if (await probeHealth(port, SWEEP_PROBE_TIMEOUT_MS)) continue
-        if (portOwnerPid(port) !== null) continue
+        if (await portOwnerPid(port) !== null) continue
         dropInstanceFiles(port)
         appendDiagnostic('http-port-reclaimed', { port, instance_pid: instance?.pid ?? null, supervisor_pid: supervisor?.pid ?? null })
         reclaimed.push(port)
@@ -527,20 +527,20 @@ export async function reclaimDeadPortRegistries() {
     return reclaimed
 }
 
-export function portIsFree(port) {
+export async function portIsFree(port) {
     const wanted = Number(port)
     if (!Number.isInteger(wanted) || wanted <= 0) return false
-    if (portOwnerPid(wanted) !== null) return false
+    if (await portOwnerPid(wanted) !== null) return false
     const instance = readStateFile(instanceFilePath(wanted), wanted)
     const supervisor = readStateFile(supervisorStateFilePath(wanted), wanted)
-    return recordedServerPid(instance, supervisor, wanted) === null
+    return await recordedServerPid(instance, supervisor, wanted) === null
 }
 
-export function allocateHttpPort({ preferred = null, from = PORT_POOL_FROM, to = PORT_POOL_TO } = {}) {
+export async function allocateHttpPort({ preferred = null, from = PORT_POOL_FROM, to = PORT_POOL_TO } = {}) {
     const wanted = Number(preferred ?? defaultHttpPort())
-    if (Number.isInteger(wanted) && wanted > 0 && portIsFree(wanted)) return wanted
+    if (Number.isInteger(wanted) && wanted > 0 && await portIsFree(wanted)) return wanted
     for (let port = Math.min(from, to); port <= Math.max(from, to); port += 1) {
-        if (portIsFree(port)) return port
+        if (await portIsFree(port)) return port
     }
     return null
 }
@@ -624,7 +624,7 @@ export async function sweepHttpInstances(options = {}) {
 export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs = STARTUP_WAIT_MS, wait = true, sweep = true } = {}) {
     if (port === 'auto') {
         await reclaimDeadPortRegistries()
-        port = allocateHttpPort({ preferred: defaultHttpPort() }) ?? defaultHttpPort()
+        port = (await allocateHttpPort({ preferred: defaultHttpPort() })) ?? defaultHttpPort()
     }
     if (sweep) await reapDeadHttpInstances()
 
@@ -635,7 +635,7 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
     }
 
     if (live) {
-        const ownHolder = holderIsOwn(port, live.pid)
+        const ownHolder = await holderIsOwn(port, live.pid)
         const retired = ownHolder && await retireHttpInstance({ port, pid: live.pid ?? null, reason: 'version-behind', version: live.version ?? null })
         if (!retired) {
             appendDiagnostic('http-singleton-behind-kept', {
@@ -652,7 +652,7 @@ export async function ensureHttpSingleton({ port = defaultHttpPort(), timeoutMs 
     const recorded = readStateFile(stateFilePath(), port)
     const holderPid = recorded?.pid && pidAlive(recorded.pid) === true
         ? Number(recorded.pid)
-        : recordedServerPid(readStateFile(instanceFilePath(port), port), readStateFile(supervisorStateFilePath(port), port), port)
+        : await recordedServerPid(readStateFile(instanceFilePath(port), port), readStateFile(supervisorStateFilePath(port), port), port)
     if (holderPid !== null) {
         const late = await waitForHealth(port, 5_000)
         if (late) {

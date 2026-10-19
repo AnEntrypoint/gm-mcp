@@ -105,7 +105,7 @@ export async function assessHttpInstances({ now = Date.now(), roots = [] } = {})
         const supervisor = readJson(supervisorStateFilePath(port))
         const serverPid = Number(instance?.pid ?? supervisor?.server_pid ?? 0)
         if (!Number.isInteger(serverPid) || serverPid <= 0) {
-            const listener = listeningPidOf(port)
+            const listener = await listeningPidOf(port)
             findings.push({
                 source: 'http-instance',
                 port,
@@ -118,7 +118,7 @@ export async function assessHttpInstances({ now = Date.now(), roots = [] } = {})
             })
             continue
         }
-        const ownerPid = portOwnerPid(port)
+        const ownerPid = await portOwnerPid(port)
         const health = await probeHealth(port)
         const healthPid = Number(health?.pid ?? 0)
         const identity = ownerPid === serverPid ? 'socket-owner' : (healthPid > 0 && healthPid === serverPid ? 'health-pid' : null)
@@ -169,7 +169,7 @@ export async function assessLeases({ roots = [] } = {}) {
             const holderAlive = holderPid > 0 ? pidAlive(holderPid) : null
             const browserAlive = browserPid > 0 ? pidAlive(browserPid) : null
             const portOpen = port > 0 ? await portAcceptsConnection(port) : null
-            const holdsPort = port > 0 ? portOwnerPid(port) : null
+            const holdsPort = port > 0 ? await portOwnerPid(port) : null
             const attached = port > 0 ? establishedConnectionCount(port) : null
 
             const deathEvidence = [
@@ -295,7 +295,8 @@ export async function assessUnattributedServers({ roots = [], liveSessionIds = n
             ledgerByPid.set(pid, held)
         }
     }
-    const ownedPorts = registeredHttpPorts().map((port) => ({ port, owner: portOwnerPid(port) }))
+    const ownedPorts = []
+    for (const port of registeredHttpPorts()) ownedPorts.push({ port, owner: await portOwnerPid(port) })
 
     const findings = []
     for (const { pid, row, info } of candidates) {

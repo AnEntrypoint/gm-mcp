@@ -5,7 +5,7 @@ import { startHttpServer, httpListenOptions, setHealthExtras } from './http-tran
 import { defaultHttpPort, ensureHttpSingleton, ensureHttpSingletonInBackground, ensureHttpSupervisor, httpMcpUrl, httpSingletonEnabled, probeHealth, recordHttpInstance } from './singleton.js'
 import { serveStdioRelay } from './stdio-relay.js'
 import { startContinuationMonitor } from './continuation.js'
-import { adoptHandedOverHandle, handOverToRefreshedBundle, handoverRequested, HANDOVER_LISTEN_RETRY_MS } from './bundle-refresh.js'
+import { adoptHandedOverHandle, handOverStdioToRefreshedBundle, handOverToRefreshedBundle, handoverRequested, HANDOVER_LISTEN_RETRY_MS, stdioSessionHandedOver } from './bundle-refresh.js'
 import { bundleHealthBlock, bundleStalenessAnnouncement, runningBundle, startBundleDriftWatch } from './bundle-drift.js'
 import { recordRunningImage } from './running-images.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
@@ -14,6 +14,7 @@ import { runReleaseBridgeInBackground } from './release-bridge.js'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { installSpoolPort } from './spool-port.js'
 import { flagValue } from './argv.js'
+import { setServingTransport } from './bundle-drift.js'
 import { nodeSpoolPort } from './spool-port-node.js'
 
 installSpoolPort(nodeSpoolPort)
@@ -59,12 +60,14 @@ async function stdioRelayTarget() {
     return null
 }
 
-function watchForStaleBundle({ handOver = null, transportKind = 'stdio' } = {}) {
+function watchForStaleBundle({ handOver = null, transportKind = 'stdio', settled = () => false } = {}) {
     return startBundleDriftWatch((state) => {
-        const honest = handOver ? state : { ...state, reloadable: false, refusal_code: 'no-handover', refusal_reason: 'a ' + transportKind + ' server cannot replace itself without dropping its client, so a relaunch serves the installed bundle' }
+        if (settled()) return null
+        const handable = handOver !== null && state?.stale === true && (state.refusal_code == null || state.refusal_code === 'no-handover')
+        const honest = handable ? { ...state, reloadable: true, refusal_code: null, refusal_reason: null } : handOver ? state : { ...state, reloadable: false, refusal_code: 'no-handover', refusal_reason: 'a ' + transportKind + ' server cannot replace itself without dropping its client, so a relaunch serves the installed bundle' }
         const line = bundleStalenessAnnouncement(honest)
         if (line) console.error(line)
-        if (handOver && state?.reloadable === true) return handOver(state)
+        if (handOver && honest.reloadable === true) return handOver(honest)
         if (line) appendDiagnostic('bundle-stale-no-handover', { ...honest, transport: transportKind })
         return null
     }, { transport: transportKind })
@@ -72,6 +75,7 @@ function watchForStaleBundle({ handOver = null, transportKind = 'stdio' } = {}) 
 
 export async function main() {
     if (wantsHttpTransport()) {
+        setServingTransport('http')
         const { host, port } = httpListenOptions()
         setHealthExtras(() => bundleHealthBlock())
         const listenHandle = await adoptHandedOverHandle()
@@ -86,9 +90,11 @@ export async function main() {
         return
     }
 
+    setServingTransport('stdio')
     installStdioGuards()
     const relayUrl = (process.env.GM_MCP_RELAY || '').trim().toLowerCase() === 'http' ? await stdioRelayTarget() : null
     if (relayUrl) {
+        setServingTransport('stdio-relay')
         recordRunningImage('stdio-relay', runningBundle())
         watchForStaleBundle({ transportKind: 'stdio-relay' })
         const recover = () => ensureHttpSingleton({ port: defaultHttpPort(), wait: true, sweep: false }).then((started) => started?.url ?? null)
@@ -102,9 +108,9 @@ export async function main() {
 
     await server.connect(transport)
     console.error('gm-mcp: connected, serving on stdio')
-    startContinuationMonitor((params) => server.server.sendLoggingMessage(params).catch((error) => appendDiagnostic('continuation-notify-failed', { error: describeError(error) })))
+    const monitor = startContinuationMonitor((params) => server.server.sendLoggingMessage(params).catch((error) => appendDiagnostic('continuation-notify-failed', { error: describeError(error) })))
     recordRunningImage('stdio', runningBundle())
-    watchForStaleBundle({ transportKind: 'stdio' })
+    watchForStaleBundle({ transportKind: 'stdio', settled: stdioSessionHandedOver, handOver: (state) => handOverStdioToRefreshedBundle({ state, transport, server, monitor, target: stdioRelayTarget, recover: () => ensureHttpSingleton({ port: defaultHttpPort(), wait: true, sweep: false }).then((started) => started?.url ?? null) }) })
     scheduleStaleDeployedBundleChecks(null, runLeakWatchPass)
     runReleaseBridgeInBackground()
 }

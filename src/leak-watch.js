@@ -145,7 +145,7 @@ export async function sharedHttpPids(ports) {
         const health = await probeHealth(port)
         const healthPid = Number(health?.pid ?? 0)
         if (Number.isInteger(healthPid) && healthPid > 0) pids.add(healthPid)
-        const ownerPid = Number(listeningPidOf(port) ?? 0)
+        const ownerPid = Number(await listeningPidOf(port) ?? 0)
         if (Number.isInteger(ownerPid) && ownerPid > 0) pids.add(ownerPid)
     }
     return pids

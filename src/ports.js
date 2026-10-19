@@ -1,27 +1,36 @@
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import net from 'node:net'
 
 const LISTENER_CACHE_TTL_MS = 1_000
 const listenerCache = new Map()
 
-export function portListenerState(port) {
+function runProbe(file, args, options) {
+    return new Promise((resolve, reject) => {
+        execFile(file, args, { encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'], ...options }, (error, stdout) => {
+            if (error) reject(error)
+            else resolve(stdout)
+        })
+    })
+}
+
+export async function portListenerState(port) {
     const wanted = Number(port)
     if (!Number.isInteger(wanted) || wanted <= 0) return { measured: false, hasListener: null, ownerPid: null }
     const now = Date.now()
     const cached = listenerCache.get(wanted)
     if (cached !== undefined && now - cached.at < LISTENER_CACHE_TTL_MS) return cached.state
-    const state = measurePortListener(wanted)
-    listenerCache.set(wanted, { at: now, state })
+    const state = await measurePortListener(wanted)
+    listenerCache.set(wanted, { at: Date.now(), state })
     return state
 }
 
-function measurePortListener(wanted) {
+async function measurePortListener(wanted) {
     try {
         if (process.platform === 'win32') {
-            const text = execFileSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8', windowsHide: true, timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'] })
+            const text = await runProbe('netstat', ['-ano', '-p', 'tcp'], { windowsHide: true })
             return parseWindowsNetstatListener(text, wanted)
         }
-        const text = execFileSync('lsof', ['-nP', `-iTCP:${wanted}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'] })
+        const text = await runProbe('lsof', ['-nP', `-iTCP:${wanted}`, '-sTCP:LISTEN', '-t'], {})
         const pid = Number.parseInt(text.trim().split('\n')[0] ?? '', 10)
         if (Number.isInteger(pid) && pid > 0) return { measured: true, hasListener: true, ownerPid: pid }
         return { measured: true, hasListener: false, ownerPid: null }
@@ -44,9 +53,9 @@ export function parseWindowsNetstatListener(text, wanted) {
     return { measured: true, hasListener: false, ownerPid: null }
 }
 
-function ssListenerState(wanted) {
+async function ssListenerState(wanted) {
     try {
-        const text = execFileSync('ss', ['-H', '-ltnp', `sport = :${wanted}`], { encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'] })
+        const text = await runProbe('ss', ['-H', '-ltnp', `sport = :${wanted}`], {})
         if (text.trim() === '') return { measured: true, hasListener: false, ownerPid: null }
         const pid = Number.parseInt(/pid=(\d+)/.exec(text)?.[1] ?? '', 10)
         return { measured: true, hasListener: true, ownerPid: Number.isInteger(pid) && pid > 0 ? pid : null }
@@ -55,8 +64,8 @@ function ssListenerState(wanted) {
     }
 }
 
-export function listeningPidOf(port) {
-    return portListenerState(port).ownerPid
+export async function listeningPidOf(port) {
+    return (await portListenerState(port)).ownerPid
 }
 
 export function portAcceptsConnection(port, timeoutMs = 1_500) {
