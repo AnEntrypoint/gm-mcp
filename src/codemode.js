@@ -421,14 +421,14 @@ export function registerCodeMode(server, tools) {
                 const settled = replies.filter((entry) => entry.text !== undefined)
                 const partial = replies.map((entry, index) => {
                     const label = `${index + 1}/${replies.length}: gm.${entry.verb}`
-                    if (entry.text !== undefined) return `--- partial ${label} completed before the throw ---\n${capCodemodeText(withoutContinuation(entry.text), cap)}`
+                    if (entry.text !== undefined) return `--- partial ${label} completed before the throw (reply not replayed) dispatch_id: ${entry.dispatch_id ?? 'none'} ---`
                     if (entry.failed) return `--- partial ${label} failed ---\n${capCodemodeText(withoutContinuation(entry.error), cap)}`
                     return `--- partial ${label} still pending ---`
                 })
                 const failedCount = replies.filter((entry) => entry.failed).length
                 const pendingCount = replies.length - settled.length - failedCount
                 const unsettledNote = [pendingCount ? `${pendingCount} still pending` : '', failedCount ? `${failedCount} failed` : ''].filter(Boolean).join(', ')
-                const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettledNote ? `, ${unsettledNote}` : ''}; their replies and per-call errors follow`] : []
+                const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettledNote ? `, ${unsettledNote}` : ''}; their dispatch ids and per-call errors follow`] : []
                 const ids = callIds.length ? [`gm_dispatch_ids: ${callIds.join(', ')}`] : []
                 const [headline, ...detailLines] = detail.split('\n')
                 const text = [`diagnostic_id: ${diagnosticId}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...ids, ...tally, ...partial, ...detailLines].join('\n')
