@@ -318,10 +318,11 @@ const CODESEARCH_BODY = {
         no_ignore: { type: 'boolean', aliases: ['include_ignored', 'exhaustive'], description: 'Includes ignored paths.' },
     },
 }
+const GREP_UNACCEPTED_CODESEARCH_FIELDS = ['max_chars', 'timeout_ms', 'root', 'combine', 'output', 'verbatim', 'docs']
 const GREP_BODY = {
     required: [],
     fields: {
-        ...CODESEARCH_BODY.fields,
+        ...Object.fromEntries(Object.entries(CODESEARCH_BODY.fields).filter(([name]) => !GREP_UNACCEPTED_CODESEARCH_FIELDS.includes(name))),
         mode: { type: 'string', enum: ['pattern', 'literal', 'regex', 'comments', 'content', 'files', 'files_with_matches', 'count'], description: 'grep mode: "pattern" (default) reads regex metacharacters as a regex, "literal" matches verbatim, "regex" always compiles, "comments" finds comment spans and needs no pattern. An output shape is accepted as mode and sets output_mode.' },
         context: { type: 'number', description: 'Lines of context around each content hit.' },
         output_mode: { type: 'string', aliases: ['outputMode'], enum: ['content', 'files_with_matches', 'count'], description: 'grep output shape: "content" (default) is path:line: text per hit, "files_with_matches" each matching path once, "count" path:count.' },
