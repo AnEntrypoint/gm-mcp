@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildBundle, headBundleVersion } from './build.mjs'
@@ -35,7 +36,11 @@ if (committed === fresh) {
 
 const REQUIRED_REPLY_KEYS = ['timed_out', 'task', 'poll_timeout_ms', 'in_path', 'out_path', 'resume_task_supported', 'dispatch_state', 'dispatch_wait', 'daemon']
 
-const selfCheck = spawnSync(process.execPath, [committedPath, 'self-check'], { encoding: 'utf8' })
+const selfCheckDir = mkdtempSync(path.join(tmpdir(), 'gm-mcp-drift-'))
+const selfCheckPath = path.join(selfCheckDir, 'gm-mcp-server.mjs')
+writeFileSync(selfCheckPath, committed)
+const selfCheck = spawnSync(process.execPath, [selfCheckPath, 'self-check'], { encoding: 'utf8' })
+rmSync(selfCheckDir, { recursive: true, force: true })
 if (selfCheck.error) {
     console.error(`bin/gm-mcp-server.js self-check did not run: ${selfCheck.error.message}`)
     process.exit(1)
