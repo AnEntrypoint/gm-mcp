@@ -59,9 +59,11 @@ function parsedJsonOf(text) {
 export function continuedReply(key, text, now = Date.now()) {
     if (typeof text !== 'string') return text
     const entry = entryFor(key)
+    const json = parsedJsonOf(text)
+    const jsonPrdTotal = json?.value?.verb === 'prd-list' && typeof json.value.total === 'number' ? json.value.total : null
     const seen = PENDING_LINE.exec(text) ?? (PRD_LIST_VERB.test(text) ? PRD_LIST_TOTAL.exec(text) : null)
     if (seen) entry.pending_rows = Number(seen[1])
-    const json = parsedJsonOf(text)
+    else if (jsonPrdTotal !== null) entry.pending_rows = jsonPrdTotal
     const done = json?.value?.complete === true || json?.value?.data?.complete === true || COMPLETE_LINE.test(text)
     const snapshot = continuationSnapshot(key, now, done)
     entry.last_ms = now
