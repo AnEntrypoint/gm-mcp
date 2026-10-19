@@ -264,6 +264,31 @@ const COMMANDS = {
         console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.reason}`)
         return result.supervised === false ? 1 : 0
     },
+    call: async () => {
+        const source = process.argv[3]
+        if (!source) {
+            console.error('usage: gm-mcp call <code-file|-> [--cwd <root>] [--session-id <id>]')
+            return 2
+        }
+        const code = fs.readFileSync(source === '-' ? 0 : source, 'utf8')
+        const url = httpMcpUrl()
+        const base = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }
+        const init = await fetch(url, { method: 'POST', headers: base, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'gm-mcp-call', version: BUNDLE_VERSION } } }) })
+        const sid = init.headers.get('mcp-session-id')
+        const headers = { ...base, ...(sid ? { 'mcp-session-id': sid } : {}) }
+        await fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) })
+        const args = { code }
+        if (flagValue('cwd')) args.cwd = flagValue('cwd')
+        if (flagValue('session-id')) args.session_id = flagValue('session-id')
+        const reply = await (await fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'gm_codemode', arguments: args } }) })).json()
+        const text = (reply.result?.content ?? []).map((part) => part.text).join('\n')
+        if (reply.error || reply.result?.isError) {
+            console.error(text || JSON.stringify(reply.error))
+            return 1
+        }
+        console.log(text)
+        return 0
+    },
     'http-status': async () => {
         const port = defaultHttpPort()
         const health = await probeHealth(port)
