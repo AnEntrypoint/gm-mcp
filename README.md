@@ -244,6 +244,9 @@ connected` for the rest of the session, and no server-side fix re-dials it.
 Restoring the port helps every new session; the stranded session needs `/mcp`
 reconnect or a restart.
 
+A stdio server never exits to pick up a newer bundle, because its client holds the pipe. `node ~/.gm-tools/gm-mcp-server.mjs self-update-status` lists each such process under `running_images` with `stale: true` and the version it runs.
+Operator action: relaunch the session that owns the process (`/mcp` then gm then Reconnect, or restart the session). The listing clears on relaunch. Killing the pid by hand also clears it, but the owning session loses its gm tools until it reconnects.
+
 ### Across a reboot
 
 Nothing starts the HTTP server at login, so after a reboot the registration points at a dead port until something runs it. `ensure-http` is that something, and it is idempotent: it health-probes the port, starts the shared server only when nothing answers, arms the supervisor, and prints the url either way. Put it wherever your OS runs things at login -- Startup folder, Task Scheduler, a launchd agent, a systemd user unit:
