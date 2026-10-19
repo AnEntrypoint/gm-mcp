@@ -149,10 +149,18 @@ function parseDispatchArgv(argv) {
         body.no_ignore = true
     }
 
-    const numberOrUndefined = (value) => {
-        const parsed = Number(value)
-        return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+    const numericFlag = (name) => {
+        const raw = dispatchFlag(argv, name)
+        if (raw === undefined) return {}
+        const parsed = Number(raw)
+        if (Number.isFinite(parsed) && parsed > 0) return { value: parsed }
+        return { usageError: `gm-mcp dispatch: --${name} must be a positive number, got "${raw}"` }
     }
+    const timeout = numericFlag('timeout')
+    const poll = numericFlag('poll')
+    const maxChars = numericFlag('max-chars')
+    const badNumericFlag = [timeout, poll, maxChars].find((flag) => flag.usageError)
+    if (badNumericFlag) return { usageError: badNumericFlag.usageError }
 
     return {
         args: {
@@ -161,9 +169,9 @@ function parseDispatchArgv(argv) {
             raw_body: rawBody,
             session_id: dispatchFlag(argv, 'session-id') || `gm-cli-${process.pid}-${Date.now()}`,
             cwd: dispatchFlag(argv, 'cwd') || undefined,
-            timeout_seconds: numberOrUndefined(dispatchFlag(argv, 'timeout')),
-            poll_interval_seconds: numberOrUndefined(dispatchFlag(argv, 'poll')),
-            max_chars: numberOrUndefined(dispatchFlag(argv, 'max-chars')),
+            timeout_seconds: timeout.value,
+            poll_interval_seconds: poll.value,
+            max_chars: maxChars.value,
             resume_task: dispatchFlag(argv, 'resume'),
             full_response: argv.includes('--full') ? true : undefined,
             include_timing: argv.includes('--timing') ? true : undefined,
