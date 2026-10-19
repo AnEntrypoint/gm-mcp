@@ -70,15 +70,15 @@ function compactFailureDetail(text, verb) {
     const match = /^\S+ ok: false \(error_code: ([^)]*)\)(?: dispatch_id: (\S+))?(?: -- error: ([\s\S]*))?$/.exec(text.trim())
     if (match === null) return null
     const [, code, dispatchId, error] = match
-    const detail = (error ?? '').replace(/\s+/g, ' ').trim().replace(CONTINUATION_TAIL, '')
+    const detail = (error ?? '').replace(/^>-\s*/, '').replace(/\s+/g, ' ').trim().replace(CONTINUATION_TAIL, '')
     return `verb=${verb} error_code=${code} dispatch_id=${dispatchId ?? 'none'}\n${detail || `no error field; reply head: ${text.trim().split('\n')[0]}`}`
 }
 
 function replyText(result, verb) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
-    if (result?.isError) throw new Error(text)
     const failed = failedReplyDetail(text, verb) ?? compactFailureDetail(text, verb)
     if (failed !== null) throw new Error(failed)
+    if (result?.isError) throw new Error(text)
     return text
 }
 
