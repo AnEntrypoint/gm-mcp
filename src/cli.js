@@ -387,5 +387,7 @@ if (command && COMMANDS[command]) {
 
 main().catch((e) => {
     console.error(e)
+    const dispatchNote = e?.dispatch_id ? ` dispatch_id=${e.dispatch_id}` : ''
+    console.error(`gm-mcp: crashed${dispatchNote} pid=${process.pid} log=${logFilePath()}`)
     process.exit(1)
 })
