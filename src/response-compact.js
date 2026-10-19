@@ -97,7 +97,10 @@ function incompleteScanReasons(source) {
     return reasons
 }
 
+const HIT_COUNT_KEYS = ['comment_count', 'count', 'match_count', 'returned_count', 'files_with_matches']
+
 function searchShowsNoHits(source) {
+    if (HIT_COUNT_KEYS.some((key) => Number.isFinite(source[key]) && source[key] > 0)) return false
     if (Array.isArray(source.matches)) return source.matches.length === 0
     if (Array.isArray(source.hits)) return source.hits.length === 0
     if (Number.isFinite(source.comment_count)) return source.comment_count === 0
