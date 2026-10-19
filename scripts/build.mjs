@@ -3,10 +3,20 @@ import * as esbuild from 'esbuild'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { BUNDLE_VERSION } from '../src/bundle-version.js'
 
 const scriptPath = fileURLToPath(import.meta.url)
 const repoRoot = path.dirname(path.dirname(scriptPath))
+
+export function bundleDepManifest(root) {
+    const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
+    const lock = JSON.parse(readFileSync(path.join(root, 'package-lock.json'), 'utf8'))
+    const out = {}
+    for (const name of Object.keys(pkg.devDependencies || {}).filter(n => n !== 'esbuild').sort())
+        out[name] = lock.packages?.[`node_modules/${name}`]?.version ?? null
+    return out
+}
 
 export function uncommittedSrcPaths(root) {
     return execFileSync('git', ['status', '--porcelain', '--', 'src'], { cwd: root, encoding: 'utf8' })
@@ -36,7 +46,7 @@ export async function buildBundle(write = false, keep = new Set()) {
         platform: 'node',
         format: 'esm',
         external: ['node:*'],
-        banner: { js: `#!/usr/bin/env node\nvar BUNDLE_VERSION = ${JSON.stringify(BUNDLE_VERSION)};` },
+        banner: { js: `#!/usr/bin/env node\nvar BUNDLE_VERSION = ${JSON.stringify(BUNDLE_VERSION)};\nvar BUNDLE_DEPS = ${JSON.stringify(bundleDepManifest(repoRoot))};` },
         preserveSymlinks: true,
         outfile: path.join(repoRoot, 'bin', 'gm-mcp-server.js'),
         plugins: [headSrcPlugin(repoRoot, keep)],
