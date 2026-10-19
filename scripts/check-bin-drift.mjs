@@ -13,17 +13,28 @@ const includedSrc = (process.env.GM_MCP_BUILD_INCLUDE || '').split(',').map(s =>
 const git = args => spawnSync('git', args, { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
 
 const binStaged = git(['diff', '--cached', '--name-only']).stdout.split('\n').map(line => line.trim()).includes(binRel)
+const shipsWorkingBin = includedSrc.includes(binRel)
 let buildRoot = repoRoot
 let stagedDir = null
-if (binStaged) {
+if (binStaged || !shipsWorkingBin) {
     stagedDir = mkdtempSync(path.join(tmpdir(), 'gm-mcp-staged-'))
-    const exported = git(['checkout-index', '-a', `--prefix=${stagedDir}${path.sep}`])
+    const treeDir = path.join(stagedDir, 'tree')
+    const env = binStaged ? process.env : { ...process.env, GIT_INDEX_FILE: path.join(stagedDir, 'index') }
+    const gitIn = args => spawnSync('git', args, { cwd: repoRoot, encoding: 'utf8', env, maxBuffer: 64 * 1024 * 1024 })
+    if (!binStaged) {
+        const loaded = gitIn(['read-tree', 'HEAD'])
+        if (loaded.status !== 0) {
+            console.error(`cannot load HEAD into a scratch index: ${(loaded.stderr || '').trim()}`)
+            process.exit(1)
+        }
+    }
+    const exported = gitIn(['checkout-index', '-a', `--prefix=${treeDir}${path.sep}`])
     if (exported.status !== 0) {
-        console.error(`cannot export the staged index: ${(exported.stderr || '').trim()}`)
+        console.error(`cannot export the ${binStaged ? 'staged index' : 'HEAD tree'}: ${(exported.stderr || '').trim()}`)
         process.exit(1)
     }
-    symlinkSync(path.join(repoRoot, 'node_modules'), path.join(stagedDir, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
-    buildRoot = stagedDir
+    symlinkSync(path.join(repoRoot, 'node_modules'), path.join(treeDir, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
+    buildRoot = treeDir
 }
 
 const BUNDLE_VERSION = bundleVersion(buildRoot)
@@ -33,7 +44,6 @@ if (PACKAGE_VERSION !== BUNDLE_VERSION) {
     process.exit(1)
 }
 
-const shipsWorkingBin = includedSrc.includes(binRel)
 const headBin = git(['show', `HEAD:${binRel}`])
 const committed = binStaged
     ? git(['show', `:${binRel}`]).stdout
@@ -61,7 +71,7 @@ const srcFiles = headFiles.filter(p => p.startsWith('src/'))
 const regenSet = [binRel, ...srcFiles].join(' ')
 
 if (committed === fresh) {
-    console.log(`bin/gm-mcp-server.js matches a fresh build of ${binStaged ? 'the staged' : 'the working-tree'} src/ (${fresh.length} bytes) -- no drift`)
+    console.log(`bin/gm-mcp-server.js matches a fresh build of ${binStaged ? 'the staged' : shipsWorkingBin ? 'the working-tree' : "HEAD's"} src/ (${fresh.length} bytes) -- no drift`)
 } else {
     console.error(`bin/gm-mcp-server.js is STALE: it does not match a fresh build of ${binStaged ? 'the staged' : "HEAD's"} src/ (committed ${committed.length} bytes, fresh ${fresh.length} bytes).`)
     console.error(srcFiles.length
