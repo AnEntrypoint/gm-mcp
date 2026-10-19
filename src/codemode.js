@@ -1,5 +1,5 @@
 import { isPlainObject } from './plain-object.js';
-import { z } from 'zod'
+import { z } from 'zod';
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { canonicalToolName, nearestNames } from './verbs.js'
 import { FS_READ_RANGE_ALIASES, tableRow, verbDescriptionLead } from './verb-table.js'
