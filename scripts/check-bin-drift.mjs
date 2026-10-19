@@ -4,15 +4,15 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildBundle, headBundleVersion } from './build.mjs'
+import { buildBundle, bundleVersion, srcSha256 } from './build.mjs'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-const BUNDLE_VERSION = headBundleVersion(repoRoot)
+const BUNDLE_VERSION = bundleVersion(repoRoot)
 const binRel = 'bin/gm-mcp-server.js'
 const committedPath = path.join(repoRoot, binRel)
 const includedSrc = (process.env.GM_MCP_BUILD_INCLUDE || '').split(',').map(s => s.trim()).filter(Boolean)
 
-const result = await buildBundle(false, new Set(includedSrc))
+const result = await buildBundle(false)
 
 const shipsWorkingBin = includedSrc.includes(binRel)
 const headBin = spawnSync('git', ['show', `HEAD:${binRel}`], { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
@@ -21,7 +21,14 @@ const committed = shipsWorkingBin || headBin.status !== 0 ? readFileSync(committ
 const fresh = result.outputFiles[0].text
 
 if (!fresh.includes(`var BUNDLE_VERSION = ${JSON.stringify(BUNDLE_VERSION)};`)) {
-    console.error(`fresh bundle is missing the HEAD BUNDLE_VERSION ${BUNDLE_VERSION} banner`)
+    console.error(`fresh bundle is missing the working-tree BUNDLE_VERSION ${BUNDLE_VERSION} banner`)
+    process.exit(1)
+}
+
+const recordedSrcSha = /var BUNDLE_SRC_SHA256 = "([0-9a-f]{64})";/.exec(committed)?.[1] ?? null
+const currentSrcSha = srcSha256(repoRoot)
+if (recordedSrcSha !== currentSrcSha) {
+    console.error(`bin/gm-mcp-server.js records src sha256 ${recordedSrcSha ?? 'none'} but src/ hashes to ${currentSrcSha}: a src/ file changed after the bundle was built, so the bundle is stale. Run npm run build and commit the bundle with the src/ change.`)
     process.exit(1)
 }
 
