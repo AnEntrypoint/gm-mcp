@@ -9,7 +9,6 @@ import { registerCodeMode } from './codemode.js'
 import { renderBodyHint, bodyShapeLine } from './verb-bodies.js'
 
 const numberLike = z.union([z.number(), z.string()])
-const booleanLike = z.union([z.boolean(), z.string()])
 
 export function mergeVerbRangeFields(verb, args = {}) {
     const verbKey = verbToolName(verb)
@@ -98,9 +97,9 @@ const DISPATCH_FIELDS = {
     raw_body: z.string().optional().describe('Literal body for plain-text verbs, sent unescaped. Mutually exclusive with body. Prefer forward slashes in Windows paths.'),
     session_id: z.string().optional().describe('gm session id. gm_codemode fills in its own when omitted.'),
     cwd: z.string().optional().describe('Project root holding .gm/exec-spool. Pass it on every call: it selects the project daemon and search root. It is not forwarded into the verb body.'),
-    timeout_seconds: numberLike.optional().describe('Poll budget in seconds (default 120, ceiling 600 = the harness tool-call max; override with GM_MCP_POLL_TIMEOUT_CEILING_MS). A timeout keeps the dispatch running; resume it with resume_task.'),
-    poll_interval_seconds: numberLike.optional().describe('Fallback poll interval in seconds (default 0.25) when filesystem events are unavailable.'),
-    include_timing: booleanLike.optional().describe('Add submission-to-response timing to the reply.'),
+    timeout_seconds: z.number().optional().describe('Poll budget in seconds (default 120, ceiling 600 = the harness tool-call max; override with GM_MCP_POLL_TIMEOUT_CEILING_MS). A timeout keeps the dispatch running; resume it with resume_task.'),
+    poll_interval_seconds: z.number().optional().describe('Fallback poll interval in seconds (default 0.25) when filesystem events are unavailable.'),
+    include_timing: z.boolean().optional().describe('Add submission-to-response timing to the reply.'),
     resume_task: z.string().optional().describe('Task from a timed_out reply. Resumes polling that dispatch and sends no body, so verb and cwd must match the original call.'),
     max_chars: z.number().optional().describe('Whole-reply cap in characters (default 24000). Past it the reply is cut, the full text is written to spill_file, and reply_truncated is true. Per-field text caps are separate.'),
     full_response: z.boolean().optional().describe('Return every guest field uncompacted.'),
@@ -130,9 +129,9 @@ export function createServer() {
                 prompt: z.string().optional().describe('Current task prompt. Omitted means an empty prompt.'),
                 session_id: z.string().optional().describe('Optional gm session id.'),
                 cwd: z.string().optional().describe('Project root holding .gm/exec-spool. Pass it on every call: it selects the project daemon and search root. It is not forwarded into the verb body.'),
-                timeout_seconds: numberLike.optional().describe('Poll budget in seconds (default 120, ceiling 600 = the harness tool-call max; override with GM_MCP_POLL_TIMEOUT_CEILING_MS). A timeout keeps the dispatch running; resume it with resume_task.'),
-                poll_interval_seconds: numberLike.optional().describe('Fallback poll interval in seconds (default 0.25) when filesystem events are unavailable.'),
-                include_timing: booleanLike.optional().describe('Add submission-to-response timing to the reply.'),
+                timeout_seconds: z.number().optional().describe('Poll budget in seconds (default 120, ceiling 600 = the harness tool-call max; override with GM_MCP_POLL_TIMEOUT_CEILING_MS). A timeout keeps the dispatch running; resume it with resume_task.'),
+                poll_interval_seconds: z.number().optional().describe('Fallback poll interval in seconds (default 0.25) when filesystem events are unavailable.'),
+                include_timing: z.boolean().optional().describe('Add submission-to-response timing to the reply.'),
                 resume_task: z.string().optional().describe('The task from a timed_out reply. Keeps polling that dispatch and sends no new body.'),
                 mode: z.string().optional().describe('investigate_readonly for read-only scan or report asks. It skips phase orchestration and touches no PRD or mutable state.'),
                 git_root_override: z.string().optional().describe('Pin the project root when cwd is not inside a git repository.'),
