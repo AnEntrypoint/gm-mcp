@@ -350,7 +350,7 @@ function largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml,
 function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', requestedMaxChars = maxChars) {
     if (text.length <= maxChars) return text
     const holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
-    const buildNotice = (matchesReturned, matchesTotal) => `reply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${maxChars}\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: continuation_reserve_chars (${CONTINUATION_RESERVE_CHARS}, held back for the continuation block)\n` : ''}spill_file: ${spillPath}\n${spillNote}${matchesCutNotice(matchesReturned, matchesTotal, maxChars)}`
+    const buildNotice = (matchesReturned, matchesTotal, deliveredChars = text.length) => `reply_truncated: true\nreply_chars: ${deliveredChars}\nreply_max_chars: ${maxChars}\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: continuation_reserve_chars (${CONTINUATION_RESERVE_CHARS}, held back for the continuation block)\n` : ''}spill_file: ${spillPath}\n${spillNote}${matchesCutNotice(matchesReturned, matchesTotal, maxChars)}`
     let head = text
     let matchesTotal
     let matchesReturned
@@ -372,7 +372,9 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
         const lastBreak = cut.lastIndexOf('\n')
         head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
     }
-    return `${head}${notice}`
+    let delivered = head.length + notice.length
+    for (let pass = 0; pass < 2; pass++) delivered = head.length + buildNotice(matchesReturned, matchesTotal, delivered).length
+    return `${head}${buildNotice(matchesReturned, matchesTotal, delivered)}`
 }
 
 function shapeGitStatusReply(verb, body, out) {
@@ -735,7 +737,7 @@ export function withCodesearchDualPathRouted(verb, body, cwd) {
     return { body: routed, scope: scope === '' || scope === '.' ? null : scope }
 }
 
-const DUAL_SCOPE_CHANNELS = ['bm25_hits', 'vector_hits', 'definitions', 'references', 'files', 'top_files']
+const DUAL_SCOPE_CHANNELS = ['hits', 'bm25_hits', 'vector_hits', 'definitions', 'references', 'files', 'top_files']
 
 function dualHitPath(hit) {
     const raw = typeof hit === 'string' ? hit : isPlainObject(hit) ? (hit.at ?? hit.path) : undefined
@@ -1537,6 +1539,8 @@ const LATEST_ONLY_VERBS = new Set(['prd-list', 'prd_list'])
 function isRefusalReply(parsed) {
     return isPlainObject(parsed) && (parsed.refused === true || parsed.status === 'refused' || parsed.outcome === 'refused')
 }
+
+const SECRET_REPLY_VERBS = new Set(['env_get', 'kv_get', 'ci_log'])
 
 function removeReadReply(outPath) {
     try {
@@ -2544,7 +2548,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs)) : failed)
         } finally {
             if (opened) fs.closeSync(opened.fd)
-            if (readRefusal) removeReadReply(outPath)
+            if (readRefusal || SECRET_REPLY_VERBS.has(verb.replace(/-/g, '_'))) removeReadReply(outPath)
         }
     }
 
