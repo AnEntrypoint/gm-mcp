@@ -32,7 +32,7 @@ export function continuationSnapshot(key, now = Date.now(), done = false) {
     const entry = entryFor(key)
     const action = entry.stopped ? 'stop' : entry.pending_rows === null ? 'none' : entry.pending_rows === 0 ? 'stop' : 'continue'
     const snapshot = {
-        state: entry.stopped ? 'stopped' : done ? 'done' : 'running',
+        state: entry.stopped ? 'stopped' : (done || entry.pending_rows === null) ? 'done' : 'running',
         pending_rows: entry.pending_rows,
         idle_ms: Math.max(0, now - entry.last_ms),
         action,
