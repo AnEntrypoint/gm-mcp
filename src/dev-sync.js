@@ -24,16 +24,19 @@ function logPath() {
 function readStampText() {
     try {
         return readFileSync(stampPath(), 'utf8')
-    } catch {
+    } catch (error) {
+        if (error.code !== 'ENOENT') appendDiagnostic('dev-sync-stamp-unreadable', { code: error.code ?? null, message: String(error.message) })
         return ''
     }
 }
 
 function parseStamps(text) {
+    if (!text) return {}
     try {
         const parsed = JSON.parse(text)
         return parsed && typeof parsed === 'object' ? parsed : {}
-    } catch {
+    } catch (error) {
+        appendDiagnostic('dev-sync-stamp-unparsed', { reason: 'stamp_unparsed', message: String(error.message) })
         return {}
     }
 }
