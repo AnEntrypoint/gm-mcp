@@ -98,11 +98,11 @@ function dispatchPositional(argv) {
 }
 
 function resolvePayloadValue(value) {
-    if (value === '-') {
+        if (value === '-') {
         try {
             return fs.readFileSync(0, 'utf8')
-        } catch {
-            return ''
+        } catch (error) {
+            throw new Error(`cannot read stdin: ${error.message}`)
         }
     }
     if (value.startsWith('@')) {
