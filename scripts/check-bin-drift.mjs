@@ -25,12 +25,21 @@ if (!fresh.includes(`var BUNDLE_VERSION = ${JSON.stringify(BUNDLE_VERSION)};`)) 
     process.exit(1)
 }
 
+const headChanged = spawnSync('git', ['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' })
+const headFiles = headChanged.status === 0 ? headChanged.stdout.split('\n').map(line => line.trim()).filter(Boolean) : []
+const srcFiles = headFiles.filter(p => p.startsWith('src/'))
+const regenSet = [binRel, ...srcFiles].join(' ')
+
 if (committed === fresh) {
     console.log(`bin/gm-mcp-server.js matches a fresh build of src/ (${fresh.length} bytes) -- no drift`)
 } else {
-    console.error('bin/gm-mcp-server.js is STALE: it does not match a fresh build of src/cli.js.')
-    console.error(`committed: ${committed.length} bytes -- fresh build: ${fresh.length} bytes`)
-    console.error('Run: npm run build   (then commit bin/gm-mcp-server.js in the same commit as the src/ change)')
+    console.error(`bin/gm-mcp-server.js is STALE: it does not match a fresh build of HEAD's src/ (committed ${committed.length} bytes, fresh ${fresh.length} bytes).`)
+    console.error(srcFiles.length
+        ? `HEAD changed src/ without rebuilding the bin: ${srcFiles.join(', ')}`
+        : 'HEAD changed no src/ file, so the bin was edited by hand or built from other sources.')
+    console.error(`Regenerate and commit in ONE commit with the src/ change. File set: ${regenSet}`)
+    console.error(`  npm run build && git add ${regenSet} && git commit -m "<subject>"`)
+    console.error('  (if the src/ change is already HEAD, use: git commit --amend --no-edit)')
     process.exit(1)
 }
 
