@@ -182,6 +182,7 @@ export function refuseMissingRequiredBodyKeys(name, verb, folded) {
 
 const DEFAULT_LIST_DESC_CHARS = 80
 const DEFAULT_CODEMODE_MAX_CHARS = 24000
+const EMPTY_REPLY_MARKER = 'gm_codemode_empty_reply: true\nthe body returned no text and no gm call replied; return the reply string itself, for example `return await gm["prd-list"]({status: "pending"})`'
 
 function canonicalCatalog(tools) {
     const namesByVerb = new Map()
@@ -440,7 +441,8 @@ export function registerCodeMode(server, tools) {
                     ? replies.filter((entry) => entry.text !== undefined).map((entry) => `--- gm.${entry.verb} (body returned nothing, so each gm reply follows) ---\n${capCodemodeText(entry.text, cap)}`)
                     : []
                 const joined = [...logs, formatValue(value), ...unreturned].filter((line) => line !== '').join('\n')
-                return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(joined, cap, CONTINUATION_RESERVE_CHARS)) }] }
+                const reply = joined.trim() === '' ? EMPTY_REPLY_MARKER : joined
+                return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(reply, cap, CONTINUATION_RESERVE_CHARS)) }] }
             } catch (error) {
                 const detail = describeError(error)
                 const diagnosticId = `codemode-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`
