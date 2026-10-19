@@ -4,7 +4,6 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildBundle, headBundleVersion } from './build.mjs'
-import { parseBundleVersion } from '../src/self-update.js'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const BUNDLE_VERSION = headBundleVersion(repoRoot)
@@ -20,8 +19,8 @@ const committed = shipsWorkingBin || headBin.status !== 0 ? readFileSync(committ
 
 const fresh = result.outputFiles[0].text
 
-if (parseBundleVersion(fresh) !== BUNDLE_VERSION) {
-    console.error(`fresh bundle is missing the source BUNDLE_VERSION ${BUNDLE_VERSION} recognized by the updater`)
+if (!fresh.includes(`var BUNDLE_VERSION = ${JSON.stringify(BUNDLE_VERSION)};`)) {
+    console.error(`fresh bundle is missing the HEAD BUNDLE_VERSION ${BUNDLE_VERSION} banner`)
     process.exit(1)
 }
 
