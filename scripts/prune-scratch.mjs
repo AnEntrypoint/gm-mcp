@@ -25,9 +25,10 @@ const option = (name) => {
 const root = option('--root');
 const capHours = Number(option('--cap-hours') ?? DEFAULT_CAP_HOURS);
 const apply = args.includes('--apply');
+const explicitPrefixes = args.flatMap((arg, i) => (arg === '--prefix' && args[i + 1] ? [args[i + 1]] : []));
 
 if (!root || !Number.isFinite(capHours) || capHours < 0) {
-  console.error('usage: prune-scratch.mjs --root <dir under /config/tmp> [--cap-hours <n>=24] [--apply]');
+  console.error('usage: prune-scratch.mjs --root <dir under /config/tmp> [--cap-hours <n>=24] [--prefix <p>]... [--apply]');
   process.exit(2);
 }
 
@@ -73,11 +74,22 @@ async function inScratchReal(path) {
   }
 }
 
+const isOwned = (name) => OWNED_PREFIXES.some((prefix) => name.startsWith(prefix));
+const isNamed = (name) => explicitPrefixes.some((prefix) => name.startsWith(prefix));
+const unownedPrefixOf = (name) => name.split(/[-._]/)[0] || name;
+
 const candidates = [];
 const refusedNames = [];
+const unownedByPrefix = {};
 for (const name of await readdir(resolvedRoot)) {
-  if (!OWNED_PREFIXES.some((prefix) => name.startsWith(prefix))) continue;
   const path = join(resolvedRoot, name);
+  if (!isOwned(name) && !isNamed(name)) {
+    if ((await inScratchReal(path)) && (await isStale(path))) {
+      const prefix = unownedPrefixOf(name);
+      unownedByPrefix[prefix] = (unownedByPrefix[prefix] ?? 0) + 1;
+    }
+    continue;
+  }
   if (!(await inScratchReal(path))) {
     refusedNames.push(name);
     continue;
@@ -94,6 +106,8 @@ if (apply) {
   }
 }
 
-const byPrefix = Object.fromEntries(OWNED_PREFIXES.map((prefix) => [prefix, candidates.filter((c) => c.name.startsWith(prefix)).length]));
+const byPrefix = Object.fromEntries([...OWNED_PREFIXES, ...explicitPrefixes].map((prefix) => [prefix, candidates.filter((c) => c.name.startsWith(prefix)).length]));
+const unownedSorted = Object.fromEntries(Object.entries(unownedByPrefix).sort(([a], [b]) => a.localeCompare(b)));
+const unownedTotal = Object.values(unownedSorted).reduce((sum, n) => sum + n, 0);
 
-console.log(JSON.stringify({ root: resolvedRoot, cap_hours: capHours, apply, by_prefix: byPrefix, candidates: candidates.map((c) => c.name), refused: refusedNames, removed }, null, 2));
+console.log(JSON.stringify({ root: resolvedRoot, cap_hours: capHours, apply, by_prefix: byPrefix, explicit_prefixes: explicitPrefixes, unowned_stale_total: unownedTotal, unowned_by_prefix: unownedSorted, candidates: candidates.map((c) => c.name), refused: refusedNames, removed }, null, 2));
