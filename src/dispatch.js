@@ -2337,6 +2337,48 @@ function continuationKeyOf(args) {
     return explicitBodySessionId(args?.body) || args?.session_id || ''
 }
 
+const CI_STATUS_VERBS = new Set(['ci-status', 'ci_status'])
+const CI_STATUS_WAIT_DEFAULT_MS = 300000
+const CI_STATUS_WAIT_CEILING_MS = 900000
+const CI_STATUS_WAIT_POLL_MS = 15000
+const CI_STATUS_NON_TERMINAL = new Set(['pending', 'in_progress', 'queued', 'waiting', 'requested'])
+
+function ciStatusReplyRunStatus(reply) {
+    if (typeof reply !== 'string') return undefined
+    let parsed
+    try { parsed = yaml.load(reply) } catch { return undefined }
+    if (!isPlainObject(parsed)) return undefined
+    const status = parsed.run_status ?? parsed.data?.run_status
+    return typeof status === 'string' ? status : undefined
+}
+
+function sleepUnlessAborted(ms, signal) {
+    return new Promise((resolve) => {
+        const timer = setTimeout(done, ms)
+        function done() {
+            clearTimeout(timer)
+            signal?.removeEventListener('abort', done)
+            resolve()
+        }
+        signal?.addEventListener('abort', done, { once: true })
+    })
+}
+
+async function runCiStatusWithWait(args, signal, responseValueObserver) {
+    const { wait, timeout_ms, ...body } = args.body
+    const requested = Number(timeout_ms)
+    const budgetMs = Math.min(CI_STATUS_WAIT_CEILING_MS, Number.isFinite(requested) && requested > 0 ? Math.round(requested) : CI_STATUS_WAIT_DEFAULT_MS)
+    const deadline = Date.now() + budgetMs
+    const inner = { ...args, body }
+    for (;;) {
+        const reply = await runDispatch(inner, signal, responseValueObserver)
+        const status = ciStatusReplyRunStatus(reply)
+        const remainingMs = deadline - Date.now()
+        if (!CI_STATUS_NON_TERMINAL.has(status) || remainingMs <= 0 || signal?.aborted) return reply
+        await sleepUnlessAborted(Math.min(CI_STATUS_WAIT_POLL_MS, remainingMs), signal)
+    }
+}
+
 export async function gmDispatch(args, signal, responseValueObserver) {
     if (typeof args?.max_chars === 'number' && args.max_chars > 2 * CONTINUATION_RESERVE_CHARS) args = { ...args, max_chars: args.max_chars - CONTINUATION_RESERVE_CHARS, requested_max_chars: args.max_chars }
     if (args?.verb === CONTINUATION_STOP_VERB) {
@@ -2351,7 +2393,8 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     const startedAtMs = Date.now()
     appendDiagnostic('dispatch-start', { verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
     try {
-        const reply = withStaleBundleNotice(args?.verb, await runDispatch(args, signal, responseValueObserver))
+        const waits = CI_STATUS_VERBS.has(args?.verb) && isPlainObject(args?.body) && args.body.wait === true
+        const reply = withStaleBundleNotice(args?.verb, waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver))
         if (VERBATIM_REPLY_VERBS.has(args?.verb)) return reply
         return continuedReply(continuationKeyOf(args), reply)
     } catch (error) {
