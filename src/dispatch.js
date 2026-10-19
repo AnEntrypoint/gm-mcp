@@ -435,9 +435,16 @@ function largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml,
     return low
 }
 
+const MATCH_TEXT_CLIP_CHARS = 160
+
+function clipMatchText(match) {
+    if (typeof match?.text !== 'string' || match.text.length <= MATCH_TEXT_CLIP_CHARS) return match
+    return { ...match, text: match.text.slice(0, MATCH_TEXT_CLIP_CHARS), text_clipped: true }
+}
+
 function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', requestedMaxChars = maxChars) {
     if (text.length <= maxChars) return text
-    const holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
+    let holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
     const buildNotice = (matchesReturned, matchesTotal, deliveredChars = text.length) => `reply_truncated: true\nreply_chars: ${deliveredChars}\nreply_max_chars: ${maxChars}\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: continuation_reserve_chars (${CONTINUATION_RESERVE_CHARS}, held back for the continuation block)\n` : ''}spill_file: ${spillPath}\n${spillNote}${matchesCutNotice(matchesReturned, matchesTotal, maxChars)}`
     let head = text
     let matchesTotal
@@ -449,6 +456,10 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
         if (matchesReturned === 0 && holder.matches.length > 0) {
             slim = true
             matchesReturned = largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice, true)
+            if (matchesReturned === 0) {
+                holder = { ...holder, matches: holder.matches.map(clipMatchText) }
+                matchesReturned = largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice, true)
+            }
         }
         head = renderMatchesKept(out, holder, matchesReturned, toYaml, slim)
     }
