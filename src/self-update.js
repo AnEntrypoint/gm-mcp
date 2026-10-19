@@ -15,6 +15,8 @@ const HEAD_PROBE_URL = 'https://api.github.com/repos/AnEntrypoint/gm-mcp/commits
 const commitBundleUrl = (sha) => `https://raw.githubusercontent.com/AnEntrypoint/gm-mcp/${sha}/bin/gm-mcp-server.js`
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 1000
+// The commits probe spends one unauthenticated GitHub request per interval (60/h quota), so no operator value may poll faster.
+const MIN_CHECK_INTERVAL_MS = DEFAULT_CHECK_INTERVAL_MS
 // A stored validator is sent only within this long of the last unconditional fetch (see refreshStaleDeployedBundle).
 const FULL_FETCH_INTERVAL_MS = 10 * 60 * 1000
 const DEFER_RETRY_DELAY_MS = 20_000
@@ -210,7 +212,7 @@ function isRunningFromDeployedBundle(deployedPath) {
 
 function checkIntervalMs() {
     const fromEnv = Number(process.env.GM_MCP_SELF_UPDATE_INTERVAL_MS)
-    return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : DEFAULT_CHECK_INTERVAL_MS
+    return Number.isFinite(fromEnv) && fromEnv > 0 ? Math.max(MIN_CHECK_INTERVAL_MS, fromEnv) : DEFAULT_CHECK_INTERVAL_MS
 }
 
 function checkedRecently(stampPath) {
