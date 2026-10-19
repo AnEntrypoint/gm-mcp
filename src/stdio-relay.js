@@ -128,11 +128,23 @@ function launchRootDefault() {
     }
 }
 
+const PRD_ADD_VERB = /^prd[-_]add$/
+const PRD_ADD_IN_CODE = /prd[-_]add/
+
+function prdAddWithoutCwd(request) {
+    const name = request.params?.name
+    const args = request.params?.arguments
+    if (name === 'prd_add' || name === 'prd-add') return true
+    if (name === 'gm' && PRD_ADD_VERB.test(String(args?.verb ?? ''))) return true
+    return name === 'gm_codemode' && typeof args?.code === 'string' && PRD_ADD_IN_CODE.test(args.code)
+}
+
 function withDefaultCwd(request, line, defaultCwd) {
     if (!defaultCwd || request?.method !== 'tools/call') return line
     const args = request.params?.arguments
     if (args !== undefined && (args === null || typeof args !== 'object' || Array.isArray(args))) return line
     if (args && typeof args.cwd === 'string' && args.cwd.trim()) return line
+    if (prdAddWithoutCwd(request)) return line
     return JSON.stringify({ ...request, params: { ...request.params, arguments: { ...(args ?? {}), cwd: defaultCwd } } })
 }
 
