@@ -2317,7 +2317,7 @@ function withDispatchWait(out, waitedMs, claimedAtMs, daemonSpanMs) {
     const execMs = executed !== null ? Math.min(executed, postClaimMs) : daemonMs
     const guestMs = firstReportedMs(out, ['guest_elapsed_ms'])
     const embedMs = firstReportedMs(out, ['embed_ms', 'embed_query'])
-    const split = { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, daemon_span_ms: daemonMs, guest_elapsed_ms: guestMs, embed_ms: embedMs, lane_wait_ms: claimMs, post_claim_ms: postClaimMs, unattributed_ms: execMs === null ? postClaimMs : postClaimMs - execMs, ...lane }
+    const split = { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, daemon_span_ms: daemonMs, guest_elapsed_ms: guestMs, embed_ms: embedMs, lane_wait_ms: claimMs, post_claim_ms: postClaimMs, daemon_handoff_ms: execMs === null ? null : Math.max(0, daemonMs - execMs), reply_poll_ms: daemonMs === null ? postClaimMs : postClaimMs - daemonMs, unattributed_ms: execMs === null ? postClaimMs : postClaimMs - execMs, ...lane }
     return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: Object.fromEntries(Object.entries(split).filter(([, value]) => value !== null && value !== undefined)) }
 }
 
