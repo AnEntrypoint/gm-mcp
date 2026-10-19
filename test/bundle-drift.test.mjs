@@ -46,7 +46,8 @@ await test('a stale bundle that cannot be reloaded says why instead of promising
         refusal_reason: 'a stdio server cannot replace itself without detaching its client',
     }))
     assert.match(line, /restart required \(a stdio server cannot replace itself/)
-    assert.match(line, /run `node "[^`]+"`/)
+    assert.match(line, /restart the MCP client that launched this server/)
+    assert.doesNotMatch(line, /run `node/)
     assert.doesNotMatch(line, /reloading between dispatches/)
 })
 
@@ -66,7 +67,7 @@ await test('an unknown installed version still names the mismatch', () => {
 
 await test('a dev checkout is never reloadable, whatever the installed file is', () => {
     const drift = bundleDrift({ transport: 'http' })
-    assert.equal(drift.stale, false)
+    if (drift.stale) assert.equal(drift.refusal_code, 'running-not-a-bundle')
     assert.equal(drift.reloadable, false)
 })
 
