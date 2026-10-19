@@ -127,7 +127,7 @@ const ZOD_BODY_TYPE_NAMES = { ZodString: 'string', ZodBoolean: 'boolean', ZodNum
 function zodBodyType(zt) {
     let t = zt
     while (t._def.innerType) t = t._def.innerType
-    if (t._def.options) return t._def.options.map(zodBodyType).join('|')
+    if (t._def.options) return [...new Set(t._def.options.map(zodBodyType))].join('|')
     return ZOD_BODY_TYPE_NAMES[t._def.typeName] ?? 'any'
 }
 
@@ -345,7 +345,7 @@ const FS_WRITE_BODY = {
     required: ['path', 'content'],
     fields: {
         path: { type: 'string', description: 'Project-relative path. allowOutsideRoot never widens a write.' },
-        content: { type: 'string', aliases: ['data', 'text'], description: 'Complete file content: gm has no edit verb, so a whole-file write is the supported edit.' },
+        content: { type: 'string|array', aliases: ['data', 'text'], description: 'Complete file content as a string, or an array of lines joined with newlines (plus a trailing newline): gm has no edit verb, so a whole-file write is the supported edit.' },
         allow_empty: { type: 'boolean', description: 'Empty content is refused without it.' },
         append: { type: 'boolean', description: 'Appends instead of replacing.' },
     },
