@@ -479,7 +479,7 @@ function clipMatchText(match) {
 function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', requestedMaxChars = maxChars) {
     if (text.length <= maxChars) return text
     let holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
-    const buildNotice = (matchesReturned, matchesTotal, deliveredChars = text.length) => `reply_truncated: true\nreply_chars: ${deliveredChars}\nreply_max_chars: ${maxChars}\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: continuation_reserve_chars (${CONTINUATION_RESERVE_CHARS}, held back for the continuation block)\n` : ''}spill_file: ${spillPath}\n${spillNote}${matchesCutNotice(matchesReturned, matchesTotal, maxChars)}`
+    const buildNotice = (matchesReturned, matchesTotal, deliveredChars = text.length) => `reply_truncated: true\nreply_chars: ${deliveredChars}\nreply_max_chars: ${maxChars}\nreply_full_chars: ${text.length} (raise max_chars to at least this to read the whole reply)\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: continuation_reserve_chars (${CONTINUATION_RESERVE_CHARS}, held back for the continuation block)\n` : ''}spill_file: ${spillPath}\n${spillNote}${matchesCutNotice(matchesReturned, matchesTotal, maxChars)}`
     let head = text
     let matchesTotal
     let matchesReturned
@@ -503,8 +503,8 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
     }
     let notice = buildNotice(matchesReturned, matchesTotal)
     const compact = notice.length > maxChars / 2
-    if (compact) notice = `reply_truncated: true\nreply_max_chars: ${maxChars}\nspill_file: ${spillPath}\n${holder ? `matches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n` : ''}`
-    const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
+    if (compact) notice = `reply_truncated: true\nreply_max_chars: ${maxChars}\nreply_full_chars: ${text.length} (raise max_chars to at least this to read the whole reply)\nspill_file: ${spillPath}\n${holder ? `matches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n` : ''}`
+    const budget = Math.max(0, maxChars - Math.min(REPLY_NOTICE_RESERVE_CHARS, Math.floor(maxChars / 2)))
     if (head.length > budget) {
         const cut = head.slice(0, budget)
         const lastBreak = cut.lastIndexOf('\n')
@@ -612,10 +612,10 @@ function liftStdoutFault(out) {
 function withCheckoutCreateHint(verb, body, out) {
     if (verb !== 'git_checkout' || body?.create !== true || !out || typeof out !== 'object' || out.ok !== false) return out
     const branch = typeof body.ref === 'string' ? body.ref : ''
-    if (!branch || !/exist/i.test(String(out.error ?? ''))) return out
+    if (!branch || !/exist|BRANCH_CREATE_REFUSED/i.test(String(out.error ?? ''))) return out
     return {
         ...out,
-        hint: `branch "${branch}" already exists and was not moved. Leave it or delete it; this project publishes only to main.`,
+        hint: `branch "${branch}" was not created or moved. Work stays on main; leave any existing branch alone.`,
     }
 }
 
