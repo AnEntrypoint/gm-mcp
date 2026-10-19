@@ -487,13 +487,17 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
         matchesTotal = scanMatchesTotal(holder, holder.matches.length)
         matchesReturned = largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice)
         let slim = false
+        if (matchesReturned < holder.matches.length) {
+            const slimReturned = largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice, true)
+            if (slimReturned > matchesReturned) {
+                slim = true
+                matchesReturned = slimReturned
+            }
+        }
         if (matchesReturned === 0 && holder.matches.length > 0) {
             slim = true
+            holder = { ...holder, matches: holder.matches.map(clipMatchText) }
             matchesReturned = largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice, true)
-            if (matchesReturned === 0) {
-                holder = { ...holder, matches: holder.matches.map(clipMatchText) }
-                matchesReturned = largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice, true)
-            }
         }
         head = renderMatchesKept(out, holder, matchesReturned, toYaml, slim)
     }
