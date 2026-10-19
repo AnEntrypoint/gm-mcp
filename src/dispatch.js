@@ -1568,7 +1568,7 @@ function pruneSupersededListings(outDir, verb, sessionId, keepPath, callStartedA
     }
 }
 
-function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
+function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal, exactFallback = false) {
     return new Promise((resolve, reject) => {
         let outWatch
         let wakeTimer
@@ -1601,7 +1601,7 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal) {
         if (fs.existsSync(outPath)) return finish('already_landed')
         wakeTimer = setTimeout(() => finish('deadline'), Math.max(1, waitMs))
         const watched = outWatch !== undefined
-        const fallbackFloorMs = watched ? SPOOL_WATCHED_FALLBACK_MS : 25
+        const fallbackFloorMs = watched && !exactFallback ? SPOOL_WATCHED_FALLBACK_MS : 25
         fallbackTimer = setTimeout(() => finish('fallback_poll'), Math.min(Math.max(fallbackFloorMs, fallbackMs), Math.max(1, waitMs)))
     })
 }
@@ -2088,6 +2088,8 @@ function queuePressureNote(pressure, queuedPath, stall) {
         : `${head}. Not cap saturation (${pressure.claim_budget_left} claim slot(s) free): the daemon is between sweeps of this project or busy elsewhere -- see daemon.daemon_active_projects and daemon.gm_processor_capacity for how many projects share it. Keep waiting on this dispatch with resume_task; nothing here is wedged.${stallTail}`
 }
 
+const CLAIM_SAMPLE_MS = 100
+const CLAIM_SAMPLE_WINDOW_MS = 10000
 const FINAL_OUT_RECHECK_WINDOW_MS = 2500
 const FINAL_OUT_RECHECK_INTERVAL_MS = 150
 
@@ -2598,7 +2600,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             }))
         }
         try {
-            lastWakeSource = await waitForSpoolChange(outDir, outPath, deadline - Date.now(), pollMs, signal)
+            const claimPending = claimedAtMs === null && Date.now() - callStartedAtMs < CLAIM_SAMPLE_WINDOW_MS
+            lastWakeSource = await waitForSpoolChange(outDir, outPath, deadline - Date.now(), claimPending ? CLAIM_SAMPLE_MS : pollMs, signal, claimPending)
         } catch {
             return abortedReply()
         }
