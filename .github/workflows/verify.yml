@@ -53,8 +53,6 @@ jobs:
 
   verify:
     name: verify (${{ matrix.os }})
-    needs: version-bump
-    if: ${{ always() && needs.version-bump.result != 'failure' && needs.version-bump.result != 'cancelled' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
