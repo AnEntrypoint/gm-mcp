@@ -8,7 +8,7 @@ const DISPATCH_ENVELOPE_NAME = 'dispatch_envelope'
 import { DISPATCH_BODY_FIELDS, GUEST_ENVELOPE_FIELDS, verbBodySchema } from './verb-bodies.js'
 import { fsReadRangeCanonicalBody } from './dispatch.js'
 import { NOTICES } from './notices.js'
-import { CONTINUATION_RESERVE_CHARS, continuedReply } from './continuation.js'
+import { CONTINUATION_RESERVE_CHARS, continuedReplyWithin } from './continuation.js'
 import { CODEMODE_HEARTBEAT_MS, DEFAULT_CODEMODE_TIMEOUT_MS } from './codemode-budget.js'
 
 let codemodeInvocationSeq = 0
@@ -315,6 +315,10 @@ function capCodemodeText(text, cap, reserve = 0) {
     return `${flagged.slice(0, Math.max(0, room - notice.length))}${notice}`
 }
 
+function capWithContinuation(session_id, text, cap) {
+    return continuedReplyWithin(session_id, text, cap, (body, room) => capCodemodeText(body, cap, cap - room))
+}
+
 const PARTIAL_REPLY_MIN_CHARS = 200
 const PARTIAL_BLOCK_OVERHEAD_CHARS = 256
 const SPOOL_FILE_PATTERN = /[^\s'"`()[\]]*\.gm\/exec-spool\/out\/[^\s'"`()[\]]+/
@@ -520,7 +524,7 @@ export function registerCodeMode(server, tools) {
                     : []
                 const joined = [...logs, formatValue(value), ...unreturned].filter((line) => line !== '').join('\n')
                 const reply = joined.trim() === '' ? EMPTY_REPLY_MARKER : joined
-                return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(reply, cap, CONTINUATION_RESERVE_CHARS)) }] }
+                return { content: [{ type: 'text', text: capWithContinuation(session_id, reply, cap) }] }
             } catch (error) {
                 const detail = describeError(error)
                 const diagnosticId = `codemode-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`
@@ -550,7 +554,7 @@ export function registerCodeMode(server, tools) {
                 const lead = echoed ? [] : [...failingVerb, ...wrapper]
                 const tail = echoed ? [] : detailLines
                 const text = [...lead, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id; search log for it)`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
-                return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(text, cap, CONTINUATION_RESERVE_CHARS)) }], isError: true }
+                return { content: [{ type: 'text', text: capWithContinuation(session_id, text, cap) }], isError: true }
             } finally {
                 stopHeartbeat()
             }
