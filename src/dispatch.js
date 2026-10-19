@@ -459,9 +459,12 @@ function gitShowCaptureFallback(verb, body, out, root) {
 
 function withExecExitVerdict(verb, out) {
     if (!EXEC_FAMILY_VERBS.includes(verb) || !isPlainObject(out)) return out
-    const code = isPlainObject(out.data) ? out.data.exit_code : out.exit_code
+    const body = isPlainObject(out.data) ? out.data : out
+    const code = body.exit_code
     if (typeof code !== 'number' || code === 0) return out
-    return { ...out, ok: false }
+    const firstStderr = typeof body.stderr === 'string' ? body.stderr.split('\n').map((line) => line.trim()).find(Boolean) : undefined
+    const error = `exec exited with code ${code}${firstStderr ? `: ${firstStderr}` : ''}`
+    return { ...out, ok: false, error: typeof out.error === 'string' && out.error ? out.error : error }
 }
 
 function liftStdoutFault(out) {
