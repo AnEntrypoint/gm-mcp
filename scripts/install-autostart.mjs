@@ -129,6 +129,70 @@ function uninstall() {
     return report
 }
 
+const launchAgentFile = path.resolve(flagValue('launch-agent') || path.join(home, 'Library', 'LaunchAgents', 'com.gm-mcp.http-singleton.plist'))
+
+function xmlEscape(text) {
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function launchdPlist() {
+    const args = [nodeBin, entry, 'ensure-http'].map((arg) => `        <string>${xmlEscape(arg)}</string>`).join('\n')
+    return [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+        '<plist version="1.0">',
+        '<dict>',
+        '    <key>Label</key>',
+        '    <string>com.gm-mcp.http-singleton</string>',
+        '    <key>ProgramArguments</key>',
+        '    <array>',
+        args,
+        '    </array>',
+        '    <key>RunAtLoad</key>',
+        '    <true/>',
+        '    <key>StartInterval</key>',
+        '    <integer>60</integer>',
+        '    <key>StandardOutPath</key>',
+        `    <string>${xmlEscape(logFile)}</string>`,
+        '    <key>StandardErrorPath</key>',
+        `    <string>${xmlEscape(logFile)}</string>`,
+        '</dict>',
+        '</plist>',
+        '',
+    ].join('\n')
+}
+
+function installLaunchd() {
+    const existed = existsSync(launchAgentFile)
+    const original = existed ? readFileSync(launchAgentFile, 'utf8') : ''
+    const next = launchdPlist()
+    const changed = next !== original
+    const result = { file: launchAgentFile, action: !existed ? 'created' : changed ? 'refreshed' : 'unchanged', loaded: null }
+    if (changed && !hasFlag('check')) {
+        mkdirSync(path.dirname(launchAgentFile), { recursive: true })
+        writeFileSync(launchAgentFile, next, 'utf8')
+        spawnSync('launchctl', ['unload', launchAgentFile], { windowsHide: true })
+        const loaded = spawnSync('launchctl', ['load', '-w', launchAgentFile], { encoding: 'utf8', windowsHide: true })
+        result.loaded = { status: loaded.status, error: loaded.error ? loaded.error.message : null, stderr: (loaded.stderr || '').trim() }
+    }
+    return result
+}
+
+const SCHEDULED_TASK_NAME = 'gm-mcp-http-singleton'
+
+function installScheduledTask() {
+    const taskRun = `"${nodeBin}" "${entry}" ensure-http`
+    if (hasFlag('check')) return { task: SCHEDULED_TASK_NAME, action: 'check', run: taskRun }
+    const created = spawnSync('schtasks', ['/Create', '/F', '/SC', 'ONLOGON', '/TN', SCHEDULED_TASK_NAME, '/TR', taskRun], { encoding: 'utf8', windowsHide: true })
+    return {
+        task: SCHEDULED_TASK_NAME,
+        action: created.status === 0 ? 'created' : 'failed',
+        status: created.status,
+        error: created.error ? created.error.message : null,
+        stderr: (created.stderr || '').trim(),
+    }
+}
+
 function ensureNow() {
     mkdirSync(path.dirname(logFile), { recursive: true })
     if (hasFlag('check')) return { ran: false }
@@ -153,11 +217,18 @@ const report = {
     entry_mtime: existsSync(entry) ? statSync(entry).mtime.toISOString() : null,
 }
 
-report.platform = process.platform
+const platform = flagValue('platform') || process.platform
+report.platform = platform
 if (hasFlag('uninstall')) {
     report.uninstall = uninstall()
-} else if (process.platform !== 'linux') {
-    report.unsupported = `${process.platform}: the boot hook (~/beforestart) and crontab @reboot are only read by linux cron here; nothing was written`
+} else if (platform === 'darwin') {
+    report.launchd = installLaunchd()
+    report.ensure_http = ensureNow()
+} else if (platform === 'win32') {
+    report.scheduled_task = installScheduledTask()
+    report.ensure_http = ensureNow()
+} else if (platform !== 'linux') {
+    report.unsupported = `${platform}: no autostart mechanism is implemented; nothing was written`
 } else {
     if (!hasFlag('no-hook')) report.hook = installHook()
     if (!hasFlag('no-cron')) report.cron = installCron()
