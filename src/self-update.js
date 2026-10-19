@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { agentplugDir, toolsDir } from './paths.js'
-import { appendDiagnostic, describeError } from './server-log.js'
+import { appendDiagnostic, describeError, logLocations } from './server-log.js'
 import { inflightDispatchCount } from './dispatch.js'
 import { liveRunningImages, unrecordedBundleProcesses } from './running-images.js'
 
@@ -193,6 +193,7 @@ export function selfUpdateStatus() {
         channel_cache: readBundleCache(deployedPath),
         local_build_pin_path: localBuildPinPath(),
         local_build_pin: pin,
+        logs: logLocations(),
     }
 }
 
@@ -286,7 +287,8 @@ function assertLoadableBundle(bytes, candidatePath) {
     if (syntaxCheck.status !== 0) {
         const lines = syntaxCheck.stderr.trim().split('\n')
         const message = lines.find((line) => /^\w*Error\b/.test(line.trim())) || lines.at(-1)
-        throw new Error(`candidate bundle fails node --check: ${lines[0]} ${message.trim()}`)
+        const location = lines.find((line) => /:\d+$/.test(line.trim())) || lines[0]
+        throw new Error(`candidate bundle fails node --check: ${location.trim()} ${message.trim()}`)
     }
 }
 

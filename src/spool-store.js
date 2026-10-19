@@ -30,8 +30,16 @@ export const SPOOL_DIR_MODE = 0o700
 
 export function writeTextAtomically(file, text) {
     const tempPath = `${file}.tmp`
-    fs.writeFileSync(tempPath, text, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
-    fs.renameSync(tempPath, file)
+    try {
+        fs.writeFileSync(tempPath, text, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
+        fs.renameSync(tempPath, file)
+    } catch (error) {
+        try {
+            fs.unlinkSync(tempPath)
+        } catch {
+        }
+        throw error
+    }
 }
 
 export function writeText(file, text) {

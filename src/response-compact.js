@@ -432,42 +432,12 @@ function compactSupplyChainScan(scan) {
     }
 }
 
-function compactDreamRsiStrategy(strategy) {
-    if (!strategy || typeof strategy !== 'object') return strategy
-    if (strategy.ok === false || strategy.error !== undefined || strategy.error_code !== undefined) return strategy
-    const evidence = Array.isArray(strategy.evidence) ? strategy.evidence : []
-    return withoutBlankValues({
-        selection: strategy.selection,
-        observations: strategy.observation_count,
-        succeeded: strategy.successful_dispatch_count,
-        failed: strategy.failed_dispatch_count,
-        unverified: strategy.unverified_dispatch_count,
-        unscored: strategy.unscored_dispatch_count,
-        gate_drift_failures: strategy.gate_drift_failure_count,
-        evidence_rows: evidence.length,
-    })
-}
-
-function compactDreamRsiReplay(replay) {
-    if (!replay || typeof replay !== 'object') return replay
-    if (replay.ok === false || replay.error !== undefined || replay.error_code !== undefined) return replay
-    const replays = Array.isArray(replay.replays) ? replay.replays : []
-    return withoutBlankValues({
-        ok: replay.ok,
-        selection: replay.selection,
-        score: replay.score,
-        replay_rows: replays.length,
-    })
-}
-
 const WIRE_FIELD_COMPACTORS = new Map([
     ['codeinsight_overview', compactCodeinsightOverview],
     ['codeinsight_start', compactCodeinsightStart],
     ['config_changed', compactConfigChanged],
     ['phase_history', compactPhaseHistory],
     ['supply_chain_scan', compactSupplyChainScan],
-    ['dream_rsi_strategy', compactDreamRsiStrategy],
-    ['dream_rsi_replay', compactDreamRsiReplay],
 ])
 
 function sameJsonValue(a, b) {
