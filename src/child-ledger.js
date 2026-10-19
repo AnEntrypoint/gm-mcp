@@ -171,3 +171,20 @@ export function attributePid(pid, { root = null } = {}) {
 export function attributeRows({ root = null, kind = null } = {}) {
     return readLedger(root).filter((row) => (kind === null ? true : row.kind === kind))
 }
+
+export function reapOwnChildren(roots = []) {
+    const reaped = []
+    const seen = new Set()
+    for (const root of [null, ...roots]) {
+        for (const row of readLedger(root)) {
+            const pid = Number(row.pid)
+            if (Number(row.ppid) !== process.pid || seen.has(pid)) continue
+            seen.add(pid)
+            try {
+                process.kill(pid, 'SIGTERM')
+                reaped.push(pid)
+            } catch {}
+        }
+    }
+    return reaped
+}

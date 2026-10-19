@@ -3,6 +3,7 @@ import process from 'node:process'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { inflightDispatchCount, releaseAgentLeases } from './dispatch.js'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
+import { leaseRoots, reapOwnChildren } from './child-ledger.js'
 
 const CLIENT_GONE_EXIT_RECHECK_MS = 1_000
 const CLIENT_GONE_MAX_WAIT_MS = 120_000
@@ -60,8 +61,9 @@ export function keepServingOnAsyncFailure() {
 export function logSignalExits() {
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
         process.on(signal, () => {
+            const children_reaped = reapOwnChildren(leaseRoots())
             const leases_released = releaseAgentLeases()
-            appendDiagnostic('exit', { reason: 'signal', signal, dispatches_inflight: inflightDispatchCount(), leases_released })
+            appendDiagnostic('exit', { reason: 'signal', signal, dispatches_inflight: inflightDispatchCount(), leases_released, children_reaped })
             process.exit(0)
         })
     }
