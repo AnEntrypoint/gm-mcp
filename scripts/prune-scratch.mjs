@@ -41,8 +41,14 @@ const scratchReal = await realpath(SCRATCH_ROOT);
 const inScratch = (path) => path === scratchReal || path.startsWith(scratchReal + sep);
 
 const lexicalRoot = resolve(root);
-if ((await lstat(lexicalRoot)).isSymbolicLink()) refuse(`refusing symlinked root ${lexicalRoot}`);
-const resolvedRoot = await realpath(lexicalRoot);
+let resolvedRoot;
+try {
+  if ((await lstat(lexicalRoot)).isSymbolicLink()) refuse(`refusing symlinked root ${lexicalRoot}`);
+  resolvedRoot = await realpath(lexicalRoot);
+} catch (error) {
+  if (error.code === 'ENOENT' || error.code === 'ENOTDIR') refuse(`refusing missing --root ${lexicalRoot}: no such directory`);
+  throw error;
+}
 if (!inScratch(resolvedRoot)) refuse(`refusing root outside ${SCRATCH_ROOT}: ${resolvedRoot}`);
 
 const cutoff = Date.now() - capHours * 3_600_000;
@@ -145,9 +151,20 @@ for (const candidate of candidates) {
 }
 
 const removed = [];
+const skippedAtApply = [];
 if (apply) {
   for (const { name, path } of removable) {
     if (!(await isStale(path)) || !(await inScratchReal(path))) continue;
+    const fresh = await liveHolders([path]);
+    const pids = [...fresh.holders.get(path)].sort((a, b) => a - b);
+    if (pids.length > 0) {
+      skippedAtApply.push({ name, reason: 'live_process', pids });
+      continue;
+    }
+    if (fresh.unknown.length > 0) {
+      skippedAtApply.push({ name, reason: 'liveness_unknown', pids: [] });
+      continue;
+    }
     await rm(path, { recursive: true, force: true });
     removed.push(name);
   }
@@ -157,4 +174,4 @@ const byPrefix = Object.fromEntries([...OWNED_PREFIXES, ...explicitPrefixes].map
 const unownedSorted = Object.fromEntries(Object.entries(unownedByPrefix).sort(([a], [b]) => a.localeCompare(b)));
 const unownedTotal = Object.values(unownedSorted).reduce((sum, n) => sum + n, 0);
 
-console.log(JSON.stringify({ root: resolvedRoot, cap_hours: capHours, apply, by_prefix: byPrefix, explicit_prefixes: explicitPrefixes, unowned_stale_total: unownedTotal, unowned_by_prefix: unownedSorted, candidates: removable.map((c) => c.name), held, liveness_unknown_pids: liveness.unknown, refused: refusedNames, removed }, null, 2));
+console.log(JSON.stringify({ root: resolvedRoot, cap_hours: capHours, apply, by_prefix: byPrefix, explicit_prefixes: explicitPrefixes, unowned_stale_total: unownedTotal, unowned_by_prefix: unownedSorted, candidates: removable.map((c) => c.name), held, liveness_unknown_pids: liveness.unknown, refused: refusedNames, removed, skipped_at_apply: skippedAtApply }, null, 2));
