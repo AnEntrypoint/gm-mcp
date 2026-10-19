@@ -2294,7 +2294,7 @@ function carriedNoFailure(out) {
 
 const DISPATCH_WAIT_DISCLOSED_AT_MS = 250
 
-function withDispatchWait(out, waitedMs, claimedAtMs) {
+function withDispatchWait(out, waitedMs, claimedAtMs, daemonSpanMs) {
     if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !isPlainObject(out)) return out
     const starved = out.error_code === 'dispatch_starved_waiting_for_admission'
     const admitted = Number(starved ? out.waited_ms : out.admission_waited_ms)
@@ -2306,10 +2306,11 @@ function withDispatchWait(out, waitedMs, claimedAtMs) {
         ? Math.max(0, Math.min(claimedAtMs - admissionMs, beforeGuestCapMs))
         : beforeGuestCapMs - (executed === null ? 0 : Math.min(executed, beforeGuestCapMs))
     const postClaimMs = waitedMs - admissionMs - claimMs
-    const execMs = executed === null ? null : Math.min(executed, postClaimMs)
+    const daemonMs = daemonSpanMs === null ? null : Math.min(Math.max(0, daemonSpanMs), postClaimMs)
+    const execMs = executed !== null ? Math.min(executed, postClaimMs) : daemonMs
     const guestMs = firstReportedMs(out, ['guest_elapsed_ms'])
     const embedMs = firstReportedMs(out, ['embed_ms', 'embed_query'])
-    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, guest_elapsed_ms: guestMs, embed_ms: embedMs, lane_wait_ms: claimMs, post_claim_ms: postClaimMs, unattributed_ms: execMs === null ? postClaimMs : postClaimMs - execMs, ...lane } }
+    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, daemon_span_ms: daemonMs, guest_elapsed_ms: guestMs, embed_ms: embedMs, lane_wait_ms: claimMs, post_claim_ms: postClaimMs, unattributed_ms: execMs === null ? postClaimMs : postClaimMs - execMs, ...lane } }
 }
 
 function firstReportedMs(out, keys) {
@@ -2793,7 +2794,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             out = withCodesearchDualPathScope(codesearchDualScope, out)
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs))
-            else out = withDispatchWait(out, Date.now() - callStartedAtMs, claimedAtMs)
+            else out = withDispatchWait(out, Date.now() - callStartedAtMs, claimedAtMs, claimedAtMs !== null && typeof landedAtMs === 'number' ? landedAtMs - (callStartedAtMs + claimedAtMs) : null)
             if (out && typeof out === 'object' && out.instruction_unchanged === true && bodyCarriesInstructionHash(normalizedBody)) {
                 out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
             }
