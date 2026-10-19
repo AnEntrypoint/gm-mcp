@@ -2228,7 +2228,6 @@ function withStaleBundleNotice(verb, text) {
     if (!drift.stale) return text
     const withNewline = text.endsWith('\n') ? text : `${text}\n`
     const line = bundleStalenessAnnouncement(drift)
-    if (!line) return `${withNewline}bundle_stale: true\n`
     const block = yaml.dump({
         bundle_stale: true,
         bundle_served_version: drift.running_version,
@@ -2237,7 +2236,7 @@ function withStaleBundleNotice(verb, text) {
         bundle_installed_sha: drift.installed_sha256,
         bundle_reloadable: drift.reloadable === true,
     }, { lineWidth: 100 })
-    if (READ_ONLY_STATUS_VERBS.has(verb)) return `${withNewline}${block}\n`
+    if (!line || READ_ONLY_STATUS_VERBS.has(verb)) return `${withNewline}${block}\n`
     return `${withNewline}${block}\n${line}\n`
 }
 
