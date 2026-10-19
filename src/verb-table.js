@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 const numberLike = z.union([z.number(), z.string()])
 const booleanLike = z.union([z.boolean(), z.string()])
+const boolString = z.preprocess(v => v === 'true' ? true : v === 'false' ? false : v, z.boolean())
 const pathspec = z.union([z.string(), z.array(z.string())])
 
 export const EXEC_LANGS = ['nodejs', 'js', 'python', 'py', 'bash', 'sh', 'shell', 'powershell', 'ps1', 'deno', 'agent', 'claude']
@@ -107,14 +108,14 @@ const GIT_SCOPED_TYPES = {
     },
     git_diff: {
         range: z.string(), ref: z.string(), rev: z.string(),
-        staged: booleanLike, stat: booleanLike, limit: z.number(),
+        staged: boolString, stat: boolString, limit: z.number(),
         path: GIT_PATHSPEC, paths: GIT_PATHSPEC, files: GIT_PATHSPEC,
     },
     git_revert: { ref: z.string(), paths: z.array(z.string()) },
     git_cherry_pick: { rev: z.string(), ref: z.string() },
-    git_reset: { ref: z.string(), rev: z.string(), mode: z.string(), hard: booleanLike, paths: z.array(z.string()), files: z.array(z.string()) },
+    git_reset: { ref: z.string(), rev: z.string(), mode: z.string(), hard: boolString, paths: z.array(z.string()), files: z.array(z.string()) },
     git_checkout: { ref: z.string(), create: z.boolean(), path: GIT_PATHSPEC, paths: GIT_PATHSPEC, files: GIT_PATHSPEC },
-    git_merge: { ref: z.string(), ff_only: booleanLike, message: z.string() },
+    git_merge: { ref: z.string(), ff_only: boolString, message: z.string() },
     git_stash_pop: { ref: z.string() },
     git_stash_drop: { ref: z.string() },
     git_worktree_add: { ref: z.string(), rev: z.string(), commit: z.string(), start_point: z.string(), path: z.string(), create: z.boolean(), allowOutsideRoot: z.boolean() },
