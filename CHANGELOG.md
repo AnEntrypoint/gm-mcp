@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.190 - gm_codemode replies expose `.text`, and the generic gm call takes a verb's top-level arguments
+
+A gm_codemode verb call returned a plain string, so `r.text` read undefined. The reply is now a String object whose `.text` is the same text (`replyValue` in `src/codemode.js`); `return` still yields plain text. The generic `gm` call folds top-level keys that the named verb declares into its body (`verbShapedTool`), so `gm.gm({verb: "prd_list", status: "pending"})` is accepted like `gm.prd_list({...})`.
+
 ## 0.2.187 - a spool request that is already linked is never reported as failed
 
 `publishSpoolRequest` (`src/dispatch.js`) ran `removeIfPresent` in its `finally`, which rethrew any unlink error other than `ENOENT`. Once `fs.linkSync` had published the request into `in/<verb>/`, an `EPERM`, `EBUSY` or `EACCES` from removing the temp replaced the successful return, so a request already in the spool reported as failed. The cleanup is now `removeTemp`, which ignores every unlink error: a leftover `.tmp` name is harmless because the daemon claims only `.txt` requests. A failed link still rethrows its own error, since the cleanup no longer throws over it. `BUNDLE_VERSION` and `package.json` move to 0.2.187.
