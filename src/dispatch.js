@@ -12,7 +12,7 @@ import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessAnnouncement } from './bundle-drift.js'
 import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuedReply, setContinuationStopped } from './continuation.js'
 import { maybeStartDevSync } from './dev-sync.js'
-import { gitToplevel } from './git-adapter.js'
+import { gitToplevel, runGit } from './git-adapter.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { tableRow } from './verb-table.js'
 import { execFileSync } from './process-port.js'
@@ -2385,6 +2385,21 @@ const CI_STATUS_WAIT_DEFAULT_MS = 300000
 const CI_STATUS_WAIT_CEILING_MS = 900000
 const CI_STATUS_WAIT_POLL_MS = 15000
 const CI_STATUS_NON_TERMINAL = new Set(['pending', 'in_progress', 'queued', 'waiting', 'requested'])
+const CI_STATUS_ORIGIN_TIMEOUT_MS = 10000
+const GITHUB_REMOTE_PATH = /[:/]([^/:]+)\/([^/]+?)(?:\.git)?\/?$/
+
+function withCiStatusRepo(body, root) {
+    const dir = typeof body.cwd === 'string' && body.cwd.trim() ? body.cwd.trim() : root
+    const explicit = [body.github_repo, body.repo].find((value) => typeof value === 'string' && value.trim())
+    if (explicit) return { body: { ...body, github_repo: explicit.trim(), cwd: dir } }
+    const origin = runGit(dir, ['remote', 'get-url', 'origin'], CI_STATUS_ORIGIN_TIMEOUT_MS)
+    const match = origin.ok ? GITHUB_REMOTE_PATH.exec(origin.out) : null
+    if (!match) {
+        const found = origin.ok && origin.out ? `origin is ${origin.out}` : 'no origin remote'
+        return { error: `ci-status cannot resolve owner/name for ${dir} (${found}); pass github_repo as owner/name` }
+    }
+    return { body: { ...body, github_repo: `${match[1]}/${match[2]}`, cwd: dir } }
+}
 
 function ciStatusReplyRunStatus(reply) {
     if (typeof reply !== 'string') return undefined
@@ -2522,6 +2537,12 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (siblingRefusal) return `error: ${siblingRefusal}`
             normalizedBody = withAssertedInstructionHash(verb, fsReadRangeCanonicalBody(verb, fsReadProjectRelativeBody(verb, withDefaultK.body, cwd)))
         }
+    }
+
+    if (!resume_task && CI_STATUS_VERBS.has(verb) && normalizedBody !== undefined) {
+        const scoped = withCiStatusRepo(normalizedBody, root)
+        if (scoped.error) return `error: ${scoped.error}`
+        normalizedBody = scoped.body
     }
 
     let ownerTransport
