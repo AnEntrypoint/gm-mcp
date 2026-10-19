@@ -8,6 +8,11 @@ import { buildBundle, bundleVersion, srcSha256 } from './build.mjs'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const BUNDLE_VERSION = bundleVersion(repoRoot)
+const PACKAGE_VERSION = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")).version
+if (PACKAGE_VERSION !== BUNDLE_VERSION) {
+    console.error(`package.json version ${PACKAGE_VERSION} differs from src/bundle-version.js BUNDLE_VERSION ${BUNDLE_VERSION}: set both to the same release version in one commit`)
+    process.exit(1)
+}
 const binRel = 'bin/gm-mcp-server.js'
 const committedPath = path.join(repoRoot, binRel)
 const includedSrc = (process.env.GM_MCP_BUILD_INCLUDE || '').split(',').map(s => s.trim()).filter(Boolean)
