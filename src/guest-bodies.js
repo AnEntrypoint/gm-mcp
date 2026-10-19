@@ -162,7 +162,9 @@ export const GUEST_ACCEPTED_FIELDS = {
         "allowOutsideRoot",
         "allow_rewrite"
     ],
-    "git_worktree_prune": [],
+    "git_worktree_prune": [
+        "base"
+    ],
     "grep": [
         "pattern",
         "query",
