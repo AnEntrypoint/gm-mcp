@@ -28,7 +28,7 @@ const apply = args.includes('--apply');
 const explicitPrefixes = args.flatMap((arg, i) => (arg === '--prefix' && args[i + 1] ? [args[i + 1]] : []));
 
 if (!root || !Number.isFinite(capHours) || capHours < 0) {
-  console.error('usage: prune-scratch.mjs --root <dir under /config/tmp> [--cap-hours <n>=24] [--prefix <p>]... [--apply]');
+  console.error('usage: prune-scratch.mjs --root <dir under /config/tmp> [--cap-hours <n>=24] [--prefix <p>]... [--apply]\n  decision: unowned stale /config/tmp entries are reported (unowned_stale_total) and never removed; --prefix <p> is the opt-in removal.');
   process.exit(2);
 }
 
