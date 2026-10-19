@@ -2185,7 +2185,6 @@ function ownerHeaderRuntimeIdentity(root) {
         || typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)
         || !Array.isArray(slots) || !slots.some(value => value === hash)
         || slots.some(value => value !== null && value !== hash && value !== 'busy-dispatch-in-flight')
-        || status.pending_store_swaps?.gm
         || (Array.isArray(status.mixed_version_pools) && status.mixed_version_pools.length)) return null
     const project = readJsonFile(path.join(spoolDirOf(root), '.status.json'))
     if (project && (project.pid !== status.pid || !isFreshDaemonTimestamp(project.ts, Date.now()))) return null
