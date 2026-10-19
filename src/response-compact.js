@@ -539,6 +539,7 @@ export function omitRepeatedFaultStdout(response, outPath) {
             ...(result.wire_compacted || {}),
             omitted: [result.wire_compacted?.omitted, ...omitted].filter(Boolean).join(' '),
             full_payload_at: outPath,
+            full_payload_dispatch_id: response.dispatch_id ?? null,
             full_payload_via: WIRE_FULL_PAYLOAD_VIA,
         },
     }
@@ -619,6 +620,7 @@ export function compactWireResponse(response, outPath, receiptVerb = response?.v
         omitted: omitted.join(' '),
         shortened: shortened.join(' '),
         full_payload_at: outPath,
+        full_payload_dispatch_id: response.dispatch_id ?? null,
         full_payload_via: WIRE_FULL_PAYLOAD_VIA,
     })
     return out
