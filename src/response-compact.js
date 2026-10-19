@@ -199,7 +199,7 @@ export function withNoticeCodes(out) {
     return top
 }
 
-const PRD_LISTING_KEYS = new Set(['why'])
+const PRD_LISTING_KEYS = new Set(['why', 'hint'])
 
 const POOL_BRIEF_KEYS = new Set(['brief'])
 
