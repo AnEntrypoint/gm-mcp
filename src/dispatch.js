@@ -608,7 +608,7 @@ function withCheckoutCreateHint(verb, body, out) {
     if (!branch || !/exist/i.test(String(out.error ?? ''))) return out
     return {
         ...out,
-        hint: `branch "${branch}" already exists and was not moved. To bring it up to date, fast-forward it with git_merge or git_pull on "${branch}" instead of create:true.`,
+        hint: `branch "${branch}" already exists and was not moved. Leave it or delete it; this project publishes only to main.`,
     }
 }
 
@@ -2371,7 +2371,7 @@ function ownerHeaderRuntimeIdentity(root) {
     if (!status || !Number.isSafeInteger(status.pid) || pidAlive(status.pid) !== true
         || !isFreshDaemonTimestamp(status.ts, Date.now())
         || typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)
-        || !Array.isArray(slots) || !slots.some(value => value === hash || value === 'busy-dispatch-in-flight')
+        || !Array.isArray(slots)
         || slots.some(value => value !== null && value !== hash && value !== 'busy-dispatch-in-flight')
         || (Array.isArray(status.mixed_version_pools) && status.mixed_version_pools.length)) return null
     const project = readJsonFile(path.join(spoolDirOf(root), '.status.json'))
@@ -2422,6 +2422,8 @@ function bundleNoticeTail(verb, drift) {
         bundle_installed_version: drift.installed_version,
         bundle_installed_sha: drift.installed_sha256,
         bundle_reloadable: drift.reloadable === true,
+        bundle_action: drift.reloadable === true ? 'reload_pending' : 'none',
+        bundle_answer_from: 'served-bundle',
     }, { lineWidth: 100 })
     if (READ_ONLY_STATUS_VERBS.has(verb)) return block + '\n'
     const line = bundleStalenessAnnouncement(drift)
