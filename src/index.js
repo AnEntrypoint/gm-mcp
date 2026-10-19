@@ -16,6 +16,7 @@ import { installSpoolPort } from './spool-port.js'
 import { flagValue } from './argv.js'
 import { setServingTransport } from './bundle-drift.js'
 import { nodeSpoolPort } from './spool-port-node.js'
+import { inflightDispatchCount } from './dispatch.js'
 
 installSpoolPort(nodeSpoolPort)
 
@@ -73,6 +74,13 @@ function watchForStaleBundle({ handOver = null, transportKind = 'stdio', settled
     }, { transport: transportKind })
 }
 
+function exitIdleStaleRelay(state) {
+    const inflight = inflightDispatchCount()
+    if (inflight > 0) return { outcome: 'deferred', reason: 'dispatch-in-flight', dispatches_inflight: inflight }
+    appendDiagnostic('bundle-handover-stdio-relay-exit', { from: state.running_sha256 ?? null, to: state.installed_sha256 ?? null, pid: process.pid })
+    process.exit(0)
+}
+
 export async function main() {
     if (wantsHttpTransport()) {
         setServingTransport('http')
@@ -96,7 +104,7 @@ export async function main() {
     if (relayUrl) {
         setServingTransport('stdio-relay')
         recordRunningImage('stdio-relay', runningBundle())
-        watchForStaleBundle({ transportKind: 'stdio-relay' })
+        watchForStaleBundle({ transportKind: 'stdio-relay', handOver: exitIdleStaleRelay })
         const recover = () => ensureHttpSingleton({ port: defaultHttpPort(), wait: true, sweep: false }).then((started) => started?.url ?? null)
         return serveStdioRelay({ url: relayUrl, recover })
     }
@@ -115,4 +123,4 @@ export async function main() {
     runReleaseBridgeInBackground()
 }
 
-export { flagValue }
+export { flagValue }
