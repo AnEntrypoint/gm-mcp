@@ -323,8 +323,15 @@ function scanMatchesTotal(holder, sampleLength) {
     return Number.isFinite(declared) && declared > sampleLength ? declared : sampleLength
 }
 
-function renderMatchesKept(out, holder, kept, toYaml) {
+const SLIM_MATCH_HEADER_KEYS = ['dispatch_id', 'ok', 'verb', 'complete', 'complete_reason', 'exhaustive', 'count']
+
+function renderMatchesKept(out, holder, kept, toYaml, slim = false) {
     const keptMatches = holder.matches.slice(0, kept)
+    if (slim) {
+        const source = holder === out ? out : { ...out, ...out.data }
+        const header = Object.fromEntries(SLIM_MATCH_HEADER_KEYS.filter((key) => source[key] !== undefined).map((key) => [key, source[key]]))
+        return toYaml({ ...header, matches: keptMatches })
+    }
     return holder === out
         ? toYaml({ ...out, matches: keptMatches })
         : toYaml({ ...out, data: { ...out.data, matches: keptMatches } })
@@ -335,12 +342,12 @@ function matchesCutNotice(matchesReturned, matchesTotal, maxChars) {
     return `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\nmatches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
 }
 
-function largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice) {
+function largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice, slim = false) {
     let low = 0
     let high = holder.matches.length
     while (low < high) {
         const mid = Math.ceil((low + high) / 2)
-        const head = renderMatchesKept(out, holder, mid, toYaml)
+        const head = renderMatchesKept(out, holder, mid, toYaml, slim)
         if (head.length + buildNotice(mid, matchesTotal).length <= maxChars) low = mid
         else high = mid - 1
     }
@@ -357,7 +364,12 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
     if (holder) {
         matchesTotal = scanMatchesTotal(holder, holder.matches.length)
         matchesReturned = largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice)
-        head = renderMatchesKept(out, holder, matchesReturned, toYaml)
+        let slim = false
+        if (matchesReturned === 0 && holder.matches.length > 0) {
+            slim = true
+            matchesReturned = largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice, true)
+        }
+        head = renderMatchesKept(out, holder, matchesReturned, toYaml, slim)
     }
     const notice = buildNotice(matchesReturned, matchesTotal)
     const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
@@ -485,6 +497,8 @@ const SPOOL_COMPONENT_BYTE_LIMITS = {
     task: 200,
 }
 
+const WINDOWS_RESERVED_DEVICE_NAME = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i
+
 export function unsafeSpoolName(role, value) {
     if (typeof value !== 'string' || !value) return null
     if (value.includes('\0') || /[\r\n]/.test(value) || value === '.' || value === '..' || value.includes('/') || value.includes('\\')) {
@@ -495,16 +509,26 @@ export function unsafeSpoolName(role, value) {
     if (byteLength > byteLimit) {
         return `${role} is ${byteLength} UTF-8 bytes, exceeding its ${byteLimit}-byte spool component limit`
     }
+    const stem = value.split('.')[0].replace(/[ .]+$/, '')
+    if (WINDOWS_RESERVED_DEVICE_NAME.test(stem)) {
+        return `${role} ${JSON.stringify(value)} names a Windows reserved device (CON, PRN, AUX, NUL, COMn, LPTn), which cannot be a spool file name on win32`
+    }
     const found = UNEXPANDED_INTERPOLATION.exec(value)
     if (!found) return null
     return `${role} ${JSON.stringify(value)} still carries the unexpanded interpolation ${JSON.stringify(found[0])} -- the spool ABI is in/<verb>/<session_id>-<N>.txt, so this would land as a literal path component that no daemon ever claims; pass the expanded value`
 }
 
+const WINDOWS_MAX_PATH = 259
+
 function publishSpoolRequest(inDir, inPath, task, body) {
     const unsafe = unsafeSpoolName('task', task)
     if (unsafe) throw new Error(unsafe)
-    fs.mkdirSync(inDir, { recursive: true, mode: SPOOL_DIR_MODE })
     const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.tmp`)
+    const longest = Math.max(inPath.length, tempPath.length)
+    if (process.platform === 'win32' && longest > WINDOWS_MAX_PATH) {
+        throw new Error(`spool request path would be ${longest} characters, over the Windows MAX_PATH limit of ${WINDOWS_MAX_PATH}; move the project to a shorter root`)
+    }
+    fs.mkdirSync(inDir, { recursive: true, mode: SPOOL_DIR_MODE })
     try {
         fs.writeFileSync(tempPath, body, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
         fs.linkSync(tempPath, inPath)
@@ -1606,6 +1630,7 @@ function waitForSpoolChange(outDir, outPath, waitMs, fallbackMs, signal, exactFa
     })
 }
 
+const GIT_LANE_WAIT_MS = 600000
 const EXEC_FAMILY_VERBS = ['exec_js', 'nodejs', 'javascript', 'node', 'js', 'bash', 'sh', 'shell', 'zsh', 'python', 'py', 'powershell', 'ps1', 'ssh', 'go', 'rust', 'c', 'cpp', 'java', 'deno']
 
 const SSH_OBJECT_BODY = 'ssh'
@@ -2114,7 +2139,7 @@ function carriedNoFailure(out) {
         && (!isPlainObject(out.data) || carriedNoFailure(out.data))
 }
 
-const DISPATCH_WAIT_DISCLOSED_AT_MS = 5000
+const DISPATCH_WAIT_DISCLOSED_AT_MS = 250
 
 function withDispatchWait(out, waitedMs, claimedAtMs) {
     if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !isPlainObject(out)) return out
@@ -2131,7 +2156,7 @@ function withDispatchWait(out, waitedMs, claimedAtMs) {
     const execMs = executed === null ? postClaimMs : Math.min(executed, postClaimMs)
     const guestMs = firstReportedMs(out, ['guest_elapsed_ms'])
     const embedMs = firstReportedMs(out, ['embed_ms', 'embed_query'])
-    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, guest_elapsed_ms: guestMs, embed_ms: embedMs, lane_wait_ms: claimMs, unattributed_ms: waitedMs - admissionMs - claimMs - execMs, ...lane } }
+    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, guest_elapsed_ms: guestMs, embed_ms: embedMs, lane_wait_ms: claimMs, post_claim_ms: postClaimMs, unattributed_ms: postClaimMs - execMs, ...lane } }
 }
 
 function firstReportedMs(out, keys) {
@@ -2235,16 +2260,11 @@ const VERBATIM_REPLY_VERBS = new Set(['fs_read', 'result', 'gm_result'])
 
 const noticedBundleKeys = new Set()
 
-function withStaleBundleNotice(verb, text) {
-    if (VERBATIM_REPLY_VERBS.has(verb)) return text
-    if (typeof text !== 'string' || text === '') return text
-    const drift = bundleDrift()
-    if (!drift.stale) return text
-    const key = `${drift.installed_sha256 ?? ''}|${drift.refusal_code ?? ''}|${drift.running_sha256 ?? ''}`
-    if (noticedBundleKeys.has(key)) return text
-    noticedBundleKeys.add(key)
-    const withNewline = text.endsWith('\n') ? text : `${text}\n`
-    const line = bundleStalenessAnnouncement(drift)
+function bundleNoticeKeyOf(drift) {
+    return (drift.installed_sha256 ?? '') + '|' + (drift.refusal_code ?? '') + '|' + (drift.running_sha256 ?? '')
+}
+
+function bundleNoticeTail(verb, drift) {
     const block = yaml.dump({
         bundle_stale: true,
         bundle_served_version: drift.running_version,
@@ -2253,8 +2273,28 @@ function withStaleBundleNotice(verb, text) {
         bundle_installed_sha: drift.installed_sha256,
         bundle_reloadable: drift.reloadable === true,
     }, { lineWidth: 100 })
-    if (!line || READ_ONLY_STATUS_VERBS.has(verb)) return `${withNewline}${block}\n`
-    return `${withNewline}${block}\n${line}\n`
+    if (READ_ONLY_STATUS_VERBS.has(verb)) return block + '\n'
+    const line = bundleStalenessAnnouncement(drift)
+    return line ? block + '\n' + line + '\n' : block + '\n'
+}
+
+function pendingBundleNoticeReserve(verb) {
+    if (VERBATIM_REPLY_VERBS.has(verb)) return 0
+    const drift = bundleDrift()
+    if (!drift.stale || noticedBundleKeys.has(bundleNoticeKeyOf(drift))) return 0
+    return bundleNoticeTail(verb, drift).length + 1
+}
+
+function withStaleBundleNotice(verb, text) {
+    if (VERBATIM_REPLY_VERBS.has(verb)) return text
+    if (typeof text !== 'string' || text === '') return text
+    const drift = bundleDrift()
+    if (!drift.stale) return text
+    const key = bundleNoticeKeyOf(drift)
+    if (noticedBundleKeys.has(key)) return text
+    noticedBundleKeys.add(key)
+    const withNewline = text.endsWith('\n') ? text : text + '\n'
+    return withNewline + bundleNoticeTail(verb, drift)
 }
 
 function spoolDiagnostics(spoolDir, verb, requestNumber, outPath) {
@@ -2380,7 +2420,7 @@ async function runCiStatusWithWait(args, signal, responseValueObserver) {
 }
 
 export async function gmDispatch(args, signal, responseValueObserver) {
-    if (typeof args?.max_chars === 'number' && args.max_chars > 2 * CONTINUATION_RESERVE_CHARS) args = { ...args, max_chars: args.max_chars - CONTINUATION_RESERVE_CHARS, requested_max_chars: args.max_chars }
+    if (typeof args?.max_chars === 'number' && args.max_chars > 2 * CONTINUATION_RESERVE_CHARS && !VERBATIM_REPLY_VERBS.has(args?.verb)) args = { ...args, max_chars: args.max_chars - CONTINUATION_RESERVE_CHARS, requested_max_chars: args.max_chars }
     if (args?.verb === CONTINUATION_STOP_VERB) {
         const key = continuationKeyOf(args)
         setContinuationStopped(key, true)
@@ -2501,7 +2541,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const requestedPollTimeoutMs = resume_task ? timeoutMilliseconds(timeout_seconds, DEFAULT_TIMEOUT_SECONDS) : pollTimeoutMs(verb, raw_body, timeout_seconds)
     const pollCeilingMs = pollTimeoutCeilingMs()
     const callerLaneWaitMs = callerLaneWait(normalizedBody)
-    const timeoutMs = Math.min(Math.max(requestedPollTimeoutMs, callerLaneWaitMs ?? 0), pollCeilingMs)
+    const laneBudgetMs = callerLaneWaitMs ?? (/^git[_-]/.test(verb) ? GIT_LANE_WAIT_MS : null)
+    const timeoutMs = Math.min(Math.max(requestedPollTimeoutMs, laneBudgetMs ?? 0), pollCeilingMs)
     const execMs = EXEC_FAMILY_VERBS.includes(verb) ? execLimitMs(verb, raw_body, timeout_seconds) : null
 
     if (!resume_task) {
@@ -2521,7 +2562,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         } else {
             const { lane_wait_ms: _publicLaneWait, ...callerBody } = normalizedBody
             const fullBody = { ...callerBody, session_id }
-            fullBody._agentplug_lane_wait_ms = callerLaneWaitMs === null ? timeoutMs : Math.min(callerLaneWaitMs, timeoutMs)
+            fullBody._agentplug_lane_wait_ms = laneBudgetMs === null ? timeoutMs : Math.min(laneBudgetMs, timeoutMs)
             if (verb === 'instruction') {
                 const leases = leaseSessionsFor(root)
                 if (leases) fullBody._lease_sessions = leases.filter(lease => lease.live).map(({ session_id: leaseSession, pid }) => ({ session_id: leaseSession, pid }))
@@ -2559,6 +2600,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 if (!collides) out = { ...rest, ...data }
             }
             out = withExecExitVerdict(verb, out)
+            if (isPlainObject(out) && out.background === true && !('poll_timeout_ceiling_ms' in out)) out = { ...out, poll_timeout_ceiling_ms: pollCeilingMs }
             out = liftStdoutFault(out)
             out = withCodesearchCompleteness(verb, out)
             if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
@@ -2590,8 +2632,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (LATEST_ONLY_VERBS.has(verb)) pruneSupersededListings(outDir, verb, session_id, outPath, callStartedAtMs)
             const replyCap = replyMaxChars(max_chars)
             const spillPath = `${outPath}.reply.txt`
-            if (rendered.length > replyCap) fs.writeFileSync(spillPath, rendered)
-            return capReplyText(rendered, replyCap, spillPath, out, toYaml, spillNote, requested_max_chars ?? replyCap)
+            if (rendered.length > replyCap) fs.writeFileSync(spillPath, rendered, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
+            return capReplyText(rendered, Math.max(0, replyCap - pendingBundleNoticeReserve(verb)), spillPath, out, toYaml, spillNote, requested_max_chars ?? replyCap)
         } catch (e) {
             const failed = { error: `response file was not valid JSON: ${e.message}`, task: requestNumber, out_path: outPath }
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs)) : failed)
