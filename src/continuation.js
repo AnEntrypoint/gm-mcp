@@ -8,6 +8,8 @@ const DEFAULT_IDLE_NOTIFY_MS = 300000
 const MONITOR_TICK_MS = 15000
 const RELAY_KEY = 'relay'
 const PENDING_LINE = /^\s*prd_pending_count:\s*(\d+)\s*$/m
+const PRD_LIST_VERB = /^verb:\s*prd-list\s*$/m
+const PRD_LIST_TOTAL = /^total:\s*(\d+)\s*$/m
 const CONTINUATION_HEADS = /^continuation:\s*$/gm
 const COMPLETE_LINE = /^\s*complete:\s*true\s*$/m
 
@@ -57,7 +59,7 @@ function parsedJsonOf(text) {
 export function continuedReply(key, text, now = Date.now()) {
     if (typeof text !== 'string') return text
     const entry = entryFor(key)
-    const seen = PENDING_LINE.exec(text)
+    const seen = PENDING_LINE.exec(text) ?? (PRD_LIST_VERB.test(text) ? PRD_LIST_TOTAL.exec(text) : null)
     if (seen) entry.pending_rows = Number(seen[1])
     const json = parsedJsonOf(text)
     const done = json?.value?.complete === true || json?.value?.data?.complete === true || COMPLETE_LINE.test(text)
