@@ -200,6 +200,20 @@ export function fsReadProjectRelativeBody(verb, body, cwd) {
     return { ...body, path: rel.split(path.sep).join('/') }
 }
 
+const SIBLING_ROOT_READ_VERBS = ['fs_stat', 'fs_readdir']
+
+export function outsideRootReadRefusal(verb, body, cwd) {
+    if (!SIBLING_ROOT_READ_VERBS.includes(verb) || !isPlainObject(body)) return null
+    if (typeof body.path !== 'string' || !path.isAbsolute(body.path)) return null
+    if (body.allowOutsideRoot === true || body.allow_outside_root === true) return null
+    const root = resolveDispatchRoot(cwd).root
+    if (!root) return null
+    const rel = path.relative(root, path.resolve(body.path))
+    const outside = rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)
+    if (!outside) return null
+    return `${verb} path ${body.path} is outside the project root ${root}: pass allowOutsideRoot:true with the same path to read this sibling root (a read-only verb; allowOutsideRoot never applies to fs_write)`
+}
+
 const VERBATIM_HEADER_SCAN_LINES = 12
 
 export function fsWriteEnvelopeDiagnostic(verb, body) {
@@ -2504,6 +2518,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             codesearchDualScope = dualRouted.scope
             const withDefaultK = withCodesearchDefaultK(verb, dualRouted.body)
             codesearchKDefaulted = withDefaultK.defaulted
+            const siblingRefusal = outsideRootReadRefusal(verb, withDefaultK.body, cwd)
+            if (siblingRefusal) return `error: ${siblingRefusal}`
             normalizedBody = withAssertedInstructionHash(verb, fsReadRangeCanonicalBody(verb, fsReadProjectRelativeBody(verb, withDefaultK.body, cwd)))
         }
     }
