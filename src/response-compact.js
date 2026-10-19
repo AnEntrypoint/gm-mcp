@@ -531,6 +531,13 @@ export function omitRepeatedFaultStdout(response, outPath) {
     }
 }
 
+function codesearchEnvelopeDuplicates(response, data) {
+    const dropped = []
+    if (typeof response.complete === 'boolean' && data.complete === response.complete) dropped.push('complete')
+    if (typeof data.file_source === 'string' && data.file_source_detail !== undefined) dropped.push('file_source_detail')
+    return dropped
+}
+
 export function compactWireResponse(response, outPath, receiptVerb = response?.verb) {
     if (!isPlainObject(response)) return response
     const gitReceiptContext = WIRE_GIT_COMMIT_VERBS.has(receiptVerb)
@@ -568,6 +575,13 @@ export function compactWireResponse(response, outPath, receiptVerb = response?.v
         else if (WIRE_HIT_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_CODESEARCH_CHANNEL_KEYS.has(key) ? WIRE_CODESEARCH_CHANNEL_INLINE_MAX : WIRE_HITS_INLINE_MAX).map(excerptRow)
         else if (WIRE_ROW_ARRAY_KEYS.has(key) && Array.isArray(next)) next = next.map(excerptRow)
         else if (committedGitReceipt && WIRE_GIT_EXCLUSION_KEYS.has(key) && Array.isArray(next)) next = next.slice(0, WIRE_GIT_EXCLUSIONS_INLINE_MAX)
+        if (key === 'data' && isPlainObject(next) && response.verb === 'codesearch') {
+            const dropped = codesearchEnvelopeDuplicates(response, next)
+            if (dropped.length) {
+                omitted.push(...dropped.map(k => `data.${k}`))
+                next = omitKeys(next, dropped)
+            }
+        }
         if (key === 'data' && isPlainObject(next)) {
             const inner = compactWireResponse(next, outPath, gitReceiptContext ? receiptVerb : null)
             if (inner !== next) {

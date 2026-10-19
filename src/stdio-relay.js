@@ -14,6 +14,7 @@ const SSE_CONTENT_TYPE = 'text/event-stream'
 const SSE_DATA_PREFIX = 'data:'
 const RETRY_DELAYS_MS = [250, 1000, 2000, 4000]
 const TRANSIENT_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_CLOSED'])
+const NOT_SENT_CODES = new Set(['ECONNREFUSED', 'UND_ERR_CONNECT_TIMEOUT'])
 const LOCAL_INIT_ID = 'gm-relay-local-init'
 const RELAY_BUDGET_MS = (Number(process.env.GM_CODEMODE_TIMEOUT_MS) > 0 ? Number(process.env.GM_CODEMODE_TIMEOUT_MS) : DEFAULT_CODEMODE_TIMEOUT_MS) + 5000
 const HEALTH_PROBE_MS = 1500
@@ -103,6 +104,7 @@ async function postWithRetry(url, line, method) {
     for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
         if (attempt > 0) {
             if (!isTransient(failure)) break
+            if (method === 'tools/call' && !NOT_SENT_CODES.has(failure?.cause?.code ?? failure?.code)) break
             await pause(RETRY_DELAYS_MS[attempt - 1])
         }
         try {
@@ -191,7 +193,9 @@ async function forwardLine(line, recover, state) {
     try {
         request = JSON.parse(line)
     } catch (error) {
-        writeFrame(errorFrame(null, PARSE_ERROR_CODE, `gm-mcp relay: frame is not JSON: ${describeError(error)}`))
+        const diagnosticId = randomUUID()
+        appendDiagnostic('stdio-relay-parse-error', { diagnostic_id: diagnosticId, error: describeError(error) })
+        writeFrame(errorFrame(null, PARSE_ERROR_CODE, `gm-mcp relay: frame is not JSON: ${describeError(error)}. Diagnostic id ${diagnosticId} (log ${logFilePath()}, event stdio-relay-parse-error).`))
         return
     }
     const expectsReply = request && typeof request === 'object' && request.id !== undefined && request.id !== null

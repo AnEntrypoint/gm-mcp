@@ -11,7 +11,7 @@ import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, holderIsOwn
 import { reapReport, formatFindings } from './leak-reaper.js'
 import { formatLeakWatchLine, formatOrphanLine, formatOrphanTreeLine, leakWatchReport } from './leak-watch.js'
 import { attributePid, globalLedgerPath } from './child-ledger.js'
-import { logFilePath } from './server-log.js'
+import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 
 function repeatedFlag(name) {
     const values = []
@@ -172,7 +172,9 @@ function parseDispatchArgv(argv) {
 }
 
 async function dispatchCommand() {
-    await ensureHttpSingleton({ port: defaultHttpPort(), wait: false }).catch(() => {})
+    await ensureHttpSingleton({ port: defaultHttpPort(), wait: false }).catch((error) => {
+        appendDiagnostic('dispatch-singleton-failed', { error: describeError(error) })
+    })
 
     const argv = process.argv.slice(3)
     if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {

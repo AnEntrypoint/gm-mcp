@@ -8,6 +8,7 @@ const POLL_INTERVAL_MS = 50
 const WATCH_SILENT_MS = 1000
 const RENAME_BACKOFF_MS = [10, 20, 40, 80, 160, 320]
 const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY'])
+const DISK_FULL_CODES = new Set(['ENOSPC', 'EDQUOT'])
 const TIMEOUT_MARGIN_MS = 5000
 const VERB_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,254}$/
 const SESSION_PATTERN = /^[A-Za-z0-9_.-]{1,150}$/
@@ -70,11 +71,12 @@ async function submitRequest(inDir, name, text) {
     fs.mkdirSync(inDir, { recursive: true, mode: OWNER_DIR_MODE })
     const tempPath = path.join(inDir, `.${name}.${process.pid}.tmp`)
     const finalPath = path.join(inDir, `${name}.txt`)
-    fs.writeFileSync(tempPath, text, { encoding: 'utf8', flag: 'wx', mode: OWNER_FILE_MODE })
     try {
+        fs.writeFileSync(tempPath, text, { encoding: 'utf8', flag: 'wx', mode: OWNER_FILE_MODE })
         await renameIntoPlace(tempPath, finalPath)
     } catch (error) {
         fs.rmSync(tempPath, { force: true })
+        if (DISK_FULL_CODES.has(error.code)) throw spoolError('disk-full', `spool request not written: the disk is full (${error.code}); free space and resubmit`, { path: finalPath })
         throw error
     }
 }

@@ -1,12 +1,13 @@
 import { isPlainObject } from './plain-object.js';
 import { agentplugDir } from './paths.js'
-import { execFileSync, spawn } from './process-port.js'
+import { execFile, spawn } from './process-port.js'
 import { classifyGmServerCommand } from './gm-cmdline.js'
 import { readProcessTable } from './process-table.js'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 import { pidAlive } from './dispatch.js'
 import { portListenerState } from './ports.js'
 import { recordChild } from './child-ledger.js'
@@ -175,10 +176,12 @@ function childStdio() {
 export function spawnServerProcess({ port = defaultHttpPort(), host = DEFAULT_HOST } = {}) {
     const entry = serverEntryPath()
     const { stdio, fd } = childStdio()
+    const env = { ...process.env, GM_MCP_TRANSPORT: 'http', GM_MCP_NO_HTTP_SINGLETON: '1' }
+    delete env.GM_MCP_HANDOVER
     const child = spawn(process.execPath, [entry, '--http', '--port', String(port), '--host', String(host)], {
         cwd: homedir(),
         ...hiddenDetachedOptions({ stdio }),
-        env: { ...process.env, GM_MCP_TRANSPORT: 'http', GM_MCP_NO_HTTP_SINGLETON: '1' },
+        env,
     })
     if (fd !== null) closeSync(fd)
     child.on('error', (error) => {
@@ -288,17 +291,27 @@ export async function holderIsOwn(port, pid) {
     return (await recordedServerPid(readStateFile(instanceFilePath(port), port), readStateFile(supervisorStateFilePath(port), port), port)) === Number(pid)
 }
 
-export function establishedConnectionCount(port) {
+export async function establishedConnectionCount(port) {
     const wanted = Number(port)
     if (!Number.isInteger(wanted) || wanted <= 0) return null
-    const locals = establishedLocalPorts()
+    const locals = await establishedLocalPorts()
     if (locals === null) return null
     return locals.filter((local) => local === wanted).length
 }
 
-function establishedLocalPorts() {
+const execFileAsync = promisify(execFile)
+
+async function execFileText(file, args, options) {
+    try {
+        return (await execFileAsync(file, args, { encoding: 'utf8', ...options })).stdout
+    } catch {
+        return null
+    }
+}
+
+async function establishedLocalPorts() {
     if (process.platform !== 'win32') {
-        const viaSs = establishedLocalPortsViaSs()
+        const viaSs = await establishedLocalPortsViaSs()
         if (viaSs !== null) return viaSs
     }
     return establishedLocalPortsViaNetstat()
@@ -309,17 +322,9 @@ function localPortOf(address) {
     return match === null ? null : Number(match[1])
 }
 
-function establishedLocalPortsViaSs() {
-    let text = ''
-    try {
-        text = execFileSync('ss', ['-Htn', 'state', 'established'], {
-            encoding: 'utf8',
-            timeout: 10_000,
-            stdio: ['ignore', 'pipe', 'pipe'],
-        })
-    } catch {
-        return null
-    }
+async function establishedLocalPortsViaSs() {
+    const text = await execFileText('ss', ['-Htn', 'state', 'established'], { timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] })
+    if (text === null) return null
     const locals = []
     for (const line of text.split('\n')) {
         const fields = line.trim().split(/\s+/)
@@ -331,18 +336,9 @@ function establishedLocalPortsViaSs() {
     return locals
 }
 
-function establishedLocalPortsViaNetstat() {
-    let text = ''
-    try {
-        text = execFileSync('netstat', ['-an'], {
-            encoding: 'utf8',
-            windowsHide: true,
-            timeout: 10_000,
-            stdio: ['ignore', 'pipe', 'pipe'],
-        })
-    } catch {
-        return null
-    }
+async function establishedLocalPortsViaNetstat() {
+    const text = await execFileText('netstat', ['-an'], { windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] })
+    if (text === null) return null
     return netstatEstablishedLocalPorts(text, process.platform === 'win32')
 }
 
@@ -368,32 +364,28 @@ export function netstatEstablishedLocalPorts(text, win) {
     return locals.length === 0 ? null : locals
 }
 
-export function parentPidOf(pid) {
+export async function parentPidOf(pid) {
     const wanted = Number(pid)
     if (!Number.isInteger(wanted) || wanted <= 0) return null
-    try {
-        if (process.platform === 'win32') {
-            const text = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${wanted}'; if ($p) { $p.ParentProcessId }`], {
-                encoding: 'utf8',
-                windowsHide: true,
-                timeout: 15_000,
-                stdio: ['ignore', 'pipe', 'pipe'],
-            })
-            const fields = text.trim().split(/\s+/).filter(Boolean)
-            const parsed = Number.parseInt(fields[fields.length - 1] ?? '', 10)
-            return Number.isInteger(parsed) && parsed > 0 ? parsed : null
-        }
-        const text = execFileSync('ps', ['-o', 'ppid=', '-p', String(wanted)], {
-            encoding: 'utf8',
+    if (process.platform === 'win32') {
+        const text = await execFileText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${wanted}'; if ($p) { $p.ParentProcessId }`], {
             windowsHide: true,
-            timeout: 10_000,
+            timeout: 15_000,
             stdio: ['ignore', 'pipe', 'pipe'],
         })
-        const parsed = Number.parseInt(text.trim(), 10)
+        if (text === null) return null
+        const fields = text.trim().split(/\s+/).filter(Boolean)
+        const parsed = Number.parseInt(fields[fields.length - 1] ?? '', 10)
         return Number.isInteger(parsed) && parsed > 0 ? parsed : null
-    } catch {
-        return null
     }
+    const text = await execFileText('ps', ['-o', 'ppid=', '-p', String(wanted)], {
+        windowsHide: true,
+        timeout: 10_000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    if (text === null) return null
+    const parsed = Number.parseInt(text.trim(), 10)
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null
 }
 
 function signalRetiredPid(port, pid, reason, signal) {
@@ -496,9 +488,9 @@ export async function reapOrphanedHttpInstances({ now = Date.now() } = {}) {
         if (Number(instance.supervisor_pid ?? 0) <= 0) continue
         if (pidAlive(pid) !== true) continue
         if (liveSupervisorPid(port, instance, now) !== null) continue
-        const parentPid = parentPidOf(pid)
+        const parentPid = await parentPidOf(pid)
         if (parentPid === null || pidAlive(parentPid) !== false) continue
-        const attached = establishedConnectionCount(port)
+        const attached = await establishedConnectionCount(port)
         if (attached !== 0) {
             appendDiagnostic('http-instance-orphan-attached', { port, pid, connections: attached, parent_pid: parentPid })
             continue
@@ -545,7 +537,7 @@ export async function allocateHttpPort({ preferred = null, from = PORT_POOL_FROM
     return null
 }
 
-export function listHttpSupervisors({ processes = null, platform = process.platform, exec = execFileSync } = {}) {
+export function listHttpSupervisors({ processes = null, platform = process.platform, exec = undefined } = {}) {
     const table = Array.isArray(processes) ? processes : readProcessTable({ platform, exec })
     const rows = []
     for (const row of table) {
@@ -589,7 +581,7 @@ function dupeReapEnabled() {
     return !(value !== null && OFF_VALUES.has(value))
 }
 
-export function retireDuplicateHttpSupervisors({ processes = null, now = Date.now(), signalPid = signalSupervisorPid, dryRun = false, platform = process.platform, exec = execFileSync } = {}) {
+export function retireDuplicateHttpSupervisors({ processes = null, now = Date.now(), signalPid = signalSupervisorPid, dryRun = false, platform = process.platform, exec = undefined } = {}) {
     if (!dupeReapEnabled()) return []
     const rows = listHttpSupervisors({ processes, platform, exec })
     const retired = []

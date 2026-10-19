@@ -201,7 +201,7 @@ await test('an unreadable ancestor leaves the client question unmeasured, so not
         row(liveServerStandInPid, process.pid, `${NODE} ${ENTRY}`, now - 5_000),
         row(process.pid, 1, '', now - 10_000),
     ]
-    const chain = liveMcpClientInParentChain(liveServerStandInPid, process.pid, table)
+    const chain = await liveMcpClientInParentChain(liveServerStandInPid, process.pid, table)
     assert.equal(chain.value, null)
     const findings = await assessUnattributedServers({ roots: [root], processes: table, now })
     const finding = findings.find((entry) => entry.pid === liveServerStandInPid)
