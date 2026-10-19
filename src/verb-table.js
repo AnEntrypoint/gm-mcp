@@ -301,7 +301,7 @@ const CODESEARCH_BODY = {
         k: { type: 'integer', aliases: ['max_results', 'maxResults', 'limit', 'head_limit'], description: 'Result cap. Defaults to 50 for literal, regex and filename (the reply then reports count, shown and a hint); 0 means unlimited for those modes (refused for dual); conflicting values are refused.' },
         max_matches: { type: 'integer', description: 'Match cap.' },
         max_files: { type: 'integer', description: 'File cap.' },
-        max_chars: { type: 'integer', description: 'Byte cap on returned text.' },
+        max_chars: { type: 'integer', description: 'Character cap on returned text. Unset, the whole-reply cap applies (default 24000).' },
         timeout_ms: { type: 'integer', description: 'Scan budget in milliseconds.' },
         path: { type: 'string', aliases: ['paths', 'files'], description: 'Scopes the scan to a subtree; dual applies it to its ranked rows and its literal fallback.' },
         root: { type: 'string', aliases: ['projectPath', 'cwd'], description: 'Searches another project.' },
