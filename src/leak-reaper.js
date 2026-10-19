@@ -371,7 +371,11 @@ function safeEntryPath() {
 
 async function retirePid(pid, { signal = 'SIGTERM' } = {}) {
     try {
-        process.kill(Number(pid), signal)
+        if (process.platform === 'win32') {
+            execFileSync('taskkill', ['/PID', String(Number(pid)), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        } else {
+            process.kill(Number(pid), signal)
+        }
         return true
     } catch {
         return false
