@@ -111,7 +111,7 @@ sha256 only when that moved:
   `installed_version`, `installed_sha256`, `stale`, `reloadable`, `refusal`),
   and `gm-mcp http-status` prints it.
 - Every dispatch reply carries one line naming both versions, so the mismatch
-  is visible without asking. `fs_read`, `result` and `gm_result` are the
+  is visible without asking. `fs_read` and `gm_result` are the
   exception: their replies are file content handed back byte for byte, and a
   line appended there is not a note, it is a different file.
 
