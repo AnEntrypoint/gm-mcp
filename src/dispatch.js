@@ -302,6 +302,40 @@ function fsReadUnrangedPage(out, inlineMax) {
     }
 }
 
+function fsReadFitReply(out, replyCap, toYaml) {
+    if (!isPlainObject(out) || out.verb !== 'fs_read') return out
+    const key = typeof out.data === 'string' ? 'data' : typeof out.content === 'string' ? 'content' : null
+    if (key === null || renderVerbatimFileText(out, toYaml).length <= replyCap) return out
+    const lines = out[key].length === 0 ? [] : out[key].replace(/\n$/, '').split('\n')
+    if (lines.length === 0) return out
+    const start = Number.isFinite(Number(out.start_line)) ? Number(out.start_line) : 1
+    const total = Number.isFinite(Number(out.total_lines)) ? Number(out.total_lines) : start - 1 + lines.length
+    const cutAt = (count) => {
+        const cut = count < lines.length
+        return {
+            ...out,
+            [key]: lines.slice(0, count).join('\n'),
+            start_line: start,
+            end_line: start + count - 1,
+            returned_lines: count,
+            total_lines: total,
+            has_more_lines: cut,
+            truncated_at_bytes: cut,
+            truncated: cut || out.truncated === true,
+            ...(isPlainObject(out.returned_range) ? { returned_range: { start_line: start, end_line: start + count - 1 } } : {}),
+            ...(cut ? { next_start_line: start + count } : {}),
+        }
+    }
+    let low = 1
+    let high = lines.length
+    while (low < high) {
+        const mid = Math.ceil((low + high) / 2)
+        if (renderVerbatimFileText(cutAt(mid), toYaml).length <= replyCap) low = mid
+        else high = mid - 1
+    }
+    return cutAt(low)
+}
+
 function applyFsReadRangeFallbackRaw(verb, body, out, inlineMax) {
     if (verb !== 'fs_read') return out
     if (!isPlainObject(out)) return out
@@ -2694,13 +2728,14 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 }
                 out = isPlainObject(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
             }
-            const rendered = (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
-            const spillNote = verb === 'fs_read' ? fsReadSpillNote(out, rendered) : ''
-            if (LATEST_ONLY_VERBS.has(verb)) pruneSupersededListings(outDir, verb, session_id, outPath, callStartedAtMs)
             const replyCap = replyMaxChars(max_chars)
+            const fitted = verb === 'fs_read' ? fsReadFitReply(out, replyCap, toYaml) : out
+            const rendered = (verb === 'fs_read' ? renderVerbatimFileText(fitted, toYaml) : undefined) ?? toYaml(fitted)
+            const spillNote = verb === 'fs_read' ? fsReadSpillNote(fitted, rendered) : ''
+            if (LATEST_ONLY_VERBS.has(verb)) pruneSupersededListings(outDir, verb, session_id, outPath, callStartedAtMs)
             const spillPath = `${outPath}.reply.txt`
             if (rendered.length > replyCap) fs.writeFileSync(spillPath, rendered)
-            return capReplyText(rendered, replyCap, spillPath, out, toYaml, spillNote, requested_max_chars ?? replyCap)
+            return capReplyText(rendered, replyCap, spillPath, fitted, toYaml, spillNote, requested_max_chars ?? replyCap)
         } catch (e) {
             const failed = { error: `response file was not valid JSON: ${e.message}`, task: requestNumber, out_path: outPath }
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs)) : failed)
