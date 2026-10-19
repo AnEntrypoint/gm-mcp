@@ -1836,6 +1836,7 @@ function timeoutInputDiagnostic(verb, raw_body, timeout_seconds) {
     if (timeout_seconds !== undefined && timeout_seconds !== null && timeout_seconds !== '') {
         const seconds = Number(timeout_seconds)
         if (!Number.isFinite(seconds)) return 'timeout_seconds must be a finite number of seconds'
+        if (seconds <= 0) return `timeout_seconds must be a positive number of seconds (got ${timeout_seconds})`
         const milliseconds = seconds * 1000
         const bound = Math.min(MAX_TIMER_TIMEOUT_MS, Math.max(pollTimeoutCeilingMs(), EXEC_HARD_CEILING_MS))
         if (seconds > 0 && (!Number.isSafeInteger(milliseconds) || milliseconds > bound)) {
@@ -2363,6 +2364,18 @@ function rememberDeliveredInstructionHash(verb, parsed, root, session_id) {
 
 const ownerHeaderCapabilityByRuntime = new Map()
 const OWNER_HEADER_CAPABILITY_CACHE_MAX = 64
+const OWNER_PROBE_DEADLINE_MS = 30000
+
+function boundedOwnerProbe(probe, root, session_id) {
+    let timer
+    const stalled = new Promise(resolve => {
+        timer = setTimeout(() => {
+            appendDiagnostic('owner-transport-probe-stall', { root, session_id, after_ms: OWNER_PROBE_DEADLINE_MS })
+            resolve('unverified')
+        }, OWNER_PROBE_DEADLINE_MS)
+    })
+    return Promise.race([probe, stalled]).finally(() => clearTimeout(timer))
+}
 
 function ownerHeaderRuntimeIdentity(root) {
     const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
@@ -2398,7 +2411,7 @@ async function plainTextOwnerTransport(root, session_id, signal) {
         if (response?.ok === true && response.timed_out !== true) return 'legacy-unverified'
         return 'unverified'
     }
-    const pending = probe()
+    const pending = boundedOwnerProbe(probe(), root, session_id)
     if (before) {
         if (ownerHeaderCapabilityByRuntime.size >= OWNER_HEADER_CAPABILITY_CACHE_MAX) {
             ownerHeaderCapabilityByRuntime.delete(ownerHeaderCapabilityByRuntime.keys().next().value)
@@ -2804,7 +2817,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             out = withCodesearchDualPathScope(codesearchDualScope, out)
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs))
-            else out = withDispatchWait(out, Date.now() - callStartedAtMs, claimedAtMs, claimedAtMs !== null && typeof landedAtMs === 'number' ? landedAtMs - (callStartedAtMs + claimedAtMs) : null)
+            else if (full_response) out = withDispatchWait(out, Date.now() - callStartedAtMs, claimedAtMs, claimedAtMs !== null && typeof landedAtMs === 'number' ? landedAtMs - (callStartedAtMs + claimedAtMs) : null)
             if (out && typeof out === 'object' && out.instruction_unchanged === true && bodyCarriesInstructionHash(normalizedBody)) {
                 out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
             }
