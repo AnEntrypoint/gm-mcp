@@ -192,7 +192,9 @@ async function dispatchCommand() {
 
     const parsed = parseDispatchArgv(argv)
     if (parsed.usageError) {
-        console.error(`${parsed.usageError} usage_id=usage-${process.pid}-${Date.now()} log=${logFilePath()}`)
+        const usageId = `usage-${process.pid}-${Date.now()}`
+        appendDiagnostic('dispatch-usage-error', { usage_id: usageId, error: parsed.usageError })
+        console.error(`${parsed.usageError} usage_id=${usageId} log=${logFilePath()}`)
         return 2
     }
 
