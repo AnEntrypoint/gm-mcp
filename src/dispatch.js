@@ -5,6 +5,7 @@ import { spoolFs as fs, spoolSpawn as spawn } from './spool-port.js'
 import { claimByCreate, claimByLink, readJsonOrNull, readLockHolderPid, readOwnerText, readPidTsLock, readStatusJson, readTextOrNull, reclaimLockByRename, replaceLockText, writeTextAtomically as writeFileAtomically, SPOOL_DIR_MODE, SPOOL_FILE_MODE } from './spool-store.js'
 import os from 'node:os'
 import path from 'node:path'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
 import { recordChild } from './child-ledger.js'
@@ -38,8 +39,34 @@ function gitRootAt(dir) {
     return gitToplevel(dir) === dir ? dir : null
 }
 
+const LAST_PROJECT_FILE = 'last-project-root'
+
+let rememberedProjectRoot = null
+
+function rememberProjectRoot(root) {
+    if (root === rememberedProjectRoot || gitRootAt(root) !== root) return
+    rememberedProjectRoot = root
+    try {
+        mkdirSync(agentplugDir(), { recursive: true })
+        writeFileSync(path.join(agentplugDir(), LAST_PROJECT_FILE), root)
+    } catch {}
+}
+
+function lastProjectRoot() {
+    try {
+        const root = readFileSync(path.join(agentplugDir(), LAST_PROJECT_FILE), 'utf8').trim()
+        return root && gitRootAt(root) === root ? root : null
+    } catch {
+        return null
+    }
+}
+
 function resolveDispatchRoot(cwd) {
-    if (typeof cwd === 'string' && cwd.trim()) return { root: projectRootFor(cwd.trim()), root_source: 'cwd' }
+    if (typeof cwd === 'string' && cwd.trim()) {
+        const root = projectRootFor(cwd.trim())
+        rememberProjectRoot(root)
+        return { root, root_source: 'cwd' }
+    }
     for (const name of DEFAULT_CWD_ENV_VARS) {
         const value = process.env[name]
         if (typeof value !== 'string' || !value.trim()) continue
@@ -49,6 +76,8 @@ function resolveDispatchRoot(cwd) {
     const launched = path.resolve(process.cwd())
     const top = gitToplevel(launched)
     if (top && top === launched) return { root: launched, root_source: 'process_cwd' }
+    const remembered = lastProjectRoot()
+    if (remembered) return { root: remembered, root_source: 'last_project' }
     return {
         error: 'cwd-required',
         refused_root: launched,
