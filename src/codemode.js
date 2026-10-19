@@ -546,7 +546,10 @@ export function registerCodeMode(server, tools) {
                 const headline = headlineWithPrefix.replace(/^Error: /, '')
                 const failingVerb = /^verb=\S+ error_code=/.test(headline) ? [headline] : []
                 const wrapper = failingVerb.length ? [] : [`gm-mcp: gm_codemode code threw -- ${headline}`]
-                const text = [...failingVerb, ...wrapper, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id; search log for it)`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...detailLines].join('\n')
+                const echoed = replies.some((entry) => entry.failed && entry.error === detail)
+                const lead = echoed ? [] : [...failingVerb, ...wrapper]
+                const tail = echoed ? [] : detailLines
+                const text = [...lead, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id; search log for it)`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
                 return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(text, cap, CONTINUATION_RESERVE_CHARS)) }], isError: true }
             } finally {
                 stopHeartbeat()
