@@ -234,6 +234,17 @@ function capCodemodeText(text, cap, reserve = 0) {
     return `${text.slice(0, Math.max(0, room - notice.length))}${notice}`
 }
 
+const PARTIAL_REPLY_MIN_CHARS = 200
+const PARTIAL_BLOCK_OVERHEAD_CHARS = 256
+const SPOOL_FILE_PATTERN = /[^\s'"`()[\]]*\.gm\/exec-spool\/out\/[^\s'"`()[\]]+/
+
+function completedReplyText(text, budget) {
+    if (text.length <= budget) return text
+    const spool = text.match(SPOOL_FILE_PATTERN)?.[0] ?? 'not reported'
+    const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${budget}\nspool_file: ${spool}\n`
+    return `${text.slice(0, Math.max(0, budget - notice.length))}${notice}`
+}
+
 const ENVELOPE_KEYS = ['timeout_seconds', 'full_response', 'resume_task']
 
 function envelopeKeys(args) {
@@ -419,9 +430,10 @@ export function registerCodeMode(server, tools) {
                 const callIds = replies.map((entry) => entry.dispatch_id).filter(Boolean)
                 appendDiagnostic('codemode-threw', { diagnostic_id: diagnosticId, session_id, gm_dispatch_ids: callIds, error: detail })
                 const settled = replies.filter((entry) => entry.text !== undefined)
+                const replyBudget = Math.max(PARTIAL_REPLY_MIN_CHARS, Math.floor((cap - CONTINUATION_RESERVE_CHARS) / Math.max(1, settled.length)) - PARTIAL_BLOCK_OVERHEAD_CHARS)
                 const partial = replies.map((entry, index) => {
                     const label = `${index + 1}/${replies.length}: gm.${entry.verb}`
-                    if (entry.text !== undefined) return `--- partial ${label} completed before the throw (reply not replayed) dispatch_id: ${entry.dispatch_id ?? 'none'} ---`
+                    if (entry.text !== undefined) return `--- partial ${label} completed before the throw dispatch_id: ${entry.dispatch_id ?? 'none'} ---\n${completedReplyText(entry.text, replyBudget)}`
                     if (entry.failed) return `--- partial ${label} failed ---\n${capCodemodeText(withoutContinuation(entry.error), cap)}`
                     return `--- partial ${label} still pending ---`
                 })
