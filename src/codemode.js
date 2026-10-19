@@ -542,7 +542,7 @@ export function registerCodeMode(server, tools) {
                 const detail = describeError(error)
                 const diagnosticId = `codemode-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`
                 const callIds = replies.map((entry) => entry.dispatch_id).filter(Boolean)
-                appendDiagnostic('codemode-threw', { diagnostic_id: diagnosticId, session_id, gm_dispatch_ids: callIds, error: detail })
+                const diagnosticRecord = appendDiagnostic('codemode-threw', { diagnostic_id: diagnosticId, session_id, gm_dispatch_ids: callIds, error: detail })
                 const settled = replies.filter((entry) => entry.text !== undefined)
                 const replyBudget = Math.max(PARTIAL_REPLY_MIN_CHARS, Math.floor((cap - CONTINUATION_RESERVE_CHARS) / Math.max(1, settled.length)) - PARTIAL_BLOCK_OVERHEAD_CHARS)
                 const partial = replies.map((entry, index) => {
@@ -566,7 +566,7 @@ export function registerCodeMode(server, tools) {
                 const echoed = replies.some((entry) => entry.failed)
                 const lead = echoed ? [] : [...failingVerb, ...wrapper]
                 const tail = echoed ? [] : detailLines
-                const text = [...lead, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id; search log for it)`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
+                const text = [...lead, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id)`, `diagnostic_record: ${diagnosticRecord}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
                 return { content: [{ type: 'text', text: capWithContinuation(session_id, text, cap) }], isError: true }
             } finally {
                 stopHeartbeat()
