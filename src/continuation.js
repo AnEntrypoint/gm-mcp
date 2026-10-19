@@ -109,14 +109,14 @@ export function continuationBlockOf(text) {
     try {
         const doc = yaml.load(String(text).slice(last.index))
         return doc && typeof doc.continuation === 'object' ? doc.continuation : null
-    } catch {
-        return null
+    } catch (err) {
+        return { continuation_parse_error: String(err?.message ?? err) }
     }
 }
 
 export function observeRelayedReply(text) {
     const block = continuationBlockOf(text)
-    if (!block) return null
+    if (!block || block.continuation_parse_error) return block
     const entry = entryFor(RELAY_KEY)
     if (typeof block.pending_rows === 'number') entry.pending_rows = block.pending_rows
     entry.stopped = block.state === 'stopped'
