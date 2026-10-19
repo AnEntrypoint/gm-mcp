@@ -134,6 +134,15 @@ export function foldVerbArgs(tool, args) {
     return { ...envelope, body: { ...extra, ...body } }
 }
 
+function withoutEchoedSession(args, sessionId) {
+    if (!isPlainObject(args) || typeof sessionId !== 'string') return args
+    const echoed = (key, value) => (key === 'session' || key === 'session_id') && value === sessionId
+    const out = { ...args }
+    if (echoed('session', out.session)) delete out.session
+    if (isPlainObject(out.body)) out.body = Object.fromEntries(Object.entries(out.body).filter(([key, value]) => !echoed(key, value)))
+    return out
+}
+
 function sessionAliasArgs(folded) {
     if (!isPlainObject(folded?.body) || !('session' in folded.body)) return folded
     const { session, ...body } = folded.body
@@ -293,7 +302,7 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
         }
         let pending
         try {
-            const merged = mergeEnvelope(name, args, envelope)
+            const merged = withoutEchoedSession(mergeEnvelope(name, args, envelope), session_id)
             const tool = tools.get(name)
             const defaults = {}
             const folded = canonicalFsReadArgs(tool.verb, sessionAliasArgs(foldVerbArgs(tool, merged)))
