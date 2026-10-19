@@ -8,6 +8,7 @@ export { EXEC_LANGS }
 export const DISPATCH_BODY_FIELDS = {
     lane_wait_ms: { type: 'number', description: 'Serial-lane wait budget in ms, named by a dispatch_starved_waiting_for_serial_lane retry_hint; also lifts the poll timeout to cover it (capped by the poll ceiling).' },
     lean_node: { type: 'string', description: 'gm-graph node this dispatch serves (gm-hop node emission); recorded on the Dream-RSI observation.' },
+    run_end: { type: 'boolean', description: 'Marks the end of a hop run; stripped by rs-plugkit before the verb handler and recorded on the Dream-RSI observation.' },
 }
 
 const UNDECLARED_NOTE ='gm-mcp declares no body schema for this verb; send the fields its Rust handler reads and read the refusal when one is wrong.'
