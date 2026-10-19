@@ -157,7 +157,7 @@ function codesearchIncompleteReasons(out) {
         if (Number.isFinite(source.dropped) && source.dropped > 0) reasons.push(`dropped:${source.dropped}`)
         if (Array.isArray(source.skipped_files) && source.skipped_files.length > 0) reasons.push('skipped_files')
         for (const [key, value] of Object.entries(source)) {
-            if (key.startsWith('files_skipped') && Number.isFinite(value) && value > 0) reasons.push(`${key}:${value}`)
+            if (key.startsWith('files_skipped') && !key.startsWith('files_skipped_binary') && Number.isFinite(value) && value > 0) reasons.push(`${key}:${value}`)
         }
     }
     return [...new Set(reasons)]
