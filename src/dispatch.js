@@ -1139,7 +1139,7 @@ function prdAddIdDiagnostic(body) {
         return `prd-add requires a non-empty body.id: body.id is present but blank. Send ${PRD_ADD_MINIMAL_BODY}, or drop id and send {"subject":"one line of intent"} so the id is derived from it. Send {"help": true} for every field.`
     }
     if (PRD_ADD_SLUG_SOURCE_FIELDS.some(field => typeof body[field] === 'string' && body[field].trim())) return undefined
-    return `prd-add requires body.id -- the missing key is "id". Send ${PRD_ADD_MINIMAL_BODY}, or omit id and send {"subject":"one line of intent"}: the id is then derived from the first non-empty one of ${PRD_ADD_SLUG_SOURCE_FIELDS.join(', ')}, and a body with no text anywhere cannot derive one. Send {"help": true} for every field.`
+    return `prd-add requires body.id -- the missing key is "id". Send ${PRD_ADD_MINIMAL_BODY}, or omit id and send {"subject":"one line of intent"}: the id is then derived from the first non-empty one of ${PRD_ADD_SLUG_SOURCE_FIELDS.join(', ')}, and a body with no text anywhere cannot derive one. The fields sit at the top level of the body, not nested under a body key. Send {"help": true} for every field.`
 }
 
 function objectBodyDiagnostic(verb, body) {
