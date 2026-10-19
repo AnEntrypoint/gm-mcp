@@ -67,10 +67,11 @@ function admitRecord(event, fields, now) {
     const previous = lastWrittenByKey.get(key)
     if (previous && now - previous.at < REPEAT_WINDOW_MS) {
         previous.suppressed += 1
+        installExitFlush()
         if (fields.dispatch_id !== undefined) previous.dispatch_id = fields.dispatch_id
         return { write: false }
     }
-    lastWrittenByKey.set(key, { at: now, suppressed: 0 })
+    lastWrittenByKey.set(key, { at: now, suppressed: 0, event })
     if (lastWrittenByKey.size > MAX_REPEAT_KEYS) {
         for (const [staleKey, state] of lastWrittenByKey) {
             if (now - state.at >= REPEAT_WINDOW_MS) lastWrittenByKey.delete(staleKey)
@@ -78,6 +79,26 @@ function admitRecord(event, fields, now) {
         if (lastWrittenByKey.size > MAX_REPEAT_KEYS) lastWrittenByKey.clear()
     }
     return { write: true, suppressed: previous?.suppressed ?? 0, dispatch_id: previous?.dispatch_id }
+}
+
+let exitFlushInstalled = false
+
+function installExitFlush() {
+    if (exitFlushInstalled) return
+    exitFlushInstalled = true
+    process.on('exit', flushSuppressedCounts)
+}
+
+function flushSuppressedCounts() {
+    for (const state of lastWrittenByKey.values()) {
+        if (!state.suppressed) continue
+        try {
+            const dispatch = state.dispatch_id !== undefined ? { dispatch_id: state.dispatch_id } : {}
+            appendFileSync(logFilePath(), `${JSON.stringify({ ts: new Date().toISOString(), pid: process.pid, event: 'repeat-suppressed', of: state.event, count: state.suppressed, window_ms: REPEAT_WINDOW_MS, flushed: 'exit', ...dispatch })}\n`, 'utf8')
+        } catch {
+        }
+        state.suppressed = 0
+    }
 }
 
 export function appendDiagnostic(event, fields = {}) {
