@@ -191,13 +191,13 @@ test('long row prose in ready_wave and mutables_pending is excerpted', () => {
 test('dream_rsi evidence rows collapse to counts', () => {
     assert.deepEqual(compacted.dream_rsi_strategy, {
         selection: 'replay-recorded-successes-first',
-        observations: 22,
-        succeeded: 19,
-        failed: 3,
-        gate_drift_failures: 1,
-        evidence_rows: 2,
+        observation_count: 22,
+        successful_dispatch_count: 19,
+        failed_dispatch_count: 3,
+        gate_drift_failure_count: 1,
+        evidence: [{ dispatch_id: 'a', verb: 'codesearch', quality: 0.06 }, { dispatch_id: 'b', verb: 'codesearch', quality: 0 }],
     })
-    assert.deepEqual(compacted.dream_rsi_replay, { ok: true, selection: 'continue-current-exploration', score: 0.375, replay_rows: 1 })
+    assert.deepEqual(compacted.dream_rsi_replay, { ok: true, selection: 'continue-current-exploration', score: 0.375, replays: [{ cost: 16, score: 0.06, verb: 'codesearch' }] })
 })
 
 test('wire_compacted points at the on-disk payload and the opt-out', () => {
