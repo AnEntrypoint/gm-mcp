@@ -44,7 +44,7 @@ jobs:
         run: |
           base="${{ github.event.before }}"
           if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]]; then base="${{ github.sha }}^"; fi
-          added=$(git diff --name-only --diff-filter=A "$base" "${{ github.sha }}" -- test/)
+          added=$(git diff --name-only --no-renames --diff-filter=A "$base" "${{ github.sha }}" -- test/)
           if [ -n "$added" ]; then
             echo "new files under test/ are refused on main:"
             echo "$added"
