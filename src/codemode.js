@@ -261,25 +261,37 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
     }
 
     const call = (name, args = {}, envelope = undefined) => {
-        const merged = mergeEnvelope(name, args, envelope)
-        const tool = tools.get(name)
-        const defaults = {}
-        const folded = canonicalFsReadArgs(tool.verb, foldVerbArgs(tool, merged))
-        refuseUndeclaredBodyKeys(name, tool.verb, folded)
-        refuseMissingRequiredBodyKeys(name, tool.verb, folded)
-        if ('session_id' in tool.inputSchema && folded.session_id === undefined) defaults.session_id = session_id
-        if ('cwd' in tool.inputSchema && folded.cwd === undefined) {
-            const defaultCwd = defaultCwdFor(merged, cwd)
-            if (defaultCwd !== undefined) defaults.cwd = defaultCwd
+        const entry = sink ? { verb: tools.get(name)?.verb ?? name } : null
+        if (entry) sink.push(entry)
+        const fail = (error) => {
+            if (entry) {
+                entry.failed = true
+                entry.error = describeError(error)
+            }
+            throw error
         }
-        for (const key of ENVELOPE_KEYS) {
-            if (topEnvelope[key] !== undefined && folded[key] === undefined && key in tool.inputSchema) defaults[key] = topEnvelope[key]
+        let pending
+        try {
+            const merged = mergeEnvelope(name, args, envelope)
+            const tool = tools.get(name)
+            const defaults = {}
+            const folded = canonicalFsReadArgs(tool.verb, foldVerbArgs(tool, merged))
+            refuseUndeclaredBodyKeys(name, tool.verb, folded)
+            refuseMissingRequiredBodyKeys(name, tool.verb, folded)
+            if ('session_id' in tool.inputSchema && folded.session_id === undefined) defaults.session_id = session_id
+            if ('cwd' in tool.inputSchema && folded.cwd === undefined) {
+                const defaultCwd = defaultCwdFor(merged, cwd)
+                if (defaultCwd !== undefined) defaults.cwd = defaultCwd
+            }
+            for (const key of ENVELOPE_KEYS) {
+                if (topEnvelope[key] !== undefined && folded[key] === undefined && key in tool.inputSchema) defaults[key] = topEnvelope[key]
+            }
+            pending = tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then((result) => replyText(result, tool.verb ?? name))
+        } catch (error) {
+            fail(error)
         }
-        const pending = tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then((result) => replyText(result, tool.verb ?? name))
-        if (!sink) return pending
-        const entry = { verb: tool.verb ?? name }
-        sink.push(entry)
-        return pending.then((text) => { entry.text = text; entry.dispatch_id = dispatchIdOf(text); return text }, (error) => { entry.failed = true; throw error })
+        if (!entry) return pending
+        return pending.then((text) => { entry.text = text; entry.dispatch_id = dispatchIdOf(text); return text }, fail)
     }
     let envelopeCache
     const dispatchEnvelopeSchema = () => {
@@ -403,11 +415,16 @@ export function registerCodeMode(server, tools) {
                 const callIds = replies.map((entry) => entry.dispatch_id).filter(Boolean)
                 appendDiagnostic('codemode-threw', { diagnostic_id: diagnosticId, session_id, gm_dispatch_ids: callIds, error: detail })
                 const settled = replies.filter((entry) => entry.text !== undefined)
-                const partial = args.full_response ? settled.map((entry, index) => `--- partial ${index + 1}/${replies.length}: gm.${entry.verb} completed before the throw ---\n${capCodemodeText(entry.text, cap)}`) : []
+                const partial = replies.map((entry, index) => {
+                    const label = `${index + 1}/${replies.length}: gm.${entry.verb}`
+                    if (entry.text !== undefined) return `--- partial ${label} completed before the throw ---\n${capCodemodeText(entry.text, cap)}`
+                    if (entry.failed) return `--- partial ${label} failed ---\n${capCodemodeText(entry.error, cap)}`
+                    return `--- partial ${label} still pending ---`
+                })
                 const failedCount = replies.filter((entry) => entry.failed).length
                 const pendingCount = replies.length - settled.length - failedCount
                 const unsettledNote = [pendingCount ? `${pendingCount} still pending` : '', failedCount ? `${failedCount} failed` : ''].filter(Boolean).join(', ')
-                const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettledNote ? `, ${unsettledNote}` : ''}; ${args.full_response ? 'their replies follow' : 'their replies omitted, pass full_response:true'}`] : []
+                const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettledNote ? `, ${unsettledNote}` : ''}; their replies and per-call errors follow`] : []
                 const ids = callIds.length ? [`gm_dispatch_ids: ${callIds.join(', ')}`] : []
                 const [headline, ...detailLines] = detail.split('\n')
                 const text = [`diagnostic_id: ${diagnosticId}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...detailLines, ...ids, ...tally, ...partial].join('\n')
