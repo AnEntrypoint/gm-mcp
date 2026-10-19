@@ -74,7 +74,9 @@ async function submitRequest(inDir, name, text) {
     try {
         await renameIntoPlace(tempPath, finalPath)
     } catch (error) {
-        fs.rmSync(tempPath, { force: true })
+        try {
+            fs.rmSync(tempPath, { force: true })
+        } catch {}
         throw error
     }
 }

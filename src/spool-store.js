@@ -89,5 +89,7 @@ export function replaceLockText(file, text) {
 export function reclaimLockByRename(lockPath) {
     const stalePath = `${lockPath}.${process.pid}.${Date.now()}.stale`
     fs.renameSync(lockPath, stalePath)
-    fs.unlinkSync(stalePath)
+    try {
+        fs.unlinkSync(stalePath)
+    } catch {}
 }
