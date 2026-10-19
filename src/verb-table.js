@@ -373,7 +373,7 @@ const GIT_COMMIT_BODY = {
         amend: { type: 'boolean', description: 'Amends HEAD; refused on a pushed HEAD.' },
         add_all: { type: 'boolean', description: 'Stages everything first.' },
         allow_whole_index: { type: 'boolean', description: 'Commits the whole index when paths is absent.' },
-        untrack: { type: 'boolean', description: 'Removes the named .agentplug* paths from the index only (git rm --cached semantics; files stay on disk) in a commit that names nothing else, then pushes. Add and modify of .agentplug* stay refused.' },
+        untrack: { type: 'boolean', description: 'Removes the named .agentplug* paths from the index only (git rm --cached semantics; files stay on disk) in a commit that names nothing else. Does not push; publish with git_push. Add and modify of .agentplug* stay refused.' },
         allow_foreign_rows: { type: 'boolean', aliases: ['allow_foreign_prd_rows'], description: 'Commits rows another session owns.' },
         author_name: { type: 'string', description: 'Commit author name; defaults to the configured git identity.' },
         author_email: { type: 'string', description: 'Commit author email; defaults to the configured git identity.' },
