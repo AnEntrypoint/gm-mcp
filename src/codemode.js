@@ -427,7 +427,7 @@ export function registerCodeMode(server, tools) {
                 const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettledNote ? `, ${unsettledNote}` : ''}; their replies and per-call errors follow`] : []
                 const ids = callIds.length ? [`gm_dispatch_ids: ${callIds.join(', ')}`] : []
                 const [headline, ...detailLines] = detail.split('\n')
-                const text = [`diagnostic_id: ${diagnosticId}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...detailLines, ...ids, ...tally, ...partial].join('\n')
+                const text = [`diagnostic_id: ${diagnosticId}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...ids, ...tally, ...partial, ...detailLines].join('\n')
                 return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(text, cap, CONTINUATION_RESERVE_CHARS)) }], isError: true }
             }
         }
