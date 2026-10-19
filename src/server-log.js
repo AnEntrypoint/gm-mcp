@@ -92,7 +92,12 @@ export function appendDiagnostic(event, fields = {}) {
     try {
         const file = logFilePath()
         const admission = admitRecord(event, fields, now)
-        if (!admission.write) return record
+        if (!admission.write) {
+            if (fields.dispatch_id !== undefined) {
+                appendFileSync(file, `${JSON.stringify({ ts, pid: process.pid, event: 'repeat-suppressed-id', of: event, dispatch_id: fields.dispatch_id })}\n`, 'utf8')
+            }
+            return record
+        }
         mkdirSync(path.dirname(file), { recursive: true })
         const summary = admission.suppressed > 0
             ? `${JSON.stringify({ ts, pid: process.pid, event: 'repeat-suppressed', of: event, count: admission.suppressed, window_ms: REPEAT_WINDOW_MS, ...(admission.dispatch_id !== undefined ? { dispatch_id: admission.dispatch_id } : {}) })}
@@ -101,7 +106,12 @@ export function appendDiagnostic(event, fields = {}) {
         appendFileSync(file, `${summary}${record}
 `, 'utf8')
         rotateOversizedLog(file)
-    } catch {
+    } catch (error) {
+        try {
+            process.stderr.write(`gm-mcp: ${JSON.stringify({ ts, pid: process.pid, event: 'log-write-failed', of: event, code: error?.code ?? null, message: String(error?.message ?? error) })}
+`)
+        } catch {
+        }
     }
     return record
 }
