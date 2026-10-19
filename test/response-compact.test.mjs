@@ -276,6 +276,18 @@ test('zero hits from a complete scan is left alone: that zero really is a findin
     assert.equal(withSearchIncompleteness(reply), reply)
 })
 
+test('an incomplete scan whose count mode reports hits is not annotated, even with an empty matches list', () => {
+    const count = { ok: true, verb: 'codesearch', data: { ok: true, exhaustive: false, files_scanned: 43, count: '4 lines, 4 occurrences', matches: [], matches_truncated: true } }
+    const perPath = { ok: true, verb: 'codesearch', data: { ok: true, exhaustive: false, files_scanned: 43, counts: [{ path: 'a.js', count: 4 }], matches: [], matches_truncated: true } }
+    assert.equal(withSearchIncompleteness(count), count)
+    assert.equal(withSearchIncompleteness(perPath), perPath)
+})
+
+test('an incomplete comments scan with comment rows is not annotated when comment_count is absent', () => {
+    const reply = { ok: true, verb: 'codesearch', data: { ok: true, exhaustive: false, files_scanned: 6, comments: [{ line: 27, text: '// TODO' }] } }
+    assert.equal(withSearchIncompleteness(reply), reply)
+})
+
 test('an incomplete scan that found hits is not annotated: only an empty result is ambiguous', () => {
     const reply = { ok: true, verb: 'codesearch', data: { ok: true, exhaustive: false, files_scanned: 6036, matches: [{ path: 'a.js', line: 1 }] } }
     assert.equal(withSearchIncompleteness(reply), reply)

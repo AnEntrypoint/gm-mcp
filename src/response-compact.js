@@ -101,6 +101,9 @@ const HIT_COUNT_KEYS = ['comment_count', 'count', 'match_count', 'returned_count
 
 function searchShowsNoHits(source) {
     if (HIT_COUNT_KEYS.some((key) => Number.isFinite(source[key]) && source[key] > 0)) return false
+    if (Array.isArray(source.comments) && source.comments.length > 0) return false
+    if (Array.isArray(source.counts) && source.counts.some((row) => Number(row?.count) > 0)) return false
+    if (/^[1-9]\d* lines?\b/.test(String(source.count ?? ''))) return false
     if (Array.isArray(source.matches)) return source.matches.length === 0
     if (Array.isArray(source.hits)) return source.hits.length === 0
     if (Number.isFinite(source.comment_count)) return source.comment_count === 0
