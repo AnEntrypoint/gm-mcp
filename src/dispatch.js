@@ -271,11 +271,38 @@ function fsReadTruncation(verb, body, out) {
     return { ...out, ...extra }
 }
 
-export function applyFsReadRangeFallback(verb, body, out) {
-    return fsReadTruncation(verb, body, applyFsReadRangeFallbackRaw(verb, body, out))
+export function applyFsReadRangeFallback(verb, body, out, inlineMax) {
+    return fsReadTruncation(verb, body, applyFsReadRangeFallbackRaw(verb, body, out, inlineMax))
 }
 
-function applyFsReadRangeFallbackRaw(verb, body, out) {
+function fsReadUnrangedPage(out, inlineMax) {
+    if (!(inlineMax > 0) || out.ok === false || typeof out.data !== 'string' || out.data.length <= inlineMax) return out
+    const lines = out.data.replace(/\n$/, '').split('\n')
+    let count = 0
+    let size = 0
+    while (count < lines.length) {
+        const next = size + lines[count].length + (count > 0 ? 1 : 0)
+        if (count > 0 && next > inlineMax) break
+        size = next
+        count += 1
+    }
+    const more = count < lines.length
+    return {
+        ...out,
+        data: lines.slice(0, count).join('\n'),
+        range_basis: FS_READ_RANGE_BASIS,
+        total_lines: lines.length,
+        start_line: 1,
+        end_line: count,
+        returned_lines: count,
+        has_more_lines: more,
+        truncated_at_bytes: more,
+        offset: 0,
+        ...(more ? { next_start_line: count + 1 } : {}),
+    }
+}
+
+function applyFsReadRangeFallbackRaw(verb, body, out, inlineMax) {
     if (verb !== 'fs_read') return out
     if (!isPlainObject(out)) return out
     const fields = fsReadReplyFields(out)
@@ -284,7 +311,7 @@ function applyFsReadRangeFallbackRaw(verb, body, out) {
     const requested = fsReadRequestedRange(body)
     if (!requested) {
         const unknown = fsReadUnknownRangeKeys(body)
-        return unknown.length === 0 ? out : fsReadUnknownRangeReply(verb, unknown)
+        return unknown.length === 0 ? fsReadUnrangedPage(out, inlineMax) : fsReadUnknownRangeReply(verb, unknown)
     }
     if (out.ok === false) return out
     const requestedNote = `${requested.startKey} ${requested.start}${requested.end !== undefined ? ` to ${requested.end}` : requested.count !== undefined ? ` plus ${requested.count} lines` : ''}`
@@ -2615,7 +2642,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             applySessionLeaseVerdict(parsed, { body: normalizedBody ?? body, root, verb })
             rememberDeliveredInstructionHash(verb, parsed, root, session_id)
             const plainTextFile = typeof parsed?.result_file === 'string' ? parsed.result_file : undefined
-            const ranged = full_response ? parsed : applyFsReadRangeFallback(verb, normalizedBody, parsed)
+            const ranged = full_response ? parsed : applyFsReadRangeFallback(verb, normalizedBody, parsed, inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars, body: normalizedBody }))
             const named = withSearchIncompleteness(ranged)
             const cleaned = full_response ? named : cleanResponse(named, undefined, outPath, plainTextFile, untruncatedKeysFor(verb, normalizedBody), inlineMaxForVerb({ verb, isPlainText, fullResponse: full_response, maxChars: max_chars, body: normalizedBody }))
             let out = cleaned

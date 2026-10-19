@@ -75,6 +75,18 @@ test('a byte-capped read is truncated even with no range requested', () => {
     assert.equal(out.truncated, true)
 })
 
+test('an unranged read longer than the inline cap pages with a continuation, never silently cut', () => {
+    const big = Array.from({ length: 10 }, (_, i) => `line${i + 1}`.padEnd(10, 'x')).join('\n') + '\n'
+    const out = applyFsReadRangeFallback('fs_read', { path: 'f' }, { ok: true, verb: 'fs_read', path: 'f', data: big }, 35)
+    assert.equal(out.data, Array.from({ length: 3 }, (_, i) => `line${i + 1}`.padEnd(10, 'x')).join('\n'))
+    assert.equal(out.total_lines, 10)
+    assert.equal(out.end_line, 3)
+    assert.equal(out.has_more_lines, true)
+    assert.equal(out.next_start_line, 4)
+    assert.equal(out.truncated, true)
+    assert.equal(applyFsReadRangeFallback('fs_read', { path: 'f' }, { ok: true, verb: 'fs_read', path: 'f', data: file }, 1000).truncated, false)
+})
+
 test('an unrecognised range key is refused, never dropped', () => {
     const out = applyFsReadRangeFallback('fs_read', { path: 'f', startRow: 2 }, { ok: true, verb: 'fs_read', path: 'f', data: file })
     assert.equal(out.ok, false)
