@@ -178,7 +178,6 @@ export function withCodesearchCompleteness(verb, out) {
 }
 
 const SEARCH_PROSE_NOTICE_KEYS = new Map([
-    ['query_note', 'query_regex'],
     ['exhaustive_note', 'exhaustive_scope'],
     ['file_source_detail', 'file_source_git'],
 ])
