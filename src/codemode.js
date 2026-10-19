@@ -44,6 +44,14 @@ function withoutContinuation(text) {
     return text.replace(/^continuation:[\s\S]*$/m, '').trimEnd()
 }
 
+function stdoutErrorOf(text) {
+    const data = text.split(/^--- data/m)[1] ?? ''
+    const stdout = (/^\s*stdout: '(.*)'$/m.exec(text)?.[1] ?? '').replace(/\\"/g, '"')
+    const quoted = /"error"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(`${data}\n${stdout}`)?.[1]
+    if (quoted === undefined) return ''
+    try { return JSON.parse(quoted).replace(/\s+/g, ' ').trim() } catch { return '' }
+}
+
 function failedReplyDetail(text, verb) {
     if (!/^(dispatch_id|data|error|ok|gm_session_header_version):/.test(text)) return null
     const header = text.split(/^--- data/m)[0]
@@ -54,13 +62,22 @@ function failedReplyDetail(text, verb) {
     const code = /^error_code: (.*)$/m.exec(header)?.[1]
     const dispatchId = dispatchIdOf(text)
     const head = header.split('\n').slice(0, 8).join(' | ').replace(/\s+/g, ' ').trim()
-    return `verb=${verb} error_code=${code ?? 'none'} dispatch_id=${dispatchId ?? 'none'}\n${block || `no error field; reply head: ${head}`}`
+    const stdoutError = stdoutErrorOf(text)
+    return `verb=${verb} error_code=${code ?? 'none'} dispatch_id=${dispatchId ?? 'none'}\n${block || stdoutError || `no error field; reply head: ${head}`}`
+}
+
+function compactFailureDetail(text, verb) {
+    const match = /^\S+ ok: false \(error_code: ([^)]*)\)(?: dispatch_id: (\S+))?(?: -- error: ([\s\S]*))?$/.exec(text.trim())
+    if (match === null) return null
+    const [, code, dispatchId, error] = match
+    const detail = (error ?? '').replace(/\s+/g, ' ').trim().replace(CONTINUATION_TAIL, '')
+    return `verb=${verb} error_code=${code} dispatch_id=${dispatchId ?? 'none'}\n${detail || 'no error field'}`
 }
 
 function replyText(result, verb) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
     if (result?.isError) throw new Error(text)
-    const failed = failedReplyDetail(text, verb)
+    const failed = failedReplyDetail(text, verb) ?? compactFailureDetail(text, verb)
     if (failed !== null) throw new Error(failed)
     return text
 }
@@ -430,8 +447,11 @@ export function registerCodeMode(server, tools) {
                 const unsettledNote = [pendingCount ? `${pendingCount} still pending` : '', failedCount ? `${failedCount} failed` : ''].filter(Boolean).join(', ')
                 const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettledNote ? `, ${unsettledNote}` : ''}; their dispatch ids and per-call errors follow`] : []
                 const ids = callIds.length ? [`gm_dispatch_ids: ${callIds.join(', ')}`] : []
-                const [headline, ...detailLines] = detail.split('\n')
-                const text = [`diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id; search log for it)`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, `gm-mcp: gm_codemode code threw -- ${headline}`, ...ids, ...tally, ...partial, ...detailLines].join('\n')
+                const [headlineWithPrefix, ...detailLines] = withoutContinuation(detail).split('\n')
+                const headline = headlineWithPrefix.replace(/^Error: /, '')
+                const failingVerb = /^verb=\S+ error_code=/.test(headline) ? [headline] : []
+                const wrapper = failingVerb.length ? [] : [`gm-mcp: gm_codemode code threw -- ${headline}`]
+                const text = [...failingVerb, ...wrapper, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id; search log for it)`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...detailLines].join('\n')
                 return { content: [{ type: 'text', text: continuedReply(session_id, capCodemodeText(text, cap, CONTINUATION_RESERVE_CHARS)) }], isError: true }
             }
         }
