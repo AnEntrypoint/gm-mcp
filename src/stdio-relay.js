@@ -176,6 +176,16 @@ function createLocalFallback(initializeParams) {
     }
 }
 
+async function restartSingleton(recover, state) {
+    if (!recover) return null
+    const restarted = await within(recover(), RESTART_BUDGET_MS, 'http singleton restart').catch((error) => {
+        appendDiagnostic('stdio-relay-restart-failed', { url: state.url, error: describeError(error) })
+        return null
+    })
+    if (restarted) state.url = restarted
+    return restarted
+}
+
 async function forwardLine(line, recover, state) {
     let request
     try {
@@ -188,17 +198,13 @@ async function forwardLine(line, recover, state) {
     if (request?.method === 'initialize') state.initializeParams = request.params
     const outbound = withDefaultCwd(request, line, state.defaultCwd)
     const routedRequest = outbound === line ? request : JSON.parse(outbound)
-    if (state.local.active() && !(await httpLive(state.url))) return deliverLocal(state, routedRequest, expectsReply)
+    if (state.local.active() && !(await httpLive(state.url)) && !(await restartSingleton(recover, state))) return deliverLocal(state, routedRequest, expectsReply)
     let target = state.url
     let { reply, failure } = await within(postWithRetry(target, outbound, request?.method ?? null), RELAY_BUDGET_MS, 'http singleton call').catch((error) => ({ reply: null, failure: error }))
-    if (!reply && recover) {
-        const restarted = await within(recover(), RESTART_BUDGET_MS, 'http singleton restart').catch((error) => {
-            appendDiagnostic('stdio-relay-restart-failed', { url: target, error: describeError(error) })
-            return null
-        })
+    if (!reply) {
+        const restarted = await restartSingleton(recover, state)
         if (restarted) {
             target = restarted
-            state.url = restarted
             ;({ reply, failure } = await within(postWithRetry(target, outbound, request?.method ?? null), RELAY_BUDGET_MS, 'http singleton call after restart').catch((error) => ({ reply: null, failure: error })))
         }
     }
@@ -227,8 +233,8 @@ async function deliverLocal(state, request, expectsReply, relayFailure = null) {
     }
 }
 
-export function serveStdioRelay({ url, recover = null }) {
-    const state = { url, defaultCwd: launchRootDefault(), initializeParams: null, local: null }
+export function serveStdioRelay({ url, recover = null, initializeParams = null }) {
+    const state = { url, defaultCwd: launchRootDefault(), initializeParams, local: null }
     state.local = createLocalFallback(() => state.initializeParams ?? { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'gm-mcp-relay', version: '0' } })
     let inFlight = 0
     let inputClosed = false

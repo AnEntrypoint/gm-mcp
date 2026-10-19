@@ -9,6 +9,7 @@ import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { recordSingletonState, serverEntryPath, waitForHealth } from './singleton.js'
 import { bundleDrift, bundleStalenessNotice } from './bundle-drift.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
+import { serveStdioRelay } from './stdio-relay.js'
 
 const HANDOVER_READY_TIMEOUT_MS = 30_000
 export const HANDOVER_LISTEN_RETRY_MS = 60_000
@@ -126,6 +127,42 @@ async function drainAndExit(server) {
     }
     appendDiagnostic('bundle-handover-exit', { pid: process.pid, dispatches_inflight: inflightDispatchCount(), connections_open: open })
     process.exit(0)
+}
+
+let stdioHandedOver = false
+
+export function stdioSessionHandedOver() {
+    return stdioHandedOver
+}
+
+function clientInitializeParams(server) {
+    return {
+        protocolVersion: '2025-06-18',
+        capabilities: server.server.getClientCapabilities?.() ?? {},
+        clientInfo: server.server.getClientVersion?.() ?? { name: 'gm-mcp-relay', version: '0' },
+    }
+}
+
+export async function handOverStdioToRefreshedBundle({ state, transport, server, monitor = null, target, recover }) {
+    if (stdioHandedOver) return { outcome: 'handed-over', already: true }
+    const url = await target()
+    const detail = { from: shortHash(state.running_sha256), to: shortHash(state.installed_sha256), to_version: state.installed_version ?? null, from_pid: process.pid }
+    if (!url) {
+        appendDiagnostic('bundle-handover-stdio-failed', { ...detail, reason: 'no-http-singleton' })
+        return { outcome: 'failed', reason: 'no-http-singleton' }
+    }
+    const inflight = inflightDispatchCount()
+    if (inflight > 0) {
+        appendDiagnostic('bundle-handover-stdio-deferred', { ...detail, dispatches_inflight: inflight })
+        return { outcome: 'deferred', reason: 'dispatch-in-flight', dispatches_inflight: inflight }
+    }
+    stdioHandedOver = true
+    if (monitor) clearInterval(monitor)
+    appendDiagnostic('bundle-handover-stdio', { ...detail, url })
+    console.error(`gm-mcp: this stdio session now relays to the installed bundle at ${url} (${state.installed_version ?? 'unknown version'}); the MCP client keeps its pipe`)
+    await transport.close()
+    serveStdioRelay({ url, recover, initializeParams: clientInitializeParams(server) })
+    return { outcome: 'handed-over', url }
 }
 
 export async function handOverToRefreshedBundle({ host = DEFAULT_HOST, port = DEFAULT_PORT, server = null, result = {}, state = null } = {}) {

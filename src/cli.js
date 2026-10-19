@@ -243,7 +243,7 @@ const COMMANDS = {
             return 1
         }
         console.log(`gm-mcp ${BUNDLE_VERSION}: ${result.reused ? 'reusing' : 'started'} the shared HTTP server (pid ${result.pid}) -- ${result.url}`)
-        const ours = !result.reused || holderIsOwn(port, result.pid)
+        const ours = !result.reused || await holderIsOwn(port, result.pid)
         const supervision = ours ? ensureHttpSupervisor({ port }) : { started: false, reason: 'foreign-holder-not-supervised' }
         if (supervision.started) {
             console.log(`gm-mcp ${BUNDLE_VERSION}: armed the http supervisor (pid ${supervision.pid}, probing every ${Math.round(supervisorIntervalMs() / 1000)}s) -- it restarts ${result.url} when /health stops answering`)
@@ -322,7 +322,7 @@ const COMMANDS = {
     'port-pool': async () => {
         const reclaimed = await reclaimDeadPortRegistries()
         const preferred = Number(flagValue('preferred')) || defaultHttpPort()
-        const next = allocateHttpPort({ preferred })
+        const next = await allocateHttpPort({ preferred })
         console.log(JSON.stringify({ range: [PORT_POOL_FROM, PORT_POOL_TO], preferred, reclaimed, allocated: next }, null, 2))
         return 0
     },

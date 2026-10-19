@@ -68,7 +68,7 @@ export function installedBundle() {
     } catch {
         return null
     }
-    if (stat.size === installed.size && stat.mtimeMs === installed.mtimeMs && installed.sha256) return installed
+    if (stat.size === installed.size && stat.mtimeMs === installed.mtimeMs && installed.path === path && installed.sha256) return installed
     let bytes = null
     try {
         bytes = readFileSync(path)
@@ -102,7 +102,13 @@ function reloadRefusal(runningState, installedState) {
     return { code: null, reason: null }
 }
 
-export function bundleDrift({ transport = process.env.GM_MCP_TRANSPORT || 'stdio' } = {}) {
+let servingTransport = null
+
+export function setServingTransport(kind) {
+    servingTransport = kind
+}
+
+export function bundleDrift({ transport = servingTransport ?? process.env.GM_MCP_TRANSPORT ?? 'stdio' } = {}) {
     const runningState = runningBundle()
     const installedState = installedBundle()
     const base = {
@@ -130,10 +136,6 @@ export function bundleDrift({ transport = process.env.GM_MCP_TRANSPORT || 'stdio
     }
 }
 
-export function restartCommand(path = serverEntryPath()) {
-    return `node "${path}"`
-}
-
 export function bundleStalenessLine(state = bundleDrift()) {
     if (!state?.stale) return null
     const installedPath = state.installed_path ?? state.path
@@ -142,7 +144,8 @@ export function bundleStalenessLine(state = bundleDrift()) {
     const action = state.reloadable
         ? 'reloading between dispatches now'
         : `restart required (${state.refusal_reason}): restart the MCP client that launched this server (or reconnect the gm MCP server) so it relaunches from ${installedPath}`
-    return `gm-mcp: this server is serving bundle ${running} but ${installed} is installed at ${installedPath} -- ${action}`
+    const runningPath = state.path && state.path !== installedPath ? ` (serving from ${state.path})` : ''
+    return `gm-mcp: this server is serving bundle ${running}${runningPath} but ${installed} is installed at ${installedPath} -- ${action}`
 }
 
 export function bundleStalenessNotice(state = bundleDrift()) {
