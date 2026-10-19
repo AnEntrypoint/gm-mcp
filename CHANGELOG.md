@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.190 - gm_codemode replies expose `.text`, and the generic gm call takes a verb's top-level arguments
+
+A gm_codemode verb call returned a plain string, so `r.text` read undefined. The reply is now a String object whose `.text` is the same text (`replyValue` in `src/codemode.js`); `return` still yields plain text. The generic `gm` call folds top-level keys that the named verb declares into its body (`verbShapedTool`), so `gm.gm({verb: "prd_list", status: "pending"})` is accepted like `gm.prd_list({...})`.
+
+## 0.2.187 - a spool request that is already linked is never reported as failed
+
+`publishSpoolRequest` (`src/dispatch.js`) ran `removeIfPresent` in its `finally`, which rethrew any unlink error other than `ENOENT`. Once `fs.linkSync` had published the request into `in/<verb>/`, an `EPERM`, `EBUSY` or `EACCES` from removing the temp replaced the successful return, so a request already in the spool reported as failed. The cleanup is now `removeTemp`, which ignores every unlink error: a leftover `.tmp` name is harmless because the daemon claims only `.txt` requests. A failed link still rethrows its own error, since the cleanup no longer throws over it. `BUNDLE_VERSION` and `package.json` move to 0.2.187.
+
+## 0.2.186 - a concurrent spool write no longer fails on a temp that vanished
+
+`publishSpoolRequest` (`src/dispatch.js`) wrote each request to a temp file and then hard-linked it into `in/<verb>/`. A remover that took the temp between the write and the link made `fs.linkSync` throw `ENOENT`, and that reply surfaced as a codemode error (log 2026-10-19T12:43:01Z, codesearch). The temp name now carries a `randomUUID()` suffix, so no two writes share a name, and an `ENOENT` from the write or the link is retried as that one write (up to `SPOOL_PUBLISH_ATTEMPTS` = 3, recreating the directory each time). Any other error is thrown unchanged. The cleanup in `finally` ignores `ENOENT`, so a temp another actor already removed no longer throws out of the reply. `BUNDLE_VERSION` and `package.json` move to 0.2.186.
+
+## 0.2.185 - a long gm_codemode body reports that it is alive
+
+A `gm_codemode` body that awaits gm calls for longer than the client's idle window was aborted with no reply, because nothing reached the client between the call and its final reply. While a body runs, `startHeartbeat` (`src/codemode.js`) now sends a `notifications/message` log line every `CODEMODE_HEARTBEAT_MS` (60000, `src/codemode-budget.js`) naming the elapsed seconds, and also a `notifications/progress` when the client supplied a `progressToken`. The timer is cleared in a `finally`, so the reply is returned exactly as before, and a failed heartbeat send is swallowed so it cannot change the reply. A body that blocks the event loop with synchronous calls (for example `execFileSync` in a loop) still emits nothing, because no timer can fire; only bodies that await gm calls get the heartbeat. `BUNDLE_VERSION` and `package.json` move to 0.2.185.
+
 ## 0.2.72 - an orphaned leak is reported as its whole tree
 
 `orphan-scan.js` reported only processes whose `ppid` was `1`, so the children of a leaked root were invisible: the 2026-10-15 litebox run left a tree of 12 processes whose root was flagged while its children, several of them the hottest and largest, were not orphans by that rule. Each orphan root now also gets a `trees` entry, one per `items` entry in the same order, built by walking its descendants through the `ppid` field of `/proc/<pid>/stat` (depth 16 and 512 members at most; `truncated` names the bound that cut a walk). A tree is one finding: `leak-watch --json` shows `orphans.trees[]` with `member_count`, `rss_mb` (root included), `max_depth` and the member pids, the one-line summary names each tree beside its root, and the CLI prints a `TREE` line under each root. `orphans.items` keeps its shape. The walk never counts the scanning process or its ancestors. Detection only: nothing signals a pid. `BUNDLE_VERSION` moves to 0.2.72.

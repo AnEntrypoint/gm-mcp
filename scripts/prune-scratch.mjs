@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { lstat, readdir, readFile, readlink, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
 const OWNED_PREFIXES = [
@@ -13,7 +14,6 @@ const OWNED_PREFIXES = [
   'gm-exec',
   'bunx',
 ];
-const SCRATCH_ROOT = '/config/tmp';
 const DEFAULT_CAP_HOURS = 24;
 const MAX_WALK_ENTRIES = 20000;
 
@@ -22,13 +22,13 @@ const option = (name) => {
   const i = args.indexOf(name);
   return i < 0 ? undefined : args[i + 1];
 };
-const root = option('--root');
+const root = option('--root') ?? tmpdir();
 const capHours = Number(option('--cap-hours') ?? DEFAULT_CAP_HOURS);
 const apply = args.includes('--apply');
 const explicitPrefixes = args.flatMap((arg, i) => (arg === '--prefix' && args[i + 1] ? [args[i + 1]] : []));
 
 if (!root || !Number.isFinite(capHours) || capHours < 0) {
-  console.error('usage: prune-scratch.mjs --root <dir under /config/tmp> [--cap-hours <n>=24] [--prefix <p>]... [--apply]\n  decision: unowned stale /config/tmp entries are reported (unowned_stale_total) and never removed; --prefix <p> is the opt-in removal.');
+  console.error('usage: prune-scratch.mjs [--root <dir>=os.tmpdir()] [--cap-hours <n>=24] [--prefix <p>]... [--apply]\n  decision: unowned stale entries under the root are reported (unowned_stale_total) and never removed; --prefix <p> is the opt-in removal.');
   process.exit(2);
 }
 
@@ -37,13 +37,17 @@ const refuse = (message) => {
   process.exit(2);
 };
 
-const scratchReal = await realpath(SCRATCH_ROOT);
-const inScratch = (path) => path === scratchReal || path.startsWith(scratchReal + sep);
-
 const lexicalRoot = resolve(root);
-if ((await lstat(lexicalRoot)).isSymbolicLink()) refuse(`refusing symlinked root ${lexicalRoot}`);
-const resolvedRoot = await realpath(lexicalRoot);
-if (!inScratch(resolvedRoot)) refuse(`refusing root outside ${SCRATCH_ROOT}: ${resolvedRoot}`);
+let resolvedRoot;
+try {
+  if ((await lstat(lexicalRoot)).isSymbolicLink()) refuse(`refusing symlinked root ${lexicalRoot}`);
+  resolvedRoot = await realpath(lexicalRoot);
+} catch (error) {
+  if (error.code === 'ENOENT' || error.code === 'ENOTDIR') refuse(`refusing missing root ${lexicalRoot}: no such directory`);
+  throw error;
+}
+const rootPrefix = resolvedRoot.endsWith(sep) ? resolvedRoot : resolvedRoot + sep;
+const inRoot = (path) => path === resolvedRoot || path.startsWith(rootPrefix);
 
 const cutoff = Date.now() - capHours * 3_600_000;
 
@@ -66,9 +70,9 @@ async function isStale(path) {
   }
 }
 
-async function inScratchReal(path) {
+async function inRootReal(path) {
   try {
-    return inScratch(await realpath(path));
+    return inRoot(await realpath(path));
   } catch {
     return false;
   }
@@ -84,13 +88,13 @@ const unownedByPrefix = {};
 for (const name of await readdir(resolvedRoot)) {
   const path = join(resolvedRoot, name);
   if (!isOwned(name) && !isNamed(name)) {
-    if ((await inScratchReal(path)) && (await isStale(path))) {
+    if ((await inRootReal(path)) && (await isStale(path))) {
       const prefix = unownedPrefixOf(name);
       unownedByPrefix[prefix] = (unownedByPrefix[prefix] ?? 0) + 1;
     }
     continue;
   }
-  if (!(await inScratchReal(path))) {
+  if (!(await inRootReal(path))) {
     refusedNames.push(name);
     continue;
   }
@@ -145,9 +149,20 @@ for (const candidate of candidates) {
 }
 
 const removed = [];
+const skippedAtApply = [];
 if (apply) {
   for (const { name, path } of removable) {
-    if (!(await isStale(path)) || !(await inScratchReal(path))) continue;
+    if (!(await isStale(path)) || !(await inRootReal(path))) continue;
+    const fresh = await liveHolders([path]);
+    const pids = [...fresh.holders.get(path)].sort((a, b) => a - b);
+    if (pids.length > 0) {
+      skippedAtApply.push({ name, reason: 'live_process', pids });
+      continue;
+    }
+    if (fresh.unknown.length > 0) {
+      skippedAtApply.push({ name, reason: 'liveness_unknown', pids: [] });
+      continue;
+    }
     await rm(path, { recursive: true, force: true });
     removed.push(name);
   }
@@ -157,4 +172,4 @@ const byPrefix = Object.fromEntries([...OWNED_PREFIXES, ...explicitPrefixes].map
 const unownedSorted = Object.fromEntries(Object.entries(unownedByPrefix).sort(([a], [b]) => a.localeCompare(b)));
 const unownedTotal = Object.values(unownedSorted).reduce((sum, n) => sum + n, 0);
 
-console.log(JSON.stringify({ root: resolvedRoot, cap_hours: capHours, apply, by_prefix: byPrefix, explicit_prefixes: explicitPrefixes, unowned_stale_total: unownedTotal, unowned_by_prefix: unownedSorted, candidates: removable.map((c) => c.name), held, liveness_unknown_pids: liveness.unknown, refused: refusedNames, removed }, null, 2));
+console.log(JSON.stringify({ root: resolvedRoot, cap_hours: capHours, apply, by_prefix: byPrefix, explicit_prefixes: explicitPrefixes, unowned_stale_total: unownedTotal, unowned_by_prefix: unownedSorted, candidates: removable.map((c) => c.name), held, liveness_unknown_pids: liveness.unknown, refused: refusedNames, removed, skipped_at_apply: skippedAtApply }, null, 2));
