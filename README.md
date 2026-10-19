@@ -415,6 +415,8 @@ against the source version, and fails on committed-bundle byte drift.
 (`core.hooksPath`, local to this checkout, never committed) so `pre-push` runs
 it automatically and blocks a push carrying a stale bundle.
 
+`scripts/publish-api.mjs` lands files on `main` through the GitHub Git Data API (blobs, a tree on the remote tip, a commit parented on it, then PATCH `refs/heads/main`). When no `push` run appears for the new sha within 60 s, it dispatches each active `workflow_dispatch` workflow on that sha, so a docs-only commit still gets CI. Usage: `node scripts/publish-api.mjs <owner>/<repo> "<message>" <repoPath>=<localFile>...`.
+
 Bundling exists because `npx github:...` installs have been observed to
 produce a corrupted transitive-dependency install (a `node_modules/ajv`
 directory present but missing its `package.json`) on some npm/npx versions,
