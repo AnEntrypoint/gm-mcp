@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { agentplugDir, toolsDir } from './paths.js'
-import { appendDiagnostic, describeError, logLocations } from './server-log.js'
+import { appendDiagnostic, describeError, logFilePath, logLocations } from './server-log.js'
 import { inflightDispatchCount } from './dispatch.js'
 import { liveRunningImages, unrecordedBundleProcesses } from './running-images.js'
 
@@ -512,7 +512,7 @@ export function refreshStaleDeployedBundleInBackground(onRefreshed = null, optio
         })
         .catch((error) => {
             appendDiagnostic('self-update-failed', { error: error?.message ? String(error.message) : String(error) })
-            console.error(`gm-mcp: bundle staleness check failed (${error.message}); keeping the deployed copy`)
+            console.error(`gm-mcp: bundle staleness check failed (${error?.message ?? error}); keeping the deployed copy (channel ${process.env.GM_MCP_BUNDLE_URL || DEFAULT_BUNDLE_URL}; event self-update-failed in ${logFilePath()})`)
         })
 }
 
