@@ -1572,6 +1572,7 @@ function pruneSpoolResponsesOnce(outDir) {
 }
 
 const LATEST_ONLY_VERBS = new Set(['prd-list', 'prd_list'])
+const PRD_LIST_STATUSES = ['pending', 'ready', 'completed', 'blocked', 'all']
 
 function isRefusalReply(parsed) {
     return isPlainObject(parsed) && (parsed.refused === true || parsed.status === 'refused' || parsed.outcome === 'refused')
@@ -2272,12 +2273,6 @@ async function plainTextOwnerTransport(root, session_id, signal) {
 
 const VERBATIM_REPLY_VERBS = new Set(['fs_read', 'result', 'gm_result'])
 
-const noticedBundleKeys = new Set()
-
-function bundleNoticeKeyOf(drift) {
-    return (drift.installed_sha256 ?? '') + '|' + (drift.refusal_code ?? '') + '|' + (drift.running_sha256 ?? '')
-}
-
 function bundleNoticeTail(verb, drift) {
     const block = yaml.dump({
         bundle_stale: true,
@@ -2295,7 +2290,7 @@ function bundleNoticeTail(verb, drift) {
 function pendingBundleNoticeReserve(verb) {
     if (VERBATIM_REPLY_VERBS.has(verb)) return 0
     const drift = bundleDrift()
-    if (!drift.stale || noticedBundleKeys.has(bundleNoticeKeyOf(drift))) return 0
+    if (!drift.stale) return 0
     return bundleNoticeTail(verb, drift).length + 1
 }
 
@@ -2304,9 +2299,6 @@ function withStaleBundleNotice(verb, text) {
     if (typeof text !== 'string' || text === '') return text
     const drift = bundleDrift()
     if (!drift.stale) return text
-    const key = bundleNoticeKeyOf(drift)
-    if (noticedBundleKeys.has(key)) return text
-    noticedBundleKeys.add(key)
     const withNewline = text.endsWith('\n') ? text : text + '\n'
     return withNewline + bundleNoticeTail(verb, drift)
 }
@@ -2558,6 +2550,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const laneBudgetMs = callerLaneWaitMs ?? (/^git[_-]/.test(verb) ? GIT_LANE_WAIT_MS : null)
     const timeoutMs = Math.min(Math.max(requestedPollTimeoutMs, laneBudgetMs ?? 0), pollCeilingMs)
     const execMs = EXEC_FAMILY_VERBS.includes(verb) ? execLimitMs(verb, raw_body, timeout_seconds) : null
+    if (LATEST_ONLY_VERBS.has(verb) && normalizedBody?.status !== undefined && !PRD_LIST_STATUSES.includes(normalizedBody.status)) {
+        return toYaml({ ok: false, verb, error: `prd-list status "${normalizedBody.status}" is not an accepted status`, accepted_statuses: PRD_LIST_STATUSES })
+    }
 
     if (!resume_task) {
         const unavailable = runnerUnavailable(root, spoolDir)

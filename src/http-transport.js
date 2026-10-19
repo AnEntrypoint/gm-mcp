@@ -14,9 +14,11 @@ export const MCP_PATH = '/mcp'
 export const HEALTH_PATH = '/health'
 
 export function httpListenOptions() {
-    const port = Number(flagValue('port') ?? process.env.GM_MCP_HTTP_PORT ?? DEFAULT_PORT)
+    const raw = flagValue('port') ?? process.env.GM_MCP_HTTP_PORT
+    const port = Number(raw ?? DEFAULT_PORT)
     const host = flagValue('host') ?? process.env.GM_MCP_HTTP_HOST ?? DEFAULT_HOST
-    return { port: Number.isInteger(port) && port > 0 ? port : DEFAULT_PORT, host: host || DEFAULT_HOST }
+    const explicit = String(raw ?? '').trim() !== ''
+    return { port: Number.isInteger(port) && port >= 0 && (port > 0 || explicit) ? port : DEFAULT_PORT, host: host || DEFAULT_HOST }
 }
 
 const SERVED_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]

@@ -45,22 +45,34 @@ function measure(name, value, pass) {
     return { predicate: name, value, pass }
 }
 
-export function parentAbandoned(parentPid) {
+export function parentAbandoned(parentPid, recordedPpid = null) {
     if (parentPid === null || !Number.isInteger(Number(parentPid)) || Number(parentPid) <= 0) return false
     if (pidAlive(parentPid) === false) return true
     if (process.platform === 'win32') return false
+    const recorded = Number(recordedPpid)
+    if (Number.isInteger(recorded) && recorded > 0) return Number(parentPid) !== recorded
     return Number(parentPid) === 1 || Number(parentPid) === 2
+}
+
+const WINDOWS_SNAPSHOT_TTL_MS = 5_000
+let windowsSnapshot = null
+
+function windowsCommandByPid() {
+    const now = Date.now()
+    if (windowsSnapshot === null || now - windowsSnapshot.at > WINDOWS_SNAPSHOT_TTL_MS) {
+        windowsSnapshot = { at: now, byPid: new Map(readProcessTable().map((row) => [Number(row.pid), row.command])) }
+    }
+    return windowsSnapshot.byPid
 }
 
 function commandLineOf(pid) {
     const wanted = Number(pid)
     if (!Number.isInteger(wanted) || wanted <= 0) return null
+    if (process.platform === 'win32') {
+        const command = windowsCommandByPid().get(wanted)
+        return typeof command === 'string' && command !== '' ? command : null
+    }
     try {
-        if (process.platform === 'win32') {
-            const text = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${wanted}'; if ($p) { $p.CommandLine }`], { encoding: 'utf8', windowsHide: true, timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'] })
-            const value = text.trim()
-            return value === '' ? null : value
-        }
         const text = execFileSync('ps', ['-o', 'args=', '-p', String(wanted)], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] })
         const value = text.trim()
         return value === '' ? null : value
@@ -123,8 +135,8 @@ export async function assessHttpInstances({ now = Date.now(), roots = [] } = {})
         const healthPid = Number(health?.pid ?? 0)
         const identity = ownerPid === serverPid ? 'socket-owner' : (healthPid > 0 && healthPid === serverPid ? 'health-pid' : null)
         const supervisorPid = liveSupervisorPid(port, instance, now)
-        const parentPid = parentPidOf(serverPid)
-        const attached = establishedConnectionCount(port)
+        const parentPid = await parentPidOf(serverPid)
+        const attached = await establishedConnectionCount(port)
         const predicates = [
             measure('attributed', 'registry', true),
             measure('not-self', serverPid !== process.pid, serverPid !== process.pid),
@@ -170,7 +182,7 @@ export async function assessLeases({ roots = [] } = {}) {
             const browserAlive = browserPid > 0 ? pidAlive(browserPid) : null
             const portOpen = port > 0 ? await portAcceptsConnection(port) : null
             const holdsPort = port > 0 ? await portOwnerPid(port) : null
-            const attached = port > 0 ? establishedConnectionCount(port) : null
+            const attached = port > 0 ? await establishedConnectionCount(port) : null
 
             const deathEvidence = [
                 holderPid > 0 && holderAlive === false ? `holder-pid-${holderPid}-dead` : null,
@@ -215,15 +227,15 @@ export async function assessAttributedChildren({ roots = [], liveSessionIds = nu
             // ledger and spawns ps per row, so the hourly pass over many projects would take minutes.
             if (pidAlive(pid) !== true) continue
             const attributed = attributePid(pid, { root })
-            const parentPid = parentPidOf(pid)
+            const parentPid = await parentPidOf(pid)
             const port = Number.isInteger(Number(row.port)) && Number(row.port) > 0 ? Number(row.port) : null
-            const attached = port === null ? null : establishedConnectionCount(port)
+            const attached = port === null ? null : await establishedConnectionCount(port)
             const sessionLive = typeof row.session_id === 'string' && liveSessionIds ? liveSessionIds.has(row.session_id) : null
             const predicates = [
                 measure('attributed', attributed.dispatch_id ?? row.kind, true),
                 measure('not-self', pid !== process.pid, pid !== process.pid),
                 measure('alive', pidAlive(pid), pidAlive(pid) === true),
-                measure('parent-abandoned', parentPid, parentAbandoned(parentPid)),
+                measure('parent-abandoned', parentPid, parentAbandoned(parentPid, attributed.recorded_ppid)),
                 measure('no-live-lane', sessionLive === null ? 'no-session-recorded' : sessionLive === false, sessionLive === null ? true : sessionLive === false),
                 measure('zero-attached-clients', attached, port === null ? true : attached === 0),
                 measure('not-user-browser', isProtectedBrowser(pid) === false, isProtectedBrowser(pid) === false),
@@ -245,13 +257,13 @@ export async function assessAttributedChildren({ roots = [], liveSessionIds = nu
     return findings
 }
 
-export function liveMcpClientInParentChain(pid, parentPid, table, { maxHops = MAX_PARENT_HOPS } = {}) {
+export async function liveMcpClientInParentChain(pid, parentPid, table, { maxHops = MAX_PARENT_HOPS } = {}) {
     const byPid = new Map()
     for (const row of table) {
         const rowPid = Number(row.pid)
         if (Number.isInteger(rowPid) && rowPid > 0) byPid.set(rowPid, row)
     }
-    let current = Number.isInteger(Number(parentPid)) && Number(parentPid) > 0 ? Number(parentPid) : parentPidOf(pid)
+    let current = Number.isInteger(Number(parentPid)) && Number(parentPid) > 0 ? Number(parentPid) : await parentPidOf(pid)
     const seen = new Set()
     let unreadable = null
     for (let hop = 0; hop < maxHops; hop += 1) {
@@ -265,7 +277,7 @@ export function liveMcpClientInParentChain(pid, parentPid, table, { maxHops = MA
         } else if (MCP_CLIENT_PATTERNS.some((pattern) => pattern.test(command))) {
             return { value: `client:${current}:${command.slice(0, 80)}`, client: true }
         }
-        const next = byPid.get(current)?.ppid ?? parentPidOf(current)
+        const next = byPid.get(current)?.ppid ?? await parentPidOf(current)
         if (!Number.isInteger(Number(next)) || Number(next) <= 0) break
         current = Number(next)
     }
@@ -302,7 +314,7 @@ export async function assessUnattributedServers({ roots = [], liveSessionIds = n
     for (const { pid, row, info } of candidates) {
         const ledgerRows = ledgerByPid.get(pid) ?? []
         const ledgerRow = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1] : null
-        const parentPid = Number.isInteger(Number(row.ppid)) && Number(row.ppid) > 0 ? Number(row.ppid) : parentPidOf(pid)
+        const parentPid = Number.isInteger(Number(row.ppid)) && Number(row.ppid) > 0 ? Number(row.ppid) : await parentPidOf(pid)
         const attributed = ledgerRow !== null
         const evidence = [attributed ? null : 'unattributed', parentAbandoned(parentPid) ? 'parent-abandoned' : null].filter(Boolean).join('+')
         const port = info.port
@@ -318,7 +330,7 @@ export async function assessUnattributedServers({ roots = [], liveSessionIds = n
             laneValue = 'no-session-recorded'
         }
         const chain = info.transport === 'stdio'
-            ? liveMcpClientInParentChain(pid, parentPid, table)
+            ? await liveMcpClientInParentChain(pid, parentPid, table)
             : { value: 'not-a-stdio-server', client: false }
         const alive = pidAlive(pid)
         const predicates = [

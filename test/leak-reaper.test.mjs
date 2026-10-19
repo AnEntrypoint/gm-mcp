@@ -16,9 +16,9 @@ const { allocateHttpPort, portIsFree, instanceFilePath } = await import('../src/
 const { pidAlive } = await import('../src/dispatch.js')
 
 const failures = []
-const check = (name, fn) => {
+const check = async (name, fn) => {
     try {
-        fn()
+        await fn()
         console.log(`  ok   ${name}`)
     } catch (error) {
         failures.push(name)
@@ -160,12 +160,12 @@ const recycledPort = freeProbe.address().port
 await new Promise((resolve) => freeProbe.close(resolve))
 writeFileSync(instanceFilePath(recycledPort), JSON.stringify({ port: recycledPort, host: '127.0.0.1', pid: process.pid, version: 'test', entry: 'leak-reaper.test.mjs', supervisor_pid: null, ts: Date.now() }, null, 2), 'utf8')
 
-check('a registry holding a live pid that does not own its port is not a live hold', () => {
-    assert.equal(portIsFree(recycledPort), true, 'the port still read as taken')
+await check('a registry holding a live pid that does not own its port is not a live hold', async () => {
+    assert.equal(await portIsFree(recycledPort), true, 'the port still read as taken')
 })
 
-check('the lowest free port is allocated, so ports are reused rather than ratcheting up', () => {
-    const allocated = allocateHttpPort({ preferred: recycledPort, from: recycledPort, to: recycledPort + 5 })
+await check('the lowest free port is allocated, so ports are reused rather than ratcheting up', async () => {
+    const allocated = await allocateHttpPort({ preferred: recycledPort, from: recycledPort, to: recycledPort + 5 })
     assert.equal(allocated, recycledPort, `allocated ${allocated}`)
 })
 

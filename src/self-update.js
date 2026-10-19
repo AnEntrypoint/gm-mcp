@@ -272,7 +272,9 @@ async function probeHead(cached) {
     if (!response.ok) {
         const error = new Error(`HTTP ${response.status} from ${HEAD_PROBE_URL}`)
         const resetEpochSec = Number(response.headers.get('x-ratelimit-reset'))
+        const retryAfterSec = Number(response.headers.get('retry-after'))
         if ((response.status === 403 || response.status === 429) && resetEpochSec > 0) error.rateLimitResetMs = resetEpochSec * 1000
+        else if ((response.status === 403 || response.status === 429) && retryAfterSec > 0) error.rateLimitResetMs = Date.now() + retryAfterSec * 1000
         throw error
     }
     const head = await response.json()

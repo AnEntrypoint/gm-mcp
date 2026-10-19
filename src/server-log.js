@@ -39,12 +39,13 @@ function dirFacts(dir) {
     }
 }
 
-export function logLocations(projectRoot = process.cwd()) {
+export function logLocations(projectRoot = null) {
+    const root = projectRoot || process.cwd()
     return {
         gm_mcp_server_log: fileFacts(logFilePath()),
         gm_mcp_server_log_rotated: fileFacts(`${logFilePath()}.1`),
         runner_daemon_log: fileFacts(path.join(agentplugDir(), 'daemon.log')),
-        exec_spool_out: dirFacts(path.join(spoolDirOf(projectRoot), 'out')),
+        exec_spool_out: { ...dirFacts(path.join(spoolDirOf(root), 'out')), root, root_source: projectRoot ? 'explicit' : 'process_cwd' },
     }
 }
 

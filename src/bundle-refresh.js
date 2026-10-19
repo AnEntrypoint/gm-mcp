@@ -130,6 +130,7 @@ async function drainAndExit(server) {
 }
 
 let stdioHandedOver = false
+let stdioDeferralStartedAt = null
 
 export function stdioSessionHandedOver() {
     return stdioHandedOver
@@ -153,9 +154,16 @@ export async function handOverStdioToRefreshedBundle({ state, transport, server,
     }
     const inflight = inflightDispatchCount()
     if (inflight > 0) {
-        appendDiagnostic('bundle-handover-stdio-deferred', { ...detail, dispatches_inflight: inflight })
-        return { outcome: 'deferred', reason: 'dispatch-in-flight', dispatches_inflight: inflight }
+        const now = Date.now()
+        stdioDeferralStartedAt ??= now
+        const waited_ms = now - stdioDeferralStartedAt
+        if (waited_ms < HANDOVER_DEFER_LIMIT_MS) {
+            appendDiagnostic('bundle-handover-stdio-deferred', { ...detail, dispatches_inflight: inflight, waited_ms })
+            return { outcome: 'deferred', reason: 'dispatch-in-flight', dispatches_inflight: inflight }
+        }
+        appendDiagnostic('bundle-handover-stdio-deferral-expired', { ...detail, dispatches_inflight: inflight, waited_ms })
     }
+    stdioDeferralStartedAt = null
     stdioHandedOver = true
     if (monitor) clearInterval(monitor)
     appendDiagnostic('bundle-handover-stdio', { ...detail, url })
