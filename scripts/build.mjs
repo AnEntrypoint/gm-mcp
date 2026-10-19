@@ -15,9 +15,14 @@ export function headBundleVersion(root) {
     return m[1]
 }
 
-export function bundleDepManifest(root) {
-    const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
-    const lock = JSON.parse(readFileSync(path.join(root, 'package-lock.json'), 'utf8'))
+function committedOrNamed(root, rel, keep) {
+    if (keep.has(rel)) return readFileSync(path.join(root, rel), 'utf8')
+    return execFileSync('git', ['show', `HEAD:${rel}`], { cwd: root, encoding: 'utf8' })
+}
+
+export function bundleDepManifest(root, keep = new Set()) {
+    const pkg = JSON.parse(committedOrNamed(root, 'package.json', keep))
+    const lock = JSON.parse(committedOrNamed(root, 'package-lock.json', keep))
     const out = {}
     for (const name of Object.keys(pkg.devDependencies || {}).filter(n => n !== 'esbuild').sort())
         out[name] = lock.packages?.[`node_modules/${name}`]?.version ?? null
@@ -52,7 +57,7 @@ export async function buildBundle(write = false, keep = new Set()) {
         platform: 'node',
         format: 'esm',
         external: ['node:*'],
-        banner: { js: `#!/usr/bin/env node\nvar BUNDLE_VERSION = ${JSON.stringify(headBundleVersion(repoRoot))};\nvar BUNDLE_DEPS = ${JSON.stringify(bundleDepManifest(repoRoot))};` },
+        banner: { js: `#!/usr/bin/env node\nvar BUNDLE_VERSION = ${JSON.stringify(headBundleVersion(repoRoot))};\nvar BUNDLE_DEPS = ${JSON.stringify(bundleDepManifest(repoRoot, keep))};` },
         preserveSymlinks: true,
         outfile: path.join(repoRoot, 'bin', 'gm-mcp-server.js'),
         plugins: [headSrcPlugin(repoRoot, keep)],
