@@ -123,12 +123,12 @@ const GIT_SCOPED_TYPES = {
     git_rewrite_authors: { apply: booleanLike, confirm: z.string(), since: z.string(), author_name: z.string(), author_email: z.string() },
 }
 
-const ZOD_BODY_TYPE_NAMES = { ZodString: 'string', ZodBoolean: 'boolean', ZodNumber: 'number', ZodArray: 'array' }
+const ZOD_BODY_TYPE_NAMES = { string: 'string', boolean: 'boolean', number: 'number', array: 'array' }
 function zodBodyType(zt) {
     let t = zt
     while (t._def.innerType) t = t._def.innerType
     if (t._def.options) return [...new Set(t._def.options.map(zodBodyType))].join('|')
-    return ZOD_BODY_TYPE_NAMES[t._def.typeName] ?? 'any'
+    return ZOD_BODY_TYPE_NAMES[t._def.type] ?? 'any'
 }
 
 function scopedGitRow(verb) {
