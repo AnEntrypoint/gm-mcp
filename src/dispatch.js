@@ -501,7 +501,9 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
         }
         head = renderMatchesKept(out, holder, matchesReturned, toYaml, slim)
     }
-    const notice = buildNotice(matchesReturned, matchesTotal)
+    let notice = buildNotice(matchesReturned, matchesTotal)
+    const compact = notice.length > maxChars / 2
+    if (compact) notice = `reply_truncated: true\nreply_max_chars: ${maxChars}\nspill_file: ${spillPath}\n${holder ? `matches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n` : ''}`
     const budget = Math.max(0, maxChars - REPLY_NOTICE_RESERVE_CHARS)
     if (head.length > budget) {
         const cut = head.slice(0, budget)
@@ -515,8 +517,9 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
         head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
     }
     let delivered = head.length + notice.length
-    for (let pass = 0; pass < 2; pass++) delivered = head.length + buildNotice(matchesReturned, matchesTotal, delivered).length
-    return `${head}${buildNotice(matchesReturned, matchesTotal, delivered)}`
+    for (let pass = 0; pass < 2 && !compact; pass++) delivered = head.length + buildNotice(matchesReturned, matchesTotal, delivered).length
+    const full = `${head}${compact ? notice : buildNotice(matchesReturned, matchesTotal, delivered)}`
+    return full.length > maxChars ? full.slice(0, maxChars) : full
 }
 
 function shapeGitStatusReply(verb, body, out) {
