@@ -1189,6 +1189,29 @@ function recordLeaseSession(key, pid, session_id) {
 }
 
 const LEASE_SESSION_SIDECAR = /^([0-9a-f]{16})\.(\d+)\.([0-9a-f]{16})\.session$/
+const LEASE_FILE = /^([0-9a-f]{16})\.(\d+)\.lease$/
+
+export function releaseAgentLeases() {
+    let names
+    try {
+        names = fs.readdirSync(LEASES_DIR)
+    } catch {
+        return 0
+    }
+    const pid = String(process.pid)
+    let released = 0
+    for (const name of names) {
+        const owner = (LEASE_FILE.exec(name) ?? LEASE_SESSION_SIDECAR.exec(name))?.[2]
+        if (owner !== pid) continue
+        try {
+            fs.rmSync(path.join(LEASES_DIR, name), { force: true })
+            released++
+        } catch (error) {
+            appendDiagnostic('lease-release-failed', { lease_file: name, error: String(error?.message || error) })
+        }
+    }
+    return released
+}
 
 export function leaseSessionsFor(root) {
     const key = leaseKeyFor(root)
@@ -2088,8 +2111,11 @@ function withDispatchWait(out, waitedMs, claimedAtMs) {
     if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !isPlainObject(out)) return out
     const admitted = Number(out.admission_waited_ms)
     const admissionMs = Number.isFinite(admitted) && admitted > 0 ? Math.min(admitted, waitedMs) : 0
-    const claimMs = claimedAtMs === null ? 0 : Math.max(0, Math.min(claimedAtMs - admissionMs, waitedMs - admissionMs))
     const executed = firstReportedMs(out, ['duration_ms', 'guest_elapsed_ms'])
+    const beforeGuestCapMs = waitedMs - admissionMs
+    const claimMs = claimedAtMs !== null
+        ? Math.max(0, Math.min(claimedAtMs - admissionMs, beforeGuestCapMs))
+        : beforeGuestCapMs - (executed === null ? 0 : Math.min(executed, beforeGuestCapMs))
     const postClaimMs = waitedMs - admissionMs - claimMs
     const execMs = executed === null ? postClaimMs : Math.min(executed, postClaimMs)
     return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, unattributed_ms: waitedMs - admissionMs - claimMs - execMs } }
@@ -2201,6 +2227,8 @@ function withStaleBundleNotice(verb, text) {
     const drift = bundleDrift()
     if (!drift.stale) return text
     const withNewline = text.endsWith('\n') ? text : `${text}\n`
+    const line = bundleStalenessAnnouncement(drift)
+    if (!line) return `${withNewline}bundle_stale: true\n`
     const block = yaml.dump({
         bundle_stale: true,
         bundle_served_version: drift.running_version,
@@ -2209,8 +2237,6 @@ function withStaleBundleNotice(verb, text) {
         bundle_installed_sha: drift.installed_sha256,
         bundle_reloadable: drift.reloadable === true,
     }, { lineWidth: 100 })
-    const line = bundleStalenessAnnouncement(drift)
-    if (!line) return `${withNewline}bundle_stale: true\n`
     if (READ_ONLY_STATUS_VERBS.has(verb)) return `${withNewline}${block}\n`
     return `${withNewline}${block}\n${line}\n`
 }

@@ -1,7 +1,7 @@
 import { isPlainObject } from './plain-object.js';
 import process from 'node:process'
 import { BUNDLE_VERSION } from './bundle-version.js'
-import { inflightDispatchCount } from './dispatch.js'
+import { inflightDispatchCount, releaseAgentLeases } from './dispatch.js'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 
 const CLIENT_GONE_EXIT_RECHECK_MS = 1_000
@@ -60,7 +60,8 @@ export function keepServingOnAsyncFailure() {
 export function logSignalExits() {
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
         process.on(signal, () => {
-            appendDiagnostic('exit', { reason: 'signal', signal, dispatches_inflight: inflightDispatchCount() })
+            const leases_released = releaseAgentLeases()
+            appendDiagnostic('exit', { reason: 'signal', signal, dispatches_inflight: inflightDispatchCount(), leases_released })
             process.exit(0)
         })
     }
