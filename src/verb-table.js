@@ -73,7 +73,7 @@ const GIT_COMMIT_TYPES = {
 }
 const GIT_COMMIT_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'untrack', 'recover_remote_moved', 'source_ref', 'rev', 'author_name', 'author_email']
 const GIT_FINALIZE_FIELDS = aliasFields('git_finalize', GIT_COMMIT_TYPES, GIT_COMMIT_KEYS)
-const GIT_COMMIT_VERB_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'author_name', 'author_email', 'claim_only', 'patch', 'hunks']
+const GIT_COMMIT_VERB_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'untrack', 'author_name', 'author_email', 'claim_only', 'patch', 'hunks']
 const GIT_COMMIT_FIELDS = aliasFields('git_commit', GIT_COMMIT_TYPES, GIT_COMMIT_VERB_KEYS)
 const GIT_SINGLE_SHAPE = (verb, keys, sample) => ` ${keys.join(', ')} ${keys.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${sample}":...} and body:{"${sample}":...} are the same call (one accepted shape for ${verb}); a key named in both takes its value from body.`
 const GIT_COMMIT_DESCRIPTION = GIT_SINGLE_SHAPE('git_commit', GIT_COMMIT_VERB_KEYS, 'message') + ` The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit. claim_only:true only claims paths in .gm/lane-claims.json for SESSION_ID (needs a non-empty paths array) and does not commit or publish.`
@@ -373,6 +373,7 @@ const GIT_COMMIT_BODY = {
         amend: { type: 'boolean', description: 'Amends HEAD; refused on a pushed HEAD.' },
         add_all: { type: 'boolean', description: 'Stages everything first.' },
         allow_whole_index: { type: 'boolean', description: 'Commits the whole index when paths is absent.' },
+        untrack: { type: 'boolean', description: 'Removes the named .agentplug* paths from the index only (git rm --cached semantics; files stay on disk) in a commit that names nothing else, then pushes. Add and modify of .agentplug* stay refused.' },
         allow_foreign_rows: { type: 'boolean', aliases: ['allow_foreign_prd_rows'], description: 'Commits rows another session owns.' },
         author_name: { type: 'string', description: 'Commit author name; defaults to the configured git identity.' },
         author_email: { type: 'string', description: 'Commit author email; defaults to the configured git identity.' },
