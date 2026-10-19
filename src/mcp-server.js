@@ -196,7 +196,7 @@ export function createServer() {
 
     const verbDispatch = async (verb, args = {}, extra) => {
         try {
-            const text = unknownVerbHint(verb, await gmDispatch({ verb, ...mergeVerbRangeFields(verb, args) }, extra?.signal))
+            const text = unknownVerbHint(verb, await gmDispatch({ ...mergeVerbRangeFields(verb, args), verb }, extra?.signal))
             return { content: [{ type: 'text', text: withVerbRejectionHint(verb, text) }] }
         } catch (error) {
             return failedDispatchResult(verb, error)
