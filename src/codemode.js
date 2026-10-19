@@ -134,6 +134,12 @@ export function foldVerbArgs(tool, args) {
     return { ...envelope, body: { ...extra, ...body } }
 }
 
+function sessionAliasArgs(folded) {
+    if (!isPlainObject(folded?.body) || !('session' in folded.body)) return folded
+    const { session, ...body } = folded.body
+    return { ...folded, body, session_id: folded.session_id ?? session }
+}
+
 export function refuseUndeclaredBodyKeys(name, verb, folded) {
     if (!verb || !folded || typeof folded !== 'object') return
     const body = folded.body
@@ -290,7 +296,7 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             const merged = mergeEnvelope(name, args, envelope)
             const tool = tools.get(name)
             const defaults = {}
-            const folded = canonicalFsReadArgs(tool.verb, foldVerbArgs(tool, merged))
+            const folded = canonicalFsReadArgs(tool.verb, sessionAliasArgs(foldVerbArgs(tool, merged)))
             refuseUndeclaredBodyKeys(name, tool.verb, folded)
             refuseMissingRequiredBodyKeys(name, tool.verb, folded)
             if ('session_id' in tool.inputSchema && folded.session_id === undefined) defaults.session_id = session_id
@@ -325,7 +331,8 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
     const api = {
         list: (options) => listEntries(tools, options),
         help: () => ({ notices: NOTICES, list_options: { filter: 'substring of name, verb, alias or description', names_only: 'true returns names only', max_desc: `description chars (default ${DEFAULT_LIST_DESC_CHARS}, 0 = full)` }, codemode_max_chars: `reply cap (default ${DEFAULT_CODEMODE_MAX_CHARS})`, [DISPATCH_ENVELOPE_NAME]: dispatchEnvelopeSchema() }),
-        describe: (name) => {
+        describe: (nameOrArgs) => {
+            const name = isPlainObject(nameOrArgs) ? nameOrArgs.name : nameOrArgs
             const resolved = resolve(name)
             if (!resolved) throw unknownNameError(name, names)
             const tool = tools.get(resolved)
