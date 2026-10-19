@@ -78,8 +78,12 @@ async function inRootReal(path) {
   }
 }
 
-const isOwned = (name) => OWNED_PREFIXES.some((prefix) => name.startsWith(prefix));
-const isNamed = (name) => explicitPrefixes.some((prefix) => name.startsWith(prefix));
+const SEPARATORS = /[-._]/;
+const matchesPrefix = (name, prefix) =>
+  name === prefix ||
+  (name.startsWith(prefix) && (SEPARATORS.test(prefix.at(-1)) || SEPARATORS.test(name.charAt(prefix.length))));
+const isOwned = (name) => OWNED_PREFIXES.some((prefix) => matchesPrefix(name, prefix));
+const isNamed = (name) => explicitPrefixes.some((prefix) => matchesPrefix(name, prefix));
 const unownedPrefixOf = (name) => name.split(/[-._]/)[0] || name;
 
 const candidates = [];
@@ -168,7 +172,7 @@ if (apply) {
   }
 }
 
-const byPrefix = Object.fromEntries([...OWNED_PREFIXES, ...explicitPrefixes].map((prefix) => [prefix, removable.filter((c) => c.name.startsWith(prefix)).length]));
+const byPrefix = Object.fromEntries([...OWNED_PREFIXES, ...explicitPrefixes].map((prefix) => [prefix, removable.filter((c) => matchesPrefix(c.name, prefix)).length]));
 const unownedSorted = Object.fromEntries(Object.entries(unownedByPrefix).sort(([a], [b]) => a.localeCompare(b)));
 const unownedTotal = Object.values(unownedSorted).reduce((sum, n) => sum + n, 0);
 
