@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +19,7 @@ let stagedDir = null
 if (binStaged || !shipsWorkingBin) {
     stagedDir = mkdtempSync(path.join(tmpdir(), 'gm-mcp-staged-'))
     const treeDir = path.join(stagedDir, 'tree')
+    mkdirSync(treeDir)
     const env = binStaged ? process.env : { ...process.env, GIT_INDEX_FILE: path.join(stagedDir, 'index') }
     const gitIn = args => spawnSync('git', args, { cwd: repoRoot, encoding: 'utf8', env, maxBuffer: 64 * 1024 * 1024 })
     if (!binStaged) {
