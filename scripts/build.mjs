@@ -18,7 +18,7 @@ export function bundleVersion(root) {
 export function srcSha256(root) {
     const hash = createHash('sha256')
     for (const name of readdirSync(path.join(root, 'src')).filter(n => n.endsWith('.js')).sort()) {
-        hash.update(name).update('\0').update(readFileSync(path.join(root, 'src', name))).update('\0')
+        hash.update(name).update('\0').update(readFileSync(path.join(root, 'src', name), 'utf8').replace(/\r\n?/g, '\n')).update('\0')
     }
     return hash.digest('hex')
 }
