@@ -2,6 +2,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { DEFAULT_CODEMODE_TIMEOUT_MS } from './codemode-budget.js'
 
+const OWNER_DIR_MODE = 0o700
+const OWNER_FILE_MODE = 0o600
 const POLL_INTERVAL_MS = 50
 const WATCH_SILENT_MS = 1000
 const RENAME_BACKOFF_MS = [10, 20, 40, 80, 160, 320]
@@ -65,10 +67,10 @@ async function renameIntoPlace(tempPath, finalPath) {
 }
 
 async function submitRequest(inDir, name, text) {
-    fs.mkdirSync(inDir, { recursive: true })
+    fs.mkdirSync(inDir, { recursive: true, mode: OWNER_DIR_MODE })
     const tempPath = path.join(inDir, `.${name}.${process.pid}.tmp`)
     const finalPath = path.join(inDir, `${name}.txt`)
-    fs.writeFileSync(tempPath, text, { encoding: 'utf8', flag: 'wx' })
+    fs.writeFileSync(tempPath, text, { encoding: 'utf8', flag: 'wx', mode: OWNER_FILE_MODE })
     try {
         await renameIntoPlace(tempPath, finalPath)
     } catch (error) {
@@ -160,7 +162,7 @@ export async function dispatchSpool({ verb, body = {}, cwd, budgetMs = defaultBu
     const tempPath = path.join(spoolDir, 'in', verb, `.${name}.${process.pid}.tmp`)
     const longest = Math.max(replyPath.length, tempPath.length)
     if (process.platform === 'win32' && longest > WINDOWS_MAX_PATH) throw spoolError('spool-path-too-long', `spool path would be ${longest} characters, over the Windows MAX_PATH limit of ${WINDOWS_MAX_PATH}; move the project to a shorter root or use a shorter session_id`, { path_chars: longest, limit: WINDOWS_MAX_PATH })
-    fs.mkdirSync(outDir, { recursive: true })
+    fs.mkdirSync(outDir, { recursive: true, mode: OWNER_DIR_MODE })
     const waiter = waitForReply({ outDir, replyPath, deadline: Date.now() + budgetMs, budgetMs, verb, name })
     try {
         await submitRequest(path.join(spoolDir, 'in', verb), name, JSON.stringify({ ...body, session_id: sessionId, _agentplug_lane_wait_ms: budgetMs }))
