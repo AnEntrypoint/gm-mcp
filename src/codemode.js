@@ -310,7 +310,7 @@ function listSummary(row, maxDesc) {
 function capCodemodeText(text, cap, reserve = 0) {
     const room = Math.max(1, cap - reserve)
     if (text.length <= room) return text
-    const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${cap}\n`
+    const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${cap}\ndispatch_id: ${text.match(/^dispatch_id: (\S+)/m)?.[1] ?? 'not reported'}\nspool_file: ${text.match(SPOOL_FILE_PATTERN)?.[0] ?? 'not reported'}\n`
     const flagged = text.replace(/^(\s*)truncated: false$/gm, "$1truncated: true")
     return `${flagged.slice(0, Math.max(0, room - notice.length))}${notice}`
 }
