@@ -164,7 +164,8 @@ export function refuseUndeclaredBodyKeys(name, verb, folded) {
     if (unknown.length === 0) return
     const hint = verb.startsWith('codeinsight') || verb.startsWith('callers') || verb.startsWith('callees') || verb.startsWith('impact') ? ' -- codeinsight answers structure: use {symbol, verb:"find"|"callers"|...} for symbols, or gm.codesearch({query}) for text' : ''
     const canonical = verb === 'fs_read' ? [...Object.keys(schema.fields).filter((key) => !FS_READ_RANGE_ALIASES.includes(key)), 'startLine', 'endLine'] : Object.keys(schema.fields)
-    throw new Error(`${name} body has undeclared key ${unknown.join(', ')} -- declared body fields: ${canonical.join(', ')} -- alias spellings: skills/gm/docs/verbs.md${hint}`)
+    const outputHint = verb === 'grep' && unknown.includes('output') ? ' -- grep spells this key output_mode (content|files_with_matches|count), not output' : ''
+    throw new Error(`${name} body has undeclared key ${unknown.join(', ')} -- declared body fields: ${canonical.join(', ')} -- alias spellings: skills/gm/docs/verbs.md${hint}${outputHint}`)
 }
 
 export function refuseMissingRequiredBodyKeys(name, verb, folded) {
@@ -422,7 +423,7 @@ export function registerCodeMode(server, tools) {
                 session_id: z.string().optional().describe('Default session_id for every gm call that does not pass its own.'),
                 cwd: z.string().optional().describe('Default cwd for every gm call that does not pass its own.'),
                 max_chars: z.number().optional().describe('Reply cap in characters for the returned text (default 24000). Past it the text is cut and reply_truncated is true.'),
-                timeout_seconds: z.number().optional().describe('Dispatch envelope key folded into every gm call that declares it (poll budget in seconds).'),
+                timeout_seconds: z.number().optional().describe('Dispatch envelope key folded into every gm call that declares it: poll budget in seconds (default 120, ceiling 600; override the ceiling with GM_MCP_POLL_TIMEOUT_CEILING_MS). A timeout keeps the dispatch running; resume it with resume_task.'),
                 full_response: z.boolean().optional().describe('Dispatch envelope key folded into every gm call that declares it (bypass reply compaction).'),
                 resume_task: z.string().optional().describe('Dispatch envelope key folded into every gm call that declares it (resume an earlier dispatch by task id).'),
             },
