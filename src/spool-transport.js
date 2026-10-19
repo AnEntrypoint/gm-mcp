@@ -75,7 +75,9 @@ async function submitRequest(inDir, name, text) {
         fs.writeFileSync(tempPath, text, { encoding: 'utf8', flag: 'wx', mode: OWNER_FILE_MODE })
         await renameIntoPlace(tempPath, finalPath)
     } catch (error) {
-        fs.rmSync(tempPath, { force: true })
+        try {
+            fs.rmSync(tempPath, { force: true })
+        } catch {}
         if (DISK_FULL_CODES.has(error.code)) throw spoolError('disk-full', `spool request not written: the disk is full (${error.code}); free space and resubmit`, { path: finalPath })
         throw error
     }

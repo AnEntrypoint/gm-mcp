@@ -201,6 +201,8 @@ export function withNoticeCodes(out) {
 
 const PRD_LISTING_KEYS = new Set(['why', 'hint'])
 
+const PRD_FULL_LISTING_KEYS = new Set(['why', 'hint', 'description'])
+
 const POOL_BRIEF_KEYS = new Set(['brief'])
 
 const HELP_TEXT_KEYS = new Set(['parameters'])
@@ -208,7 +210,10 @@ const HELP_TEXT_KEYS = new Set(['parameters'])
 export function untruncatedKeysFor(verb, body) {
     if (body && typeof body === 'object' && body.help === true) return HELP_TEXT_KEYS
     if (verb === 'ci-log' || verb === 'ci_log') return CI_LOG_TEXT_KEYS
-    if (verb === 'prd-list') return PRD_LISTING_KEYS
+    if (verb === 'prd-list') {
+        const wholeRow = body && typeof body === 'object' && (typeof body.id === 'string' || body.full === true || body.full === 'true')
+        return wholeRow ? PRD_FULL_LISTING_KEYS : PRD_LISTING_KEYS
+    }
     if (verb === 'pool-brief') return POOL_BRIEF_KEYS
     const expandsRecall = verb === 'recall' && body && typeof body === 'object' && (body.full === true || typeof body.key === 'string')
     return expandsRecall ? EXPANDED_RECALL_KEYS : NO_KEYS

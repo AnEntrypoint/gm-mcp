@@ -1,6 +1,6 @@
 import { isPlainObject } from './plain-object.js';
 import { agentplugDir, spoolDirOf, toolsDir } from './paths.js'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spoolFs as fs, spoolSpawn as spawn } from './spool-port.js'
 import { claimByCreate, claimByLink, readJsonOrNull, readLockHolderPid, readOwnerText, readPidTsLock, readStatusJson, readTextOrNull, reclaimLockByRename, replaceLockText, writeTextAtomically as writeFileAtomically, SPOOL_DIR_MODE, SPOOL_FILE_MODE } from './spool-store.js'
 import os from 'node:os'
@@ -313,6 +313,40 @@ function fsReadUnrangedPage(out, inlineMax) {
     }
 }
 
+function fsReadFitReply(out, replyCap, toYaml) {
+    if (!isPlainObject(out) || out.verb !== 'fs_read') return out
+    const key = typeof out.data === 'string' ? 'data' : typeof out.content === 'string' ? 'content' : null
+    if (key === null || renderVerbatimFileText(out, toYaml).length <= replyCap) return out
+    const lines = out[key].length === 0 ? [] : out[key].replace(/\n$/, '').split('\n')
+    if (lines.length === 0) return out
+    const start = Number.isFinite(Number(out.start_line)) ? Number(out.start_line) : 1
+    const total = Number.isFinite(Number(out.total_lines)) ? Number(out.total_lines) : start - 1 + lines.length
+    const cutAt = (count) => {
+        const cut = count < lines.length
+        return {
+            ...out,
+            [key]: lines.slice(0, count).join('\n'),
+            start_line: start,
+            end_line: start + count - 1,
+            returned_lines: count,
+            total_lines: total,
+            has_more_lines: cut,
+            truncated_at_bytes: cut,
+            truncated: cut || out.truncated === true,
+            ...(isPlainObject(out.returned_range) ? { returned_range: { start_line: start, end_line: start + count - 1 } } : {}),
+            ...(cut ? { next_start_line: start + count } : {}),
+        }
+    }
+    let low = 1
+    let high = lines.length
+    while (low < high) {
+        const mid = Math.ceil((low + high) / 2)
+        if (renderVerbatimFileText(cutAt(mid), toYaml).length <= replyCap) low = mid
+        else high = mid - 1
+    }
+    return cutAt(low)
+}
+
 function applyFsReadRangeFallbackRaw(verb, body, out, inlineMax) {
     if (verb !== 'fs_read') return out
     if (!isPlainObject(out)) return out
@@ -420,7 +454,7 @@ function renderMatchesKept(out, holder, kept, toYaml, slim = false) {
 
 function matchesCutNotice(matchesReturned, matchesTotal, maxChars) {
     if (matchesTotal === undefined || matchesReturned >= matchesTotal) return ''
-    return `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\nmatches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
+    return `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\nmatches_dropped: ${matchesTotal - matchesReturned}\nmatches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
 }
 
 function largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice, slim = false) {
@@ -621,24 +655,36 @@ function storageFullReply(inPath, error) {
     return { ok: false, error_code: 'storage_full', wrote_no_new_dispatch: true, error: `no space left on the spool volume while publishing ${inPath} (${error.code}); no request was published, so no dispatch was made -- free disk space and retry` }
 }
 
+const SPOOL_PUBLISH_ATTEMPTS = 3
+
+function removeTemp(file) {
+    try {
+        fs.unlinkSync(file)
+    } catch {
+        return
+    }
+}
+
 function publishSpoolRequest(inDir, inPath, task, body) {
     const unsafe = unsafeSpoolName('task', task)
     if (unsafe) throw new Error(unsafe)
-    const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.tmp`)
-    const longest = Math.max(inPath.length, tempPath.length)
-    if (process.platform === 'win32' && longest > WINDOWS_MAX_PATH) {
-        throw new Error(`spool request path would be ${longest} characters, over the Windows MAX_PATH limit of ${WINDOWS_MAX_PATH}; move the project to a shorter root`)
-    }
-    fs.mkdirSync(inDir, { recursive: true, mode: SPOOL_DIR_MODE })
-    try {
-        fs.writeFileSync(tempPath, body, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
-        fs.linkSync(tempPath, inPath)
-        return null
-    } catch (error) {
-        if (STORAGE_FULL_CODES.has(error?.code)) return storageFullReply(inPath, error)
-        throw error
-    } finally {
-        try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath) } catch {}
+    for (let attempt = 1; ; attempt += 1) {
+        const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`)
+        const longest = Math.max(inPath.length, tempPath.length)
+        if (process.platform === 'win32' && longest > WINDOWS_MAX_PATH) {
+            throw new Error(`spool request path would be ${longest} characters, over the Windows MAX_PATH limit of ${WINDOWS_MAX_PATH}; move the project to a shorter root`)
+        }
+        try {
+            fs.mkdirSync(inDir, { recursive: true, mode: SPOOL_DIR_MODE })
+            fs.writeFileSync(tempPath, body, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
+            fs.linkSync(tempPath, inPath)
+            return null
+        } catch (error) {
+            if (STORAGE_FULL_CODES.has(error?.code)) return storageFullReply(inPath, error)
+            if (error?.code !== 'ENOENT' || attempt >= SPOOL_PUBLISH_ATTEMPTS) throw error
+        } finally {
+            removeTemp(tempPath)
+        }
     }
 }
 
@@ -920,7 +966,7 @@ export function withCodesearchDefaultKHint(defaulted, verb, out) {
         shown,
         total,
         default_k: CODESEARCH_DEFAULT_K,
-        hint: `showing ${shown} of ${total} matches (default k=${CODESEARCH_DEFAULT_K}): raise k (0 = all) or scope with path/glob`,
+        hint: `showing ${shown} of ${total} matches (default k=${CODESEARCH_DEFAULT_K}): raise k (0 = all) or narrow with path/glob`,
     }
     return nested ? { ...out, data: { ...out.data, ...hint } } : { ...out, ...hint }
 }
@@ -2764,13 +2810,14 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 }
                 out = isPlainObject(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
             }
-            const rendered = (verb === 'fs_read' ? renderVerbatimFileText(out, toYaml) : undefined) ?? toYaml(out)
-            const spillNote = verb === 'fs_read' ? fsReadSpillNote(out, rendered) : ''
-            if (LATEST_ONLY_VERBS.has(verb)) pruneSupersededListings(outDir, verb, session_id, outPath, callStartedAtMs)
             const replyCap = replyMaxChars(max_chars)
+            const fitted = verb === 'fs_read' ? fsReadFitReply(out, replyCap, toYaml) : out
+            const rendered = (verb === 'fs_read' ? renderVerbatimFileText(fitted, toYaml) : undefined) ?? toYaml(fitted)
+            const spillNote = verb === 'fs_read' ? fsReadSpillNote(fitted, rendered) : ''
+            if (LATEST_ONLY_VERBS.has(verb)) pruneSupersededListings(outDir, verb, session_id, outPath, callStartedAtMs)
             const spillPath = `${outPath}.reply.txt`
             if (rendered.length > replyCap) fs.writeFileSync(spillPath, rendered, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
-            return capReplyText(rendered, Math.max(0, replyCap - pendingBundleNoticeReserve(verb)), spillPath, out, toYaml, spillNote, requested_max_chars ?? replyCap)
+            return capReplyText(rendered, Math.max(0, replyCap - pendingBundleNoticeReserve(verb)), spillPath, fitted, toYaml, spillNote, requested_max_chars ?? replyCap)
         } catch (e) {
             const failed = { error: `response file was not valid JSON: ${e.message}`, task: requestNumber, out_path: outPath }
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs)) : failed)
