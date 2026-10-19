@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.187 - a spool request that is already linked is never reported as failed
+
+`publishSpoolRequest` (`src/dispatch.js`) ran `removeIfPresent` in its `finally`, which rethrew any unlink error other than `ENOENT`. Once `fs.linkSync` had published the request into `in/<verb>/`, an `EPERM`, `EBUSY` or `EACCES` from removing the temp replaced the successful return, so a request already in the spool reported as failed. The cleanup is now `removeTemp`, which ignores every unlink error: a leftover `.tmp` name is harmless because the daemon claims only `.txt` requests. A failed link still rethrows its own error, since the cleanup no longer throws over it. `BUNDLE_VERSION` and `package.json` move to 0.2.187.
+
 ## 0.2.186 - a concurrent spool write no longer fails on a temp that vanished
 
 `publishSpoolRequest` (`src/dispatch.js`) wrote each request to a temp file and then hard-linked it into `in/<verb>/`. A remover that took the temp between the write and the link made `fs.linkSync` throw `ENOENT`, and that reply surfaced as a codemode error (log 2026-10-19T12:43:01Z, codesearch). The temp name now carries a `randomUUID()` suffix, so no two writes share a name, and an `ENOENT` from the write or the link is retried as that one write (up to `SPOOL_PUBLISH_ATTEMPTS` = 3, recreating the directory each time). Any other error is thrown unchanged. The cleanup in `finally` ignores `ENOENT`, so a temp another actor already removed no longer throws out of the reply. `BUNDLE_VERSION` and `package.json` move to 0.2.186.

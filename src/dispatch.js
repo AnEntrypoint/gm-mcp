@@ -572,11 +572,11 @@ export function unsafeSpoolName(role, value) {
 
 const SPOOL_PUBLISH_ATTEMPTS = 3
 
-function removeIfPresent(file) {
+function removeTemp(file) {
     try {
         fs.unlinkSync(file)
-    } catch (error) {
-        if (error?.code !== 'ENOENT') throw error
+    } catch {
+        return
     }
 }
 
@@ -593,7 +593,7 @@ function publishSpoolRequest(inDir, inPath, task, body) {
         } catch (error) {
             if (error?.code !== 'ENOENT' || attempt >= SPOOL_PUBLISH_ATTEMPTS) throw error
         } finally {
-            removeIfPresent(tempPath)
+            removeTemp(tempPath)
         }
     }
 }
