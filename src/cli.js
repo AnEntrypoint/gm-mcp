@@ -52,9 +52,9 @@ from a shell (or from an agent host that cannot see the MCP tools) with no MCP i
   --timing                include dispatch timing
 
 examples:
-  gm dispatch grep --body {"pattern":"foo","output_mode":"content"} --cwd C:/dev/proj
-  gm dispatch codesearch '{"query":"chunk merger"}' --cwd C:/dev/proj
-  gm dispatch grep '{"pattern":"foo"}' --no-ignore --cwd C:/dev/proj
+  gm dispatch grep --body {"pattern":"foo","output_mode":"content"} --cwd <project-dir>
+  gm dispatch codesearch '{"query":"chunk merger"}' --cwd <project-dir>
+  gm dispatch grep '{"pattern":"foo"}' --no-ignore --cwd <project-dir>
   gm dispatch health
   gm dispatch fetch --raw https://example.com
 
