@@ -182,6 +182,15 @@ export function refuseMissingRequiredBodyKeys(name, verb, folded) {
     throw new Error(`${name} body field ${missing.join(', ')} required -- send ${missing.map((field) => `body.${field}`).join(', ')}`)
 }
 
+export function refuseSelectorlessCodeinsight(name, verb, folded) {
+    if (verb !== 'codeinsight' || !folded || typeof folded !== 'object') return
+    const body = isPlainObject(folded.body) ? folded.body : {}
+    if (['verb', 'action', 'mode'].some((key) => body[key] !== undefined)) return
+    const scoped = ['symbol', 'name', 'path', 'file', 'path_prefix'].filter((key) => body[key] !== undefined)
+    if (scoped.length === 0) return
+    throw new Error(`${name} body has ${scoped.join(', ')} but no verb -- without verb/action/mode codeinsight answers the whole-index overview and ignores ${scoped.join(', ')}; send {verb:"find"|"callers"|...} with it`)
+}
+
 const DEFAULT_LIST_DESC_CHARS = 80
 const DEFAULT_CODEMODE_MAX_CHARS = 24000
 
@@ -300,6 +309,7 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             const folded = canonicalFsReadArgs(tool.verb, foldVerbArgs(tool, merged))
             refuseUndeclaredBodyKeys(name, tool.verb, folded)
             refuseMissingRequiredBodyKeys(name, tool.verb, folded)
+            refuseSelectorlessCodeinsight(name, tool.verb, folded)
             if ('session_id' in tool.inputSchema && folded.session_id === undefined) defaults.session_id = session_id
             if ('cwd' in tool.inputSchema && folded.cwd === undefined) {
                 const defaultCwd = defaultCwdFor(merged, cwd)
