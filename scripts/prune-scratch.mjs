@@ -108,14 +108,24 @@ for (const name of await readdir(resolvedRoot)) {
 const PROC_ROOT = '/proc';
 const UNREADABLE = new Set(['EACCES', 'EPERM']);
 
+async function uidOf(pid) {
+  try {
+    const match = /^Uid:\s+(\d+)/m.exec(await readFile(join(PROC_ROOT, pid, 'status'), 'utf8'));
+    return match ? Number(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function liveHolders(paths) {
   const holders = new Map(paths.map((path) => [path, new Set()]));
-  const unknown = new Set();
+  const unreadablePids = new Set();
+  const readablePids = new Set();
   let pids;
   try {
     pids = (await readdir(PROC_ROOT)).filter((name) => /^\d+$/.test(name));
   } catch {
-    return { holders, unknown: ['no-proc'] };
+    return { holders, noProc: true, unreadable: [] };
   }
   const claim = (pid, target) => {
     for (const path of paths) if (target === path || target.startsWith(path + sep)) holders.get(path).add(Number(pid));
@@ -123,8 +133,9 @@ async function liveHolders(paths) {
   const probe = async (pid, read) => {
     try {
       await read();
+      readablePids.add(pid);
     } catch (err) {
-      if (UNREADABLE.has(err.code)) unknown.add(pid);
+      if (UNREADABLE.has(err.code)) unreadablePids.add(pid);
     }
   };
   for (const pid of pids) {
@@ -139,32 +150,35 @@ async function liveHolders(paths) {
       for (const arg of (await readFile(join(base, 'cmdline'), 'utf8')).split('\0')) claim(pid, arg);
     });
   }
-  return { holders, unknown: [...unknown] };
+  const opaque = [...unreadablePids].filter((pid) => !readablePids.has(pid));
+  const unreadable = await Promise.all(opaque.map(async (pid) => ({ pid: Number(pid), uid: await uidOf(pid) })));
+  return { holders, noProc: false, unreadable };
+}
+
+async function statusOf(candidate, live) {
+  if (live.noProc) return { name: candidate.name, status: 'held', reason: 'liveness_unknown', pids: [] };
+  const pids = [...live.holders.get(candidate.path)].sort((a, b) => a - b);
+  if (pids.length > 0) return { name: candidate.name, status: 'held', reason: 'live_process', pids };
+  const owner = (await lstat(candidate.path)).uid;
+  const blocking = live.unreadable.filter((entry) => entry.uid === null || entry.uid === owner).map((entry) => entry.pid).sort((a, b) => a - b);
+  if (blocking.length > 0) return { name: candidate.name, status: 'held', reason: 'liveness_unknown', pids: blocking };
+  return { name: candidate.name, status: 'removable', reason: 'no_readable_holder', pids: [] };
 }
 
 const liveness = await liveHolders(candidates.map((c) => c.path));
-const removable = [];
-const held = [];
-for (const candidate of candidates) {
-  const pids = [...liveness.holders.get(candidate.path)].sort((a, b) => a - b);
-  if (pids.length > 0) held.push({ name: candidate.name, reason: 'live_process', pids });
-  else if (liveness.unknown.length > 0) held.push({ name: candidate.name, reason: 'liveness_unknown', pids: [] });
-  else removable.push(candidate);
-}
+const candidateStatus = [];
+for (const candidate of candidates) candidateStatus.push(await statusOf(candidate, liveness));
+const removable = candidates.filter((_, i) => candidateStatus[i].status === 'removable');
+const held = candidateStatus.filter((entry) => entry.status === 'held');
 
 const removed = [];
 const skippedAtApply = [];
 if (apply) {
   for (const { name, path } of removable) {
     if (!(await isStale(path)) || !(await inRootReal(path))) continue;
-    const fresh = await liveHolders([path]);
-    const pids = [...fresh.holders.get(path)].sort((a, b) => a - b);
-    if (pids.length > 0) {
-      skippedAtApply.push({ name, reason: 'live_process', pids });
-      continue;
-    }
-    if (fresh.unknown.length > 0) {
-      skippedAtApply.push({ name, reason: 'liveness_unknown', pids: [] });
+    const status = await statusOf({ name, path }, await liveHolders([path]));
+    if (status.status === 'held') {
+      skippedAtApply.push(status);
       continue;
     }
     await rm(path, { recursive: true, force: true });
@@ -176,4 +190,4 @@ const byPrefix = Object.fromEntries([...OWNED_PREFIXES, ...explicitPrefixes].map
 const unownedSorted = Object.fromEntries(Object.entries(unownedByPrefix).sort(([a], [b]) => a.localeCompare(b)));
 const unownedTotal = Object.values(unownedSorted).reduce((sum, n) => sum + n, 0);
 
-console.log(JSON.stringify({ root: resolvedRoot, cap_hours: capHours, apply, by_prefix: byPrefix, explicit_prefixes: explicitPrefixes, unowned_stale_total: unownedTotal, unowned_by_prefix: unownedSorted, candidates: removable.map((c) => c.name), held, liveness_unknown_pids: liveness.unknown, refused: refusedNames, removed, skipped_at_apply: skippedAtApply }, null, 2));
+console.log(JSON.stringify({ root: resolvedRoot, cap_hours: capHours, apply, by_prefix: byPrefix, explicit_prefixes: explicitPrefixes, unowned_stale_total: unownedTotal, unowned_by_prefix: unownedSorted, candidates: removable.map((c) => c.name), held, candidate_status: candidateStatus, unreadable_pids: liveness.unreadable, refused: refusedNames, removed, skipped_at_apply: skippedAtApply }, null, 2));

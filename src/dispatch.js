@@ -2605,7 +2605,23 @@ async function runCiStatusWithWait(args, signal, responseValueObserver) {
     }
 }
 
+const PRD_ADD_VERBS = new Set(['prd-add', 'prd_add'])
+
+function prdAddCwdRefusal(args) {
+    const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
+    return yaml.dump({
+        ok: false,
+        verb: 'prd-add',
+        dispatch_id: `refused-${nextN(session)}`,
+        error_code: 'cwd_required',
+        refused: true,
+        error: 'prd-add refused: no cwd was passed. Without cwd the row would be written into the process default project ledger, so nothing was written. Pass cwd (the project root that holds .gm/prd) on every prd-add call.',
+        accepted_fields: ['cwd'],
+    }, { lineWidth: 100 })
+}
+
 export async function gmDispatch(args, signal, responseValueObserver) {
+    if (PRD_ADD_VERBS.has(args?.verb) && !args?.resume_task && !(typeof args?.cwd === 'string' && args.cwd.trim())) return prdAddCwdRefusal(args)
     if (typeof args?.max_chars === 'number' && !VERBATIM_REPLY_VERBS.has(args?.verb)) {
         const reserve = continuationReserveFor(continuationKeyOf(args))
         if (reserve > 0 && args.max_chars > 2 * reserve) args = { ...args, max_chars: args.max_chars - reserve, requested_max_chars: args.max_chars }
