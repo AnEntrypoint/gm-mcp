@@ -73,9 +73,8 @@ function stdoutErrorOf(text) {
 }
 
 function failedReplyDetail(text, verb) {
-    if (!/^(dispatch_id|data|error|ok|gm_session_header_version):/.test(text)) return null
     const header = text.split(/^--- data/m)[0]
-    if (!/^ok: false$/m.test(header)) return null
+    if (!/^(?:gm_session_header_version|dispatch_id): /m.test(header) || !/^ok: false$/m.test(header)) return null
     const lines = header.split('\n')
     const start = lines.findIndex((line) => line.startsWith('error:'))
     const block = (start === -1 ? '' : lines.slice(start).filter((line, index) => index === 0 || /^\s/.test(line)).join(' ').replace(/\s+/g, ' ').trim()).replace(CONTINUATION_TAIL, '')
