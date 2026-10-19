@@ -192,7 +192,7 @@ async function dispatchCommand() {
 
     const parsed = parseDispatchArgv(argv)
     if (parsed.usageError) {
-        console.error(parsed.usageError)
+        console.error(`${parsed.usageError} usage_id=usage-${process.pid}-${Date.now()} log=${logFilePath()}`)
         return 2
     }
 
