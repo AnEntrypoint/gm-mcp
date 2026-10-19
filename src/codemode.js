@@ -40,6 +40,10 @@ let codemodeThrowSeq = 0
 
 const CONTINUATION_TAIL = /\s+(?:state:\s*\S+\s+)?(?:continuation:|pending_rows:|idle_ms:|action:).*$/
 
+function withoutContinuation(text) {
+    return text.replace(/^continuation:[\s\S]*$/m, '').trimEnd()
+}
+
 function failedReplyDetail(text, verb) {
     if (!/^(dispatch_id|data|error|ok|gm_session_header_version):/.test(text)) return null
     const header = text.split(/^--- data/m)[0]
@@ -417,8 +421,8 @@ export function registerCodeMode(server, tools) {
                 const settled = replies.filter((entry) => entry.text !== undefined)
                 const partial = replies.map((entry, index) => {
                     const label = `${index + 1}/${replies.length}: gm.${entry.verb}`
-                    if (entry.text !== undefined) return `--- partial ${label} completed before the throw ---\n${capCodemodeText(entry.text, cap)}`
-                    if (entry.failed) return `--- partial ${label} failed ---\n${capCodemodeText(entry.error, cap)}`
+                    if (entry.text !== undefined) return `--- partial ${label} completed before the throw ---\n${capCodemodeText(withoutContinuation(entry.text), cap)}`
+                    if (entry.failed) return `--- partial ${label} failed ---\n${capCodemodeText(withoutContinuation(entry.error), cap)}`
                     return `--- partial ${label} still pending ---`
                 })
                 const failedCount = replies.filter((entry) => entry.failed).length
