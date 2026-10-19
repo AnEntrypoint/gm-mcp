@@ -402,7 +402,7 @@ function renderMatchesKept(out, holder, kept, toYaml) {
 
 function matchesCutNotice(matchesReturned, matchesTotal, maxChars) {
     if (matchesTotal === undefined || matchesReturned >= matchesTotal) return ''
-    return `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\nmatches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
+    return `matches_truncated: true\nmatches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\nmatches_dropped: ${matchesTotal - matchesReturned}\nmatches_note: matches_cut (${matchesReturned} of ${matchesTotal} shown at max_chars=${maxChars}; see gm.help)\n`
 }
 
 function largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml, buildNotice) {
@@ -876,7 +876,7 @@ export function withCodesearchDefaultKHint(defaulted, verb, out) {
         shown,
         total,
         default_k: CODESEARCH_DEFAULT_K,
-        hint: `showing ${shown} of ${total} matches (default k=${CODESEARCH_DEFAULT_K}): raise k (0 = all) or scope with path/glob`,
+        hint: `showing ${shown} of ${total} matches (default k=${CODESEARCH_DEFAULT_K}): raise k (0 = all) or narrow with path/glob`,
     }
     return nested ? { ...out, data: { ...out.data, ...hint } } : { ...out, ...hint }
 }
