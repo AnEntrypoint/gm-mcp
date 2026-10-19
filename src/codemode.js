@@ -162,7 +162,8 @@ export function refuseUndeclaredBodyKeys(name, verb, folded) {
     if (verb === 'fs_read') for (const alias of FS_READ_RANGE_ALIASES) known.add(alias)
     const unknown = Object.keys(body).filter((key) => !known.has(key))
     if (unknown.length === 0) return
-    throw new Error(`${name} body has undeclared key ${unknown.join(', ')} -- declared body fields: ${[...known].join(', ')}`)
+    const hint = verb.startsWith('codeinsight') || verb.startsWith('callers') || verb.startsWith('callees') || verb.startsWith('impact') ? ' -- codeinsight answers structure: use {symbol, verb:"find"|"callers"|...} for symbols, or gm.codesearch({query}) for text' : ''
+    throw new Error(`${name} body has undeclared key ${unknown.join(', ')} -- declared body fields: ${[...known].join(', ')}${hint}`)
 }
 
 export function refuseMissingRequiredBodyKeys(name, verb, folded) {
