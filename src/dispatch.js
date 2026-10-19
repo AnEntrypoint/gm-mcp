@@ -520,6 +520,12 @@ export function unsafeSpoolName(role, value) {
 
 const WINDOWS_MAX_PATH = 259
 
+const STORAGE_FULL_CODES = new Set(['ENOSPC', 'EDQUOT'])
+
+function storageFullReply(inPath, error) {
+    return { ok: false, error_code: 'storage_full', wrote_no_new_dispatch: true, error: `no space left on the spool volume while publishing ${inPath} (${error.code}); no request was published, so no dispatch was made -- free disk space and retry` }
+}
+
 function publishSpoolRequest(inDir, inPath, task, body) {
     const unsafe = unsafeSpoolName('task', task)
     if (unsafe) throw new Error(unsafe)
@@ -532,8 +538,12 @@ function publishSpoolRequest(inDir, inPath, task, body) {
     try {
         fs.writeFileSync(tempPath, body, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
         fs.linkSync(tempPath, inPath)
+        return null
+    } catch (error) {
+        if (STORAGE_FULL_CODES.has(error?.code)) return storageFullReply(inPath, error)
+        throw error
     } finally {
-        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
+        try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath) } catch {}
     }
 }
 
@@ -1685,8 +1695,9 @@ function timeoutInputDiagnostic(verb, raw_body, timeout_seconds) {
         const seconds = Number(timeout_seconds)
         if (!Number.isFinite(seconds)) return 'timeout_seconds must be a finite number of seconds'
         const milliseconds = seconds * 1000
-        if (seconds > 0 && (!Number.isSafeInteger(milliseconds) || milliseconds > MAX_TIMER_TIMEOUT_MS)) {
-            return `timeout_seconds must not exceed ${MAX_TIMER_TIMEOUT_MS / 1000} seconds`
+        const bound = Math.min(MAX_TIMER_TIMEOUT_MS, Math.max(pollTimeoutCeilingMs(), EXEC_HARD_CEILING_MS))
+        if (seconds > 0 && (!Number.isSafeInteger(milliseconds) || milliseconds > bound)) {
+            return `timeout_seconds must not exceed ${bound / 1000} seconds (poll ceiling ${pollTimeoutCeilingMs() / 1000} s, GM_MCP_POLL_TIMEOUT_CEILING_MS overrides it)`
         }
     }
     if (!TIMEOUT_MS_PREFIX_VERBS.has(verb) || typeof raw_body !== 'string' || !TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return undefined
@@ -2153,10 +2164,10 @@ function withDispatchWait(out, waitedMs, claimedAtMs) {
         ? Math.max(0, Math.min(claimedAtMs - admissionMs, beforeGuestCapMs))
         : beforeGuestCapMs - (executed === null ? 0 : Math.min(executed, beforeGuestCapMs))
     const postClaimMs = waitedMs - admissionMs - claimMs
-    const execMs = executed === null ? postClaimMs : Math.min(executed, postClaimMs)
+    const execMs = executed === null ? null : Math.min(executed, postClaimMs)
     const guestMs = firstReportedMs(out, ['guest_elapsed_ms'])
     const embedMs = firstReportedMs(out, ['embed_ms', 'embed_query'])
-    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, guest_elapsed_ms: guestMs, embed_ms: embedMs, lane_wait_ms: claimMs, post_claim_ms: postClaimMs, unattributed_ms: postClaimMs - execMs, ...lane } }
+    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, guest_elapsed_ms: guestMs, embed_ms: embedMs, lane_wait_ms: claimMs, post_claim_ms: postClaimMs, unattributed_ms: execMs === null ? postClaimMs : postClaimMs - execMs, ...lane } }
 }
 
 function firstReportedMs(out, keys) {
@@ -2556,9 +2567,11 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             ownerTransport = await plainTextOwnerTransport(root, session_id, signal)
             if (signal?.aborted) return toYaml({ error: 'aborted', owner_transport: ownerTransport, wrote_no_new_dispatch: true })
             const plaintext = withTimeoutMsPrefix(verb, raw_body, timeout_seconds)
-            publishSpoolRequest(inDir, inPath, requestNumber, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
+            const stored = publishSpoolRequest(inDir, inPath, requestNumber, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
+            if (stored) return toYaml(stored)
         } else if (rawBodyText !== undefined) {
-            publishSpoolRequest(inDir, inPath, requestNumber, rawBodyText)
+            const stored = publishSpoolRequest(inDir, inPath, requestNumber, rawBodyText)
+            if (stored) return toYaml(stored)
         } else {
             const { lane_wait_ms: _publicLaneWait, ...callerBody } = normalizedBody
             const fullBody = { ...callerBody, session_id }
@@ -2567,7 +2580,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 const leases = leaseSessionsFor(root)
                 if (leases) fullBody._lease_sessions = leases.filter(lease => lease.live).map(({ session_id: leaseSession, pid }) => ({ session_id: leaseSession, pid }))
             }
-            publishSpoolRequest(inDir, inPath, requestNumber, JSON.stringify(fullBody))
+            const stored = publishSpoolRequest(inDir, inPath, requestNumber, JSON.stringify(fullBody))
+            if (stored) return toYaml(stored)
         }
     }
 
@@ -2603,6 +2617,11 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (isPlainObject(out) && out.background === true && !('poll_timeout_ceiling_ms' in out)) out = { ...out, poll_timeout_ceiling_ms: pollCeilingMs }
             out = liftStdoutFault(out)
             out = withCodesearchCompleteness(verb, out)
+            if (verb === 'codesearch' && isPlainObject(out) && isPlainObject(out.data) && 'complete' in out) {
+                const data = { ...out.data }
+                for (const key of ['complete', 'complete_reason', 'exhaustive']) if (key in out && key in data) delete data[key]
+                out = { ...out, data }
+            }
             if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
