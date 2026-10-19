@@ -100,11 +100,15 @@ function isChildExitReply(text) {
     return CHILD_EXIT_LINE.test(text.split(/^--- data/m)[0])
 }
 
+function isNotFoundReply(text) {
+    return /^error_code: not_found$/m.test(text.split(/^--- data/m)[0]) || /error_code: not_found\)/.test(text.split(/^--- data/m)[0])
+}
+
 function replyText(result, verb) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
     if (result?.isError) throw new Error(text)
     const failed = failedReplyDetail(text, verb) ?? compactFailureDetail(text, verb)
-    if (failed !== null && !isChildExitReply(text)) throw new Error(failed)
+    if (failed !== null && !isChildExitReply(text) && !isNotFoundReply(text)) throw new Error(failed)
     return text
 }
 
