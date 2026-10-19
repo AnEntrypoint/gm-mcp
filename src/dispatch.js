@@ -2112,8 +2112,10 @@ const DISPATCH_WAIT_DISCLOSED_AT_MS = 5000
 
 function withDispatchWait(out, waitedMs, claimedAtMs) {
     if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !isPlainObject(out)) return out
-    const admitted = Number(out.admission_waited_ms)
+    const starved = out.error_code === 'dispatch_starved_waiting_for_admission'
+    const admitted = Number(starved ? out.waited_ms : out.admission_waited_ms)
     const admissionMs = Number.isFinite(admitted) && admitted > 0 ? Math.min(admitted, waitedMs) : 0
+    const lane = starved ? { admission_kind: out.admission_kind, admission_in_flight: out.admission_in_flight, admission_limit: out.admission_limit, admission_holders: out.admission_holders } : {}
     const executed = firstReportedMs(out, ['duration_ms', 'guest_elapsed_ms'])
     const beforeGuestCapMs = waitedMs - admissionMs
     const claimMs = claimedAtMs !== null
@@ -2121,7 +2123,7 @@ function withDispatchWait(out, waitedMs, claimedAtMs) {
         : beforeGuestCapMs - (executed === null ? 0 : Math.min(executed, beforeGuestCapMs))
     const postClaimMs = waitedMs - admissionMs - claimMs
     const execMs = executed === null ? postClaimMs : Math.min(executed, postClaimMs)
-    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, unattributed_ms: waitedMs - admissionMs - claimMs - execMs } }
+    return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, unattributed_ms: waitedMs - admissionMs - claimMs - execMs, ...lane } }
 }
 
 function firstReportedMs(out, keys) {
