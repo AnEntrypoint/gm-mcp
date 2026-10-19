@@ -133,6 +133,7 @@ export function bundleDrift({ transport = servingTransport ?? process.env.GM_MCP
         reloadable: refusal.code === null,
         refusal_code: refusal.code,
         refusal_reason: refusal.reason,
+        one_command: refusal.code === null ? null : `restart the gm MCP client (or reconnect the gm MCP server) so it relaunches from ${installedState.path}`,
     }
 }
 
