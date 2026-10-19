@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { execFile } from './process-port.js'
+import { execFile, execFileSync } from './process-port.js'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -310,9 +310,16 @@ async function reconcileGuest(release) {
 }
 
 function processIsRunner(pid) {
-    if (!existsSync('/proc/self/exe')) return true
+    const isRunnerName = name => path.basename(name.trim()).startsWith('agentplug-runner')
+    if (existsSync('/proc/self/exe')) {
+        try {
+            return isRunnerName(readlinkSync(`/proc/${pid}/exe`))
+        } catch {
+            return false
+        }
+    }
     try {
-        return path.basename(readlinkSync(`/proc/${pid}/exe`)).startsWith('agentplug-runner')
+        return isRunnerName(execFileSync('ps', ['-o', 'comm=', '-p', String(pid)], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] }))
     } catch {
         return false
     }
