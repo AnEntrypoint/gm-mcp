@@ -35,6 +35,14 @@ export function uncommittedSrcPaths(root) {
         .filter(Boolean)
 }
 
+function headOrWorktree(root, rel) {
+    try {
+        return execFileSync('git', ['show', `HEAD:${rel}`], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    } catch {
+        return readFileSync(path.join(root, rel), 'utf8')
+    }
+}
+
 export function headSrcPlugin(root, keep) {
     const dirty = new Set(uncommittedSrcPaths(root).map(line => line.slice(3)))
     return {
@@ -43,7 +51,7 @@ export function headSrcPlugin(root, keep) {
             build.onLoad({ filter: /[\\/]src[\\/].*\.js$/ }, args => {
                 const rel = path.relative(root, args.path).split(path.sep).join('/')
                 if (!dirty.has(rel) || keep.has(rel)) return undefined
-                return { contents: execFileSync('git', ['show', `HEAD:${rel}`], { cwd: root, encoding: 'utf8' }), loader: 'js' }
+                return { contents: headOrWorktree(root, rel), loader: 'js' }
             })
         },
     }
