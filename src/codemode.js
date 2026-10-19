@@ -287,7 +287,7 @@ function completedReplyText(text, budget) {
     return `${text.slice(0, Math.max(0, budget - notice.length))}${notice}`
 }
 
-const ENVELOPE_KEYS = ['timeout_seconds', 'full_response', 'resume_task']
+const ENVELOPE_KEYS = ['timeout_seconds', 'full_response', 'resume_task', 'max_chars']
 
 function envelopeKeys(args) {
     return Object.fromEntries(ENVELOPE_KEYS.filter((key) => args[key] !== undefined).map((key) => [key, args[key]]))
@@ -446,7 +446,7 @@ export function registerCodeMode(server, tools) {
                 code: z.string().describe('Async JavaScript body. Call gm tools as gm.<name>({...}) -- the object you pass is the verb body, so gm.codesearch({query:"x"}) == gm.gm({verb:"codesearch", body:{query:"x"}}); discover them with gm.list() and gm.describe(name).'),
                 session_id: z.string().optional().describe('Default session_id for every gm call that does not pass its own.'),
                 cwd: z.string().optional().describe('Default cwd for every gm call that does not pass its own.'),
-                max_chars: z.number().optional().describe('Reply cap in characters for the returned text (default 24000). Past it the text is cut and reply_truncated is true.'),
+                max_chars: z.number().optional().describe('Reply cap in characters for the returned text (default 24000). Past it the text is cut and reply_truncated is true. Also the default max_chars of every nested gm call that declares one.'),
                 timeout_seconds: z.number().optional().describe('Dispatch envelope key folded into every gm call that declares it (poll budget in seconds).'),
                 full_response: z.boolean().optional().describe('Dispatch envelope key folded into every gm call that declares it (bypass reply compaction).'),
                 resume_task: z.string().optional().describe('Dispatch envelope key folded into every gm call that declares it (resume an earlier dispatch by task id).'),
