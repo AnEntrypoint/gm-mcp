@@ -5,6 +5,7 @@ export const NOTICES = {
     query_regex: 'mode regex honours every metacharacter as written: a | alternates and a space belongs to the pattern. combine has no effect on a regex.',
     exhaustive_scope: 'To reach every match, split the scan per subtree (path, paths or glob) and union the results. A scoped scan\'s cap is per call.',
     file_source_git: 'The file list is git ls-files (tracked plus untracked, not ignored). Pass refresh:true to walk the disk instead.',
+    stale_tree: 'The checkout has diverged from its upstream as of the last fetch, so these results miss symbols that exist on the remote. A plain git_pull cannot fast-forward a diverged branch: reconcile with the stale_tree action merge_upstream (rebase or merge onto the upstream tip), then re-run the search.',
 }
 
 export const NOTICE_CODES = Object.keys(NOTICES)
