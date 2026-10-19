@@ -2529,12 +2529,14 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             }
             if (include_timing === true || include_timing === 'true') {
                 const timingKey = isPlainObject(out) && 'mcp_timing' in out ? 'mcp_client_timing' : 'mcp_timing'
+                const { last_claimed_queue_wait_ms, ...daemonLiveness } = readDaemonLiveness(spoolDir)
                 const timing = {
                     submitted_at_ms: callStartedAtMs,
                     response_observed_at_ms: Date.now(),
                     round_trip_ms: Date.now() - callStartedAtMs,
                     response_wakeup: lastWakeSource,
-                    daemon_at_submission: readDaemonLiveness(spoolDir),
+                    queue_wait_ms: claimedAtMs,
+                    daemon_at_submission: { ...daemonLiveness, previous_claimed_queue_wait_ms: last_claimed_queue_wait_ms },
                 }
                 out = isPlainObject(out) ? { ...out, [timingKey]: timing } : { response: out, [timingKey]: timing }
             }
