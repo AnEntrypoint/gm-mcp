@@ -28,6 +28,18 @@ function gh(method, path, body) {
   });
 }
 
+function ghRaw(path) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('gh', ['api', '-H', 'Accept: application/vnd.github.raw', path], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const chunks = [];
+    let err = '';
+    child.stdout.on('data', (d) => chunks.push(d));
+    child.stderr.on('data', (d) => (err += d));
+    child.on('error', reject);
+    child.on('close', (code) => (code !== 0 ? reject(new Error(`GET ${path}: ${err.trim() || `exit ${code}`}`)) : resolve(Buffer.concat(chunks))));
+  });
+}
+
 async function listRuns(api, sha) {
   const { workflow_runs } = await gh('GET', `${api}/actions/runs?head_sha=${sha}&per_page=100`);
   return workflow_runs.map((r) => ({ id: r.id, name: r.name, event: r.event, status: r.status, conclusion: r.conclusion }));
@@ -68,8 +80,8 @@ async function publish(slug, message, specs) {
   }
 
   for (const f of files) {
-    const got = await gh('GET', `${api}/contents/${f.path}?ref=${commitSha}`);
-    if (!Buffer.from(got.content, 'base64').equals(f.content)) throw new Error(`verify failed: ${f.path} differs at ${commitSha}`);
+    const got = await ghRaw(`${api}/contents/${f.path}?ref=${commitSha}`);
+    if (!got.equals(f.content)) throw new Error(`verify failed: ${f.path} differs at ${commitSha}`);
   }
 
   let runs = await listRuns(api, commitSha);
