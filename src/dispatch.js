@@ -5,7 +5,7 @@ import { spoolFs as fs, spoolSpawn as spawn } from './spool-port.js'
 import { claimByCreate, claimByLink, readJsonOrNull, readLockHolderPid, readOwnerText, readPidTsLock, readStatusJson, readTextOrNull, reclaimLockByRename, replaceLockText, writeTextAtomically as writeFileAtomically, SPOOL_DIR_MODE, SPOOL_FILE_MODE } from './spool-store.js'
 import os from 'node:os'
 import path from 'node:path'
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
 import { recordChild } from './child-ledger.js'
@@ -2433,7 +2433,7 @@ async function plainTextOwnerTransport(root, session_id, signal) {
 const VERBATIM_REPLY_VERBS = new Set(['fs_read', 'result', 'gm_result'])
 
 function bundleNoticeTail(verb, drift) {
-    const installedPath = drift.installed_path ?? drift.path
+    const installedPath = drift.installed_path ? realpathSync(drift.installed_path) : drift.path
     const block = yaml.dump({
         bundle_stale: true,
         bundle_stale_reason: drift.installed_version === drift.running_version ? 'sha-only (same version, rebuilt bundle)' : 'version-differs',
