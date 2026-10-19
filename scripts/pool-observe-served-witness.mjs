@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 
 const yaml = createRequire(import.meta.url)('js-yaml')
 
@@ -19,7 +20,8 @@ const flags = Object.fromEntries(process.argv.slice(2).map(arg => {
     const match = /^--([a-z-]+)(?:=(.*))?$/.exec(arg)
     return match ? [match[1], match[2] ?? 'true'] : [arg, 'true']
 }))
-const project = flags.project ?? 'C:/dev/spoint'
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const project = flags.project ?? process.env.GM_WITNESS_ROOT ?? repoRoot
 const client = flags.client ?? path.join(os.homedir(), '.gm-tools', 'gm-mcp-server.mjs')
 
 function dispatchText(clientPath, cwd, verb, body) {
