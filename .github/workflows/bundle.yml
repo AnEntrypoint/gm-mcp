@@ -1,0 +1,55 @@
+name: bundle
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/build.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+
+concurrency:
+  group: bundle-main
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    name: rebuild bin/gm-mcp-server.js
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: checkout main with full history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: setup node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+          cache: npm
+      - name: install
+        run: npm ci
+      - name: build the bundle from src/
+        run: node scripts/build.mjs
+      - name: drift gate on the rebuilt bundle
+        run: GM_MCP_BUILD_INCLUDE=bin/gm-mcp-server.js node scripts/check-bin-drift.mjs
+      - name: commit the rebuilt bundle to main
+        run: |
+          if git diff --quiet -- bin/gm-mcp-server.js; then
+            echo "bin/gm-mcp-server.js already matches src/"
+            exit 0
+          fi
+          git config user.name "lanmower"
+          git config user.email "almagestfraternite@gmail.com"
+          git add bin/gm-mcp-server.js
+          git commit -m "bundle: rebuild gm-mcp-server.js [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
