@@ -23,7 +23,7 @@ test('a defaulted codesearch reply reports shown and a hint only when matches we
     assert.equal(cut.shown, 50)
     assert.equal(cut.total, 402)
     assert.equal(cut.default_k, 50)
-    assert.match(cut.hint, /raise k \(0 = all\) or scope with path\/glob/)
+    assert.match(cut.hint, /raise k \(0 = all\) or narrow with path\/glob/)
     const complete = withCodesearchDefaultKHint(true, 'codesearch', { count: '3 lines', matches: [{}, {}, {}] })
     assert.equal(complete.hint, undefined)
     const explicit = withCodesearchDefaultKHint(false, 'codesearch', { count: '402 lines', matches: Array.from({ length: 50 }, () => ({})) })
