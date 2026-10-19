@@ -71,7 +71,7 @@ function compactFailureDetail(text, verb) {
     if (match === null) return null
     const [, code, dispatchId, error] = match
     const detail = (error ?? '').replace(/\s+/g, ' ').trim().replace(CONTINUATION_TAIL, '')
-    return `verb=${verb} error_code=${code} dispatch_id=${dispatchId ?? 'none'}\n${detail || 'no error field'}`
+    return `verb=${verb} error_code=${code} dispatch_id=${dispatchId ?? 'none'}\n${detail || `no error field; reply head: ${text.trim().split('\n')[0]}`}`
 }
 
 function replyText(result, verb) {
