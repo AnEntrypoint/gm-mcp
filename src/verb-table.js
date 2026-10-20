@@ -812,6 +812,8 @@ const REGISTRY_ROWS = [
     { canonical: 'pool_observe', hyphen: true, body: POOL_OBSERVE_BODY },
     { canonical: 'subagent_start', hyphen: true },
     { canonical: 'subagent_end', hyphen: true },
+    { canonical: 'subagent_checkpoint', hyphen: true },
+    { canonical: 'subagent_resume', hyphen: true },
     { canonical: 'browser_lease_acquire', description: 'Acquire the shared browser lease for body.agent, waiting up to 600 s. Answers port, chrome_pid and lease_file. A holder whose heartbeat is older than 120 s counts as dead.', body: BROWSER_LEASE_BODY },
     { canonical: 'browser_lease_release', description: 'Release the shared browser lease held by body.agent. Answers the lease state with released set to that agent.', body: BROWSER_LEASE_BODY },
     { canonical: 'browser_lease_status', description: 'Read the shared browser lease state. Takes no agent field; answers the lease state alone.' },
