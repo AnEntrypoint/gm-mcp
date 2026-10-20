@@ -15,6 +15,7 @@ import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel, runGit } from './git-adapter.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { tableRow } from './verb-table.js'
+import { undeclaredBodyKeys } from './verb-bodies.js'
 import { execFileSync } from './process-port.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withCodesearchCompleteness, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING, VERBATIM_TEXT_MARKER } from './response-compact.js'
 
@@ -2837,6 +2838,12 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const execMs = EXEC_FAMILY_VERBS.includes(verb) ? execLimitMs(verb, raw_body, timeout_seconds) : null
     if (LATEST_ONLY_VERBS.has(verb) && normalizedBody?.status !== undefined && !PRD_LIST_STATUSES.includes(normalizedBody.status)) {
         return toYaml({ ok: false, verb, error: `prd-list status "${normalizedBody.status}" is not an accepted status`, accepted_statuses: PRD_LIST_STATUSES })
+    }
+    if (verb === 'prd-list' && isPlainObject(normalizedBody)) {
+        const undeclared = undeclaredBodyKeys(verb, normalizedBody)
+        if (undeclared?.unknown.length) {
+            return toYaml({ ok: false, verb, error_code: 'body_undeclared_key', error: `prd-list body has undeclared key ${undeclared.unknown.join(', ')} -- declared body fields: ${undeclared.declared.join(', ')}; prd-list has no text search, so a query key is refused rather than ignored`, declared_fields: undeclared.declared, undeclared_keys: undeclared.unknown })
+        }
     }
     if (verb === 'prd-list' && isPlainObject(normalizedBody) && normalizedBody.limit !== undefined && String(normalizedBody.limit).trim() !== '' && Number(normalizedBody.limit) === 0) {
         return toYaml({ ok: false, verb, error: 'prd-list limit 0 refused: a zero-row page cannot advance next_offset, so paging would loop; pass limit 1 or more, or omit limit for the default page', accepted_limit: 'integer 1 or more' })

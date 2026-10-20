@@ -55,6 +55,15 @@ export function verbBodySchema(verb) {
     }
 }
 
+export function undeclaredBodyKeys(verb, body) {
+    const schema = verbBodySchema(verb)
+    if (!schema.declared || body === null || typeof body !== 'object' || Array.isArray(body)) return null
+    const known = new Set([...Object.keys(schema.fields), ...Object.keys(DISPATCH_BODY_FIELDS), ...GUEST_ENVELOPE_FIELDS, 'session', 'session_id'])
+    for (const spec of Object.values(schema.fields)) for (const alias of spec.aliases ?? []) known.add(alias)
+    const unknown = Object.keys(body).filter((key) => !known.has(key) && !key.startsWith('_'))
+    return { unknown, declared: Object.keys(schema.fields) }
+}
+
 export function describeBodyField(schema, name) {
     if (!schema.declared) return null
     const direct = schema.fields[name] ?? DISPATCH_BODY_FIELDS[name]
