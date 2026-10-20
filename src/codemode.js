@@ -202,8 +202,9 @@ function withoutEchoedSession(args, sessionId) {
     return out
 }
 
-function sessionAliasArgs(folded) {
+function sessionAliasArgs(verb, folded) {
     if (!isPlainObject(folded?.body) || !('session' in folded.body)) return folded
+    if (tableRow(verb)?.body?.fields?.session) return folded
     const { session, ...body } = folded.body
     return { ...folded, body, session_id: folded.session_id ?? session }
 }
@@ -414,7 +415,7 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             const tool = tools.get(name)
             feedContext = browserCallContext(tool.verb, merged, defaultCwdFor(merged, cwd))
             const defaults = {}
-            const folded = canonicalFsReadArgs(tool.verb, sessionAliasArgs(foldVerbArgs(verbShapedTool(tool, merged), merged)))
+            const folded = canonicalFsReadArgs(tool.verb, sessionAliasArgs(tool.verb, foldVerbArgs(verbShapedTool(tool, merged), merged)))
             const refuse = (code, check) => {
                 try {
                     check()
