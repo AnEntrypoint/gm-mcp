@@ -759,6 +759,8 @@ const REGISTRY_ROWS = [
     { canonical: 'session_handover', hyphen: true, body: SESSION_HANDOVER_BODY },
     { canonical: 'wait' },
     { canonical: 'wait_for_task', hyphen: true },
+    { canonical: 'proc_list', hyphen: true },
+    { canonical: 'proc_signal', hyphen: true },
     { canonical: 'sleep' },
     { canonical: 'residual_scan', hyphen: true },
     { canonical: 'claim_audit', hyphen: true },
