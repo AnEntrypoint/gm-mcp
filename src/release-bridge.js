@@ -27,6 +27,7 @@ const SOURCE_HEAD_LINE = /^source-head:\s*([0-9a-f]{7,40})\s*$/im
 const OFF_VALUES = new Set(['0', 'false', 'no', 'off'])
 const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES'])
 const DEFAULT_INTERVAL_MS = 10 * 60 * 1000
+const RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000
 const LOCK_STALE_MS = 15 * 60 * 1000
 const API_TIMEOUT_MS = 10_000
 const DOWNLOAD_TIMEOUT_MS = 180_000
@@ -118,13 +119,26 @@ function assertReleaseAssetUrl(url, repo) {
     return parsed.href
 }
 
+function rateLimitedUntilMs(response) {
+    const resetEpochSec = Number(response.headers.get('x-ratelimit-reset'))
+    if (resetEpochSec > 0) return resetEpochSec * 1000
+    const retryAfterSec = Number(response.headers.get('retry-after'))
+    if (retryAfterSec > 0) return Date.now() + retryAfterSec * 1000
+    return Date.now() + RATE_LIMIT_BACKOFF_MS
+}
+
 async function fetchLatestRelease(repo) {
     const url = `https://api.github.com/repos/${repo}/releases/latest`
+    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
     const response = await fetch(url, {
-        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'gm-mcp-release-bridge' },
+        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'gm-mcp-release-bridge', ...(token ? { authorization: `Bearer ${token}` } : {}) },
         signal: AbortSignal.timeout(API_TIMEOUT_MS),
     })
-    if (!response.ok) throw new Error(`HTTP ${response.status} from ${url}`)
+    if (!response.ok) {
+        const error = new Error(`HTTP ${response.status} from ${url}`)
+        if (response.status === 403 || response.status === 429) error.rateLimitedUntilMs = rateLimitedUntilMs(response)
+        throw error
+    }
     const body = await response.json()
     const tag = body && typeof body === 'object' ? body.tag_name : undefined
     const version = parseReleaseTag(tag)
@@ -418,7 +432,7 @@ async function reconcileRepo(repo, reconcile) {
     try {
         return await reconcile(await fetchLatestRelease(repo))
     } catch (error) {
-        return { outcome: 'failed', error: error?.message ?? String(error) }
+        return { outcome: 'failed', error: error?.message ?? String(error), ...(error?.rateLimitedUntilMs ? { rate_limited_until_ms: error.rateLimitedUntilMs } : {}) }
     }
 }
 
@@ -451,14 +465,18 @@ export async function runReleaseBridge() {
         const state = loadBridgeState()
         let next = retryPendingSignal(state)
 
+        const now = Date.now()
+        const backoffUntil = Number(next.backoff_until_ms) || 0
+        if (now < backoffUntil) {
+            writeAtomicIfChanged(bridgeStatePath(), `${JSON.stringify(next, null, 2)}\n`)
+            return { outcome: 'rate-limited', next_check_ms: backoffUntil - now }
+        }
         const intervalMs = bridgeIntervalMs()
         const lastChecked = Number(state.last_checked_ts) || 0
-        const now = Date.now()
         if (now - lastChecked < intervalMs) {
             writeAtomicIfChanged(bridgeStatePath(), `${JSON.stringify(next, null, 2)}\n`)
             return { outcome: 'checked-recently', next_check_ms: intervalMs - (now - lastChecked) }
         }
-        persistBridgeState({ ...next, last_checked_ts: now })
 
         const runner = await reconcileRepo(RUNNER_REPO, reconcileRunner)
         const guest = await reconcileRepo(GUEST_REPO, reconcileGuest)
@@ -466,8 +484,17 @@ export async function runReleaseBridge() {
         const swap = swapSignalFor(runner, guest)
         const signal = swap ? swap.signal : null
         const pendingSignal = signal?.outcome === 'deferred' ? { want: swap.want, ts: now, reason: signal.reason } : null
-        const summary = { outcome: 'checked', runner, guest, signal }
-        const settled = { ...next, last_checked_ts: now, pending_signal: swap ? pendingSignal : next.pending_signal, last_runner: runner, last_guest: guest, last_signal: signal }
+        const limitedUntil = Math.max(runner.rate_limited_until_ms ?? 0, guest.rate_limited_until_ms ?? 0)
+        const summary = { outcome: limitedUntil > 0 ? 'rate-limited' : 'checked', runner, guest, signal, ...(limitedUntil > 0 ? { backoff_until_ms: limitedUntil } : {}) }
+        const settled = {
+            ...next,
+            last_checked_ts: limitedUntil > 0 ? lastChecked : now,
+            backoff_until_ms: limitedUntil,
+            pending_signal: swap ? pendingSignal : next.pending_signal,
+            last_runner: runner,
+            last_guest: guest,
+            last_signal: signal,
+        }
         persistBridgeState(settled)
         appendDiagnostic('release-bridge', summary)
         return summary
