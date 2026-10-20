@@ -129,9 +129,8 @@ function rateLimitedUntilMs(response) {
 
 async function fetchLatestRelease(repo) {
     const url = `https://api.github.com/repos/${repo}/releases/latest`
-    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
     const response = await fetch(url, {
-        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'gm-mcp-release-bridge', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'gm-mcp-release-bridge' },
         signal: AbortSignal.timeout(API_TIMEOUT_MS),
     })
     if (!response.ok) {
