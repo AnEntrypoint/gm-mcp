@@ -266,8 +266,6 @@ let headProbeBackoffUntilMs = 0
 
 async function probeHead(cached) {
     const headers = { accept: 'application/vnd.github+json', 'user-agent': 'gm-mcp-self-update' }
-    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
-    if (token) headers.authorization = `Bearer ${token}`
     const validated = Boolean(cached?.api_etag && cached?.commit_sha)
     if (validated) headers['if-none-match'] = cached.api_etag
     const response = await fetch(HEAD_PROBE_URL, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
@@ -287,13 +285,30 @@ async function probeHead(cached) {
 
 // A rate-limited API probe backs off until GitHub's reset time; the raw-main fallback in refreshStaleDeployedBundle covers the gap.
 // Every failure is logged; appendDiagnostic suppresses only identical repeats within its window.
+const GIT_REFS_URL = 'https://github.com/AnEntrypoint/gm-mcp.git/info/refs?service=git-upload-pack'
+const MAIN_REF_LINE = /([0-9a-f]{40}) refs\/heads\/main/
+
+async function probeHeadViaGit(cached) {
+    const response = await fetch(GIT_REFS_URL, { headers: { 'user-agent': 'gm-mcp-self-update' }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
+    if (!response.ok) throw new Error(`HTTP ${response.status} from ${GIT_REFS_URL}`)
+    const sha = MAIN_REF_LINE.exec(await response.text())?.[1]
+    if (!sha) throw new Error('git refs reply names no main head')
+    return { notModified: cached?.commit_sha === sha, sha, etag: null, via: 'git' }
+}
+
 async function probeHeadOrNull(cached) {
-    if (Date.now() < headProbeBackoffUntilMs) return null
+    if (Date.now() >= headProbeBackoffUntilMs) {
+        try {
+            return await probeHead(cached)
+        } catch (error) {
+            if (error.rateLimitResetMs) headProbeBackoffUntilMs = error.rateLimitResetMs
+            appendDiagnostic('self-update-probe-failed', { error: describeError(error), backoff_until_ms: headProbeBackoffUntilMs || null })
+        }
+    }
     try {
-        return await probeHead(cached)
+        return await probeHeadViaGit(cached)
     } catch (error) {
-        if (error.rateLimitResetMs) headProbeBackoffUntilMs = error.rateLimitResetMs
-        appendDiagnostic('self-update-probe-failed', { error: describeError(error), backoff_until_ms: headProbeBackoffUntilMs || null })
+        appendDiagnostic('self-update-git-probe-failed', { error: describeError(error) })
         return null
     }
 }
@@ -355,7 +370,7 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     if (head?.notModified && cached.sha === deployedHash) {
         writeBundleCache(deployedPath, { ...cached, checked_at: Date.now(), outcome: 'not_modified' })
         touch(stampPath)
-        return { outcome: 'current', self, hash: deployedHash, not_modified: true, probe: 'api' }
+        return { outcome: 'current', self, hash: deployedHash, not_modified: true, probe: head.via ?? 'api' }
     }
     let fetched
     let fullAt = cached?.full_at || 0
@@ -375,7 +390,7 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     if (fetched.notModified) {
         writeBundleCache(deployedPath, { etag: fetched.etag, sha: deployedHash, full_at: fullAt, checked_at: Date.now(), outcome: 'not_modified', ...record })
         touch(stampPath)
-        return { outcome: 'current', self, hash: deployedHash, not_modified: true, probe: head ? 'api' : 'raw' }
+        return { outcome: 'current', self, hash: deployedHash, not_modified: true, probe: head ? (head.via ?? 'api') : 'raw' }
     }
     const freshBytes = fetched.bytes
     const freshHash = sha256(freshBytes)
@@ -401,7 +416,7 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     replaceDeployedBundle(deployedPath, freshBytes)
     writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash, full_at: fullAt, checked_at: Date.now(), outcome: 'refreshed', ...record })
     touch(stampPath)
-    return { outcome: 'refreshed', self, from: deployedHash, to: freshHash, url: fetchedFrom, probe: head ? 'api' : 'raw', deployed_bundle: deployedPath, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
+    return { outcome: 'refreshed', self, from: deployedHash, to: freshHash, url: fetchedFrom, probe: head ? (head.via ?? 'api') : 'raw', deployed_bundle: deployedPath, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
 }
 
 // A fix pushed upstream reaches a running server within one check interval. An operator (or an agent
