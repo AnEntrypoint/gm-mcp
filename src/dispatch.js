@@ -470,10 +470,12 @@ function largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml,
 }
 
 const MATCH_TEXT_CLIP_CHARS = 160
+const MATCH_TEXT_TIGHT_CLIP_CHARS = 80
+const MIN_MATCHES_PER_REPLY = 20
 
-function clipMatchText(match) {
-    if (typeof match?.text !== 'string' || match.text.length <= MATCH_TEXT_CLIP_CHARS) return match
-    return { ...match, text: match.text.slice(0, MATCH_TEXT_CLIP_CHARS), text_clipped: true }
+function clipMatchText(match, clipChars = MATCH_TEXT_CLIP_CHARS) {
+    if (typeof match?.text !== 'string' || match.text.length <= clipChars) return match
+    return { ...match, text: match.text.slice(0, clipChars), text_clipped: true }
 }
 
 function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', requestedMaxChars = maxChars) {
@@ -492,6 +494,15 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
             if (slimReturned > matchesReturned) {
                 slim = true
                 matchesReturned = slimReturned
+            }
+        }
+        if (matchesReturned < Math.min(holder.matches.length, MIN_MATCHES_PER_REPLY)) {
+            const tight = { ...holder, matches: holder.matches.map((match) => clipMatchText(match, MATCH_TEXT_TIGHT_CLIP_CHARS)) }
+            const tightReturned = largestMatchesFittingReply(out, tight, maxChars, matchesTotal, toYaml, buildNotice, true)
+            if (tightReturned > matchesReturned) {
+                slim = true
+                holder = tight
+                matchesReturned = tightReturned
             }
         }
         if (matchesReturned === 0 && holder.matches.length > 0) {
