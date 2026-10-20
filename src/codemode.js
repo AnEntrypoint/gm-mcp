@@ -416,7 +416,7 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             for (const key of ENVELOPE_KEYS) {
                 if (topEnvelope[key] !== undefined && folded[key] === undefined && key in tool.inputSchema) defaults[key] = topEnvelope[key]
             }
-            pending = tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then((result) => replyText(result, tool.verb ?? name))
+            pending = tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then((result) => replyText(result, tool.verb ?? (typeof folded.verb === 'string' ? folded.verb : name)))
         } catch (error) {
             fail(error)
         }

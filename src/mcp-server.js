@@ -49,12 +49,22 @@ export function nearestGmVerb(verb) {
     return RUNNER_REGISTRY_VERBS.reduce((best, candidate) => editDistance(verb, candidate) < editDistance(verb, best) ? candidate : best)
 }
 
+const UNKNOWN_VERB_CODE = /^error_code: unknown_verb$/m
+
 function unknownVerbHint(verb, text) {
     const reply = String(text)
-    if (RUNNER_REGISTRY_VERBS.includes(verb) || !reply.includes('unknown_verb')) return reply
+    if (RUNNER_REGISTRY_VERBS.includes(verb) || !UNKNOWN_VERB_CODE.test(reply)) return reply
     const nearest = nearestGmVerb(verb)
     const edit = nearest === 'fs_write' ? ' gm has no edit verb: a whole-file write is the supported edit, so send the complete file with fs_write.' : ''
-    return reply + 'verb_hint: "' + verb + '" is not a gm verb; the nearest existing verb is ' + nearest + '.' + edit + '\n'
+    const dispatchId = /^dispatch_id: (\S+)$/m.exec(reply)?.[1]
+    return [
+        'ok: false',
+        'error_code: unknown_verb',
+        `verb: ${verb}`,
+        ...(dispatchId ? [`dispatch_id: ${dispatchId}`] : []),
+        `error: unknown verb "${verb}": this gm build does not register it; the nearest existing verb is ${nearest}.${edit}`,
+        '',
+    ].join('\n')
 }
 
 const ERROR_LINE = /^error:\s*(.+?)\s*$/m

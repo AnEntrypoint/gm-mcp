@@ -1198,6 +1198,14 @@ function wholeNumber(value) {
     return undefined
 }
 
+function withPrdListNextOffset(out) {
+    if (!isPlainObject(out) || out.truncated !== true) return out
+    if (out.next_offset !== undefined && out.next_offset !== null) return out
+    const offset = Number(out.offset) || 0
+    const count = Number(out.count) || 0
+    return count > 0 ? { ...out, next_offset: offset + count } : out
+}
+
 export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_DEFAULT_CHARACTERS, cwd, root, projectPath }) {
     const namedRoot = [cwd, root, projectPath].find(value => typeof value === 'string' && value.trim())
     const rootDir = namedRoot ? path.resolve(namedRoot.trim()) : path.resolve(process.cwd())
@@ -2830,6 +2838,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     if (LATEST_ONLY_VERBS.has(verb) && normalizedBody?.status !== undefined && !PRD_LIST_STATUSES.includes(normalizedBody.status)) {
         return toYaml({ ok: false, verb, error: `prd-list status "${normalizedBody.status}" is not an accepted status`, accepted_statuses: PRD_LIST_STATUSES })
     }
+    if (verb === 'prd-list' && isPlainObject(normalizedBody) && normalizedBody.limit !== undefined && String(normalizedBody.limit).trim() !== '' && Number(normalizedBody.limit) === 0) {
+        return toYaml({ ok: false, verb, error: 'prd-list limit 0 refused: a zero-row page cannot advance next_offset, so paging would loop; pass limit 1 or more, or omit limit for the default page', accepted_limit: 'integer 1 or more' })
+    }
 
     if (!resume_task) {
         const unavailable = runnerUnavailable(root, spoolDir)
@@ -2897,6 +2908,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 for (const key of ['complete', 'complete_reason', 'exhaustive']) if (key in out && key in data) delete data[key]
                 out = { ...out, data }
             }
+            if (verb === 'prd-list') out = withPrdListNextOffset(out)
             if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
