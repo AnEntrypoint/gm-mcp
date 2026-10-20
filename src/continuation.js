@@ -11,6 +11,7 @@ const RELAY_KEY = 'relay'
 const PENDING_LINE = /^\s*prd_pending_count:\s*(\d+)\s*$/m
 const PRD_LIST_VERB = /^verb:\s*prd-list\s*$/m
 const PRD_LIST_TOTAL = /^total:\s*(\d+)\s*$/m
+const PRD_PENDING_TOTAL = /^\s*pending_total:\s*(\d+)\s*$/m
 const CONTINUATION_HEADS = /^continuation:\s*$/gm
 const COMPLETE_LINE = /^\s*complete:\s*true\s*$/m
 
@@ -70,9 +71,12 @@ export function continuedReply(key, text, now = Date.now()) {
     if (typeof text !== 'string') return text
     const entry = entryFor(key)
     const json = parsedJsonOf(text)
+    const jsonPending = json?.value?.verb === 'prd-list' && typeof json.value.pending_total === 'number' ? json.value.pending_total : null
     const jsonPrdTotal = json?.value?.verb === 'prd-list' && typeof json.value.total === 'number' ? json.value.total : null
-    const seen = PENDING_LINE.exec(text) ?? (PRD_LIST_VERB.test(text) ? PRD_LIST_TOTAL.exec(text) : null)
-    if (seen) entry.pending_rows = Number(seen[1])
+    const isPrdList = PRD_LIST_VERB.test(text)
+    const seen = PENDING_LINE.exec(text) ?? (isPrdList ? PRD_PENDING_TOTAL.exec(text) ?? PRD_LIST_TOTAL.exec(text) : null)
+    if (jsonPending !== null) entry.pending_rows = jsonPending
+    else if (seen) entry.pending_rows = Number(seen[1])
     else if (jsonPrdTotal !== null) entry.pending_rows = jsonPrdTotal
     const done = json?.value?.complete === true || json?.value?.data?.complete === true || COMPLETE_LINE.test(text)
     const snapshot = continuationSnapshot(key, now, done)
