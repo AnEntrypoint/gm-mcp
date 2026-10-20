@@ -963,6 +963,41 @@ export function withCodesearchDualPathScope(scope, out) {
     scoped.path_scope = { path: scope, applied: 'post-filter', kept, dropped }
     return scoped
 }
+// The guest reports rule-dropped paths (.codesearchignore, gm_state_dir) in excluded_by_rule but can still scan them, so a minified bundle
+// named there would surface in matches. Every match-bearing channel drops those paths here; the count stays visible.
+const RULE_EXCLUDED_MATCH_VERBS = new Set(['codesearch', 'code_search', 'search', 'grep', 'rg'])
+const RULE_EXCLUDED_MATCH_CHANNELS = ['matches', 'output', ...DUAL_SCOPE_CHANNELS]
+
+export function withRuleExcludedMatchesDropped(verb, out) {
+    if (!RULE_EXCLUDED_MATCH_VERBS.has(verb) || !isPlainObject(out)) return out
+    const excluded = new Set()
+    for (const source of [out, out.data]) {
+        if (!isPlainObject(source) || !Array.isArray(source.excluded_by_rule)) continue
+        for (const entry of source.excluded_by_rule) {
+            const raw = typeof entry === 'string' ? entry : isPlainObject(entry) ? entry.path : undefined
+            if (typeof raw === 'string' && raw.trim() !== '') excluded.add(raw.trim().replace(/^(\.\/)+/, ''))
+        }
+    }
+    if (excluded.size === 0) return out
+    let dropped = 0
+    const keep = (hit) => {
+        const hitPath = dualHitPath(hit)
+        if (hitPath === undefined || !excluded.has(hitPath)) return true
+        dropped += 1
+        return false
+    }
+    const filterChannels = (source) => {
+        if (!isPlainObject(source)) return source
+        const next = { ...source }
+        for (const channel of RULE_EXCLUDED_MATCH_CHANNELS) if (Array.isArray(source[channel])) next[channel] = source[channel].filter(keep)
+        return next
+    }
+    const scoped = filterChannels(out)
+    if (isPlainObject(out.data)) scoped.data = filterChannels(out.data)
+    if (dropped > 0) scoped.rule_excluded_matches_dropped = dropped
+    return scoped
+}
+
 const CODESEARCH_DEFAULT_K_MODES = new Set(['literal', 'regex', 'filename'])
 const CODESEARCH_K_ALIASES = ['k', ...tableRow('codesearch').body.fields.k.aliases]
 
@@ -2868,6 +2903,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (verb === 'prd-list' && isPlainObject(out) && out.ledger === undefined) out = { ...out, ledger: root, ledger_source: resolvedRoot.root_source }
             out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, gitShowCaptureFallback(verb, normalizedBody, out, root))))
             out = withCodesearchDualPathScope(codesearchDualScope, out)
+            out = withRuleExcludedMatchesDropped(verb, out)
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs))
             else if (full_response) out = withDispatchWait(out, Date.now() - callStartedAtMs, claimedAtMs, claimedAtMs !== null && typeof landedAtMs === 'number' ? landedAtMs - (callStartedAtMs + claimedAtMs) : null)
