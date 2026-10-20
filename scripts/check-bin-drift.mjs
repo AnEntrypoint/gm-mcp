@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildBundle, bundleVersion, srcSha256 } from './build.mjs'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
+if (!existsSync(path.join(repoRoot, 'node_modules', 'esbuild', 'package.json'))) {
+    console.error(`esbuild is not installed under ${path.join(repoRoot, 'node_modules')} (a gm-mcp devDependency, absent from a clean clone), so the drift gate cannot build the bundle: install the locked devDependencies and rerun`)
+    process.exit(1)
+}
 const binRel = 'bin/gm-mcp-server.js'
 const committedPath = path.join(repoRoot, binRel)
 const includedSrc = (process.env.GM_MCP_BUILD_INCLUDE || '').split(',').map(s => s.trim()).filter(Boolean)

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import * as esbuild from 'esbuild'
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -33,6 +32,7 @@ export function bundleDepManifest(root) {
 }
 
 export async function buildBundle(write = false, root = repoRoot) {
+    const esbuild = await import('esbuild')
     return esbuild.build({
         entryPoints: [path.join(root, 'src', 'cli.js')],
         bundle: true,
