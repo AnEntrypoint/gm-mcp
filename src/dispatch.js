@@ -481,7 +481,8 @@ function clipMatchText(match, clipChars = MATCH_TEXT_CLIP_CHARS) {
 function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', requestedMaxChars = maxChars) {
     if (text.length <= maxChars) return text
     let holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
-    const buildNotice = (matchesReturned, matchesTotal, deliveredChars = text.length) => `reply_truncated: true\nreply_chars: ${deliveredChars}\nreply_max_chars: ${maxChars}\nreply_full_chars: ${text.length} (raise max_chars to at least this to read the whole reply)\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: continuation_reserve_chars (${CONTINUATION_RESERVE_CHARS}, held back for the continuation block)\n` : ''}spill_file: ${spillPath}\n${spillNote}${matchesCutNotice(matchesReturned, matchesTotal, maxChars)}`
+    const noticeDispatchId = text.match(/^[ \t-]*dispatch_id: (\S+)/m)?.[1] ?? 'not reported'
+        const buildNotice = (matchesReturned, matchesTotal, deliveredChars = text.length) => `dispatch_id: ${noticeDispatchId}\nreply_truncated: true\nreply_chars: ${deliveredChars}\nreply_max_chars: ${maxChars}\nreply_full_chars: ${text.length} (raise max_chars to at least this to read the whole reply)\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: continuation_reserve_chars (${CONTINUATION_RESERVE_CHARS}, held back for the continuation block)\n` : ''}spill_file: ${spillPath}\n${spillNote}${matchesCutNotice(matchesReturned, matchesTotal, maxChars)}`
     let head = text
     let matchesTotal
     let matchesReturned
