@@ -420,6 +420,59 @@ const BROWSER_LEASE_BODY = {
     },
 }
 
+const BROWSER_SESSION_COLORS = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange']
+
+const BROWSER_SESSION_BODY = {
+    required: ['name'],
+    fields: {
+        name: { type: 'string', description: 'Browser session name, as session-list reports it.' },
+    },
+}
+
+const BROWSER_SESSION_UPDATE_BODY = {
+    required: ['name'],
+    fields: {
+        name: { type: 'string', description: 'Browser session name, as session-list reports it.' },
+        title: { type: 'string', description: 'Tab group title recorded for the session.' },
+        color: { type: 'string', enum: BROWSER_SESSION_COLORS, description: 'Tab group colour recorded for the session.' },
+    },
+}
+
+const BROWSER_EVENTS_BODY = {
+    required: ['action', 'session'],
+    fields: {
+        action: { type: 'string', enum: ['start', 'status', 'stop'], description: 'start opens the live feed on the project browser lease, status reads its state, stop ends it.' },
+        session: { type: 'string', description: 'Feed name: letters, digits, _ and -, at most 64 characters.' },
+        url: { type: 'string', description: 'Optional page to open when the feed starts.' },
+        maxMs: { type: 'integer', description: 'Feed lifetime in milliseconds (default 900000, ceiling 3600000).' },
+    },
+}
+
+const BROWSER_RECORDER_BODY = {
+    required: ['session'],
+    fields: {
+        session: { type: 'string', description: 'Recorder session name.' },
+    },
+}
+
+const BROWSER_RECORDER_EVENTS_BODY = {
+    required: ['session'],
+    fields: {
+        session: { type: 'string', description: 'Recorder session name.' },
+        type: { type: 'string', description: 'Only events of this kind (console, exception, network and so on).' },
+        errors: { type: 'boolean', description: 'Only error events.' },
+        exclude: { type: 'string', description: 'Regular expression; events whose text matches it are dropped.' },
+    },
+}
+
+const BROWSER_RECORDER_FRAME_BODY = {
+    required: ['session', 'eventId'],
+    fields: {
+        session: { type: 'string', description: 'Recorder session name.' },
+        eventId: { type: 'string', description: 'Event id as recorder-events reports it.' },
+    },
+}
+
 const GIT_FINALIZE_BODY = {
     required: [],
     fields: {
@@ -757,6 +810,17 @@ const REGISTRY_ROWS = [
     { canonical: 'browser_lease_acquire', description: 'Acquire the shared browser lease for body.agent, waiting up to 600 s. Answers port, chrome_pid and lease_file. A holder whose heartbeat is older than 120 s counts as dead.', body: BROWSER_LEASE_BODY },
     { canonical: 'browser_lease_release', description: 'Release the shared browser lease held by body.agent. Answers the lease state with released set to that agent.', body: BROWSER_LEASE_BODY },
     { canonical: 'browser_lease_status', description: 'Read the shared browser lease state. Takes no agent field; answers the lease state alone.' },
+    { canonical: 'browser_reset', hyphen: true, description: 'Reset the project browser: closes the shared browser and gives up the lease, so the next call launches a fresh browser on the same profile. Answers ok and reset. Takes no body.' },
+    { canonical: 'browser_list', hyphen: true, description: 'List the browsers the lease knows about, with their ports and pids. Takes no body.' },
+    { canonical: 'session_list', hyphen: true, description: 'List the browser sessions of the project, with their titles and colours. Takes no body.' },
+    { canonical: 'session_delete', hyphen: true, description: 'Delete one browser session by name. Answers ok and the deleted name.', body: BROWSER_SESSION_BODY },
+    { canonical: 'session_update', hyphen: true, description: 'Set the tab group title and/or colour of one browser session. Colour must be one of grey, blue, red, yellow, green, pink, purple, cyan, orange.', body: BROWSER_SESSION_UPDATE_BODY },
+    { canonical: 'session_reset', hyphen: true, description: 'Reset one browser session connection: removes its tab binding, uid map and log cursor. The title and colour are kept; the next call on the session opens or reuses a tab from scratch.', body: BROWSER_SESSION_BODY },
+    { canonical: 'browser_events', hyphen: true, description: 'Live feed of browser console, exception, log, network and page events. action start opens it on the project browser lease and appends JSON lines (seq, ts, session, kind) to .gm/browser-events/<session>.jsonl; status reads it; stop ends it. gm-mcp pushes each new line to the MCP client while the feed runs.', body: BROWSER_EVENTS_BODY },
+    { canonical: 'recorder_start', hyphen: true, description: 'Start the action recorder for one browser session (at most 10 active; 20 minute and 500 MB limits).', body: BROWSER_RECORDER_BODY },
+    { canonical: 'recorder_stop', hyphen: true, description: 'Stop the action recorder for one browser session and keep its recording.', body: BROWSER_RECORDER_BODY },
+    { canonical: 'recorder_events', hyphen: true, description: 'List the recorded events of one session, filtered by type, errors and exclude.', body: BROWSER_RECORDER_EVENTS_BODY },
+    { canonical: 'recorder_frame', hyphen: true, description: 'Return the frame (screenshot) recorded for one event id of a session.', body: BROWSER_RECORDER_FRAME_BODY },
     { canonical: 'nodejs' },
     { canonical: 'javascript' },
     { canonical: 'node' },
