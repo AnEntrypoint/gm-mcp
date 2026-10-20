@@ -407,6 +407,7 @@ const GIT_SUBMODULE_UPDATE_BODY = {
     fields: {
         path: { type: 'string', description: 'Relative path of the submodule inside the repo root; no leading /, no . .. or .git segment.' },
         recursive: { type: 'boolean', description: 'Also initialise nested submodules (git submodule update --recursive).' },
+        remote: { type: 'boolean', description: 'Move the submodule to its remote-tracking tip instead of the parent gitlink (git submodule update --remote).' },
     },
 }
 
