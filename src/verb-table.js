@@ -357,6 +357,9 @@ const FS_READDIR_BODY = {
         path: { type: 'string', description: 'Project-relative directory; an absolute path is refused even inside the root.' },
         limit: { type: 'integer', description: 'Default 200, maximum 1000.' },
         offset: { type: 'integer', description: 'First entry to return.' },
+        recursive: { type: 'boolean', description: 'Walk subdirectories too. Implies mtime.' },
+        mtime: { type: 'boolean', description: 'Return {path, isDirectory, size, mtime_ms} per entry instead of bare names; path is relative to the listed directory.' },
+        max_entries: { type: 'integer', description: 'Cap on entries collected. Walks default to 1000 and cap at 5000; the reply then sets partial_reason max_entries.' },
         allowOutsideRoot: { type: 'boolean', aliases: ['allow_outside_root', 'allowAbsolute'], description: 'Widens the read to another root.' },
     },
 }
