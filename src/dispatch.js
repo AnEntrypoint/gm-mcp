@@ -479,6 +479,27 @@ function clipMatchText(match, clipChars = MATCH_TEXT_CLIP_CHARS) {
     return { ...match, text: match.text.slice(0, clipChars), text_clipped: true }
 }
 
+const OUTCOME_KEYS = ['dispatch_id', 'ok', 'error_code', 'error', 'verb', 'branch']
+
+function outcomeText(text) {
+    const lines = OUTCOME_KEYS.map((key) => text.match(new RegExp(`^${key}: .*$`, 'm'))?.[0])
+    lines.push(text.match(/^\w*sha: .*$/m)?.[0])
+    return lines.filter((line) => line !== undefined).map((line) => `${line}\n`).join('')
+}
+
+function withoutLines(text, lines) {
+    if (lines === '') return text
+    const drop = new Set(lines.split('\n').filter(Boolean))
+    return text.split('\n').filter((line) => !drop.has(line)).join('\n')
+}
+
+function cutToLines(text, room) {
+    if (text.length <= room) return text
+    const cut = text.slice(0, Math.max(0, room))
+    const lastBreak = cut.lastIndexOf('\n')
+    return lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
+}
+
 function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', requestedMaxChars = maxChars) {
     if (text.length <= maxChars) return text
     let holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
@@ -514,25 +535,26 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
         }
         head = renderMatchesKept(out, holder, matchesReturned, toYaml, slim)
     }
-    let notice = buildNotice(matchesReturned, matchesTotal)
-    const compact = notice.length > maxChars / 2
-    if (compact) notice = `reply_truncated: true\nreply_max_chars: ${maxChars}\nreply_full_chars: ${text.length} (raise max_chars to at least this to read the whole reply)\nspill_file: ${spillPath}\n${holder ? `matches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n` : ''}`
-    const budget = Math.max(0, maxChars - Math.min(REPLY_NOTICE_RESERVE_CHARS, Math.floor(maxChars / 2)))
-    if (head.length > budget) {
-        const cut = head.slice(0, budget)
-        const lastBreak = cut.lastIndexOf('\n')
-        head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
+    const outcome = outcomeText(text)
+    const kept = outcome.slice(0, maxChars)
+    head = withoutLines(head, outcome)
+    const fullNotice = buildNotice(matchesReturned, matchesTotal)
+    const compact = fullNotice.length > maxChars / 2
+    const shortNotice = `reply_truncated: true\nreply_max_chars: ${maxChars}\nreply_full_chars: ${text.length} (raise max_chars to at least this to read the whole reply)\nspill_file: ${spillPath}\n${holder ? `matches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n` : ''}`
+    const fits = (candidate) => kept.length + candidate.length <= maxChars
+    const useFull = !compact && fits(fullNotice)
+    let notice = useFull ? fullNotice : [shortNotice, `reply_truncated: true\nreply_full_chars: ${text.length}\n`, 'reply_truncated: true\n'].find(fits) ?? ''
+    head = cutToLines(head, Math.max(0, maxChars - kept.length - Math.min(REPLY_NOTICE_RESERVE_CHARS, Math.floor(maxChars / 2))))
+    head = cutToLines(head, maxChars - kept.length - notice.length)
+    if (useFull) {
+        let delivered = kept.length + head.length + notice.length
+        for (let pass = 0; pass < 2; pass++) {
+            const rebuilt = buildNotice(matchesReturned, matchesTotal, delivered)
+            if (kept.length + head.length + rebuilt.length <= maxChars) notice = rebuilt
+            delivered = kept.length + head.length + notice.length
+        }
     }
-    const room = Math.max(0, maxChars - notice.length)
-    if (head.length > room) {
-        const cut = head.slice(0, room)
-        const lastBreak = cut.lastIndexOf('\n')
-        head = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut
-    }
-    let delivered = head.length + notice.length
-    for (let pass = 0; pass < 2 && !compact; pass++) delivered = head.length + buildNotice(matchesReturned, matchesTotal, delivered).length
-    const full = `${head}${compact ? notice : buildNotice(matchesReturned, matchesTotal, delivered)}`
-    return full.length > maxChars ? full.slice(0, maxChars) : full
+    return `${kept}${head}${notice}`.slice(0, maxChars)
 }
 
 function shapeGitStatusReply(verb, body, out) {
