@@ -1850,7 +1850,7 @@ const EXEC_FAMILY_VERBS = ['exec_js', 'nodejs', 'javascript', 'node', 'js', 'bas
 
 const SSH_OBJECT_BODY = 'ssh'
 
-const PLAIN_TEXT_BODY_VERBS = new Set([...EXEC_FAMILY_VERBS.filter((verb) => verb !== SSH_OBJECT_BODY), 'crawl'])
+const PLAIN_TEXT_BODY_VERBS = new Set([...EXEC_FAMILY_VERBS.filter((verb) => verb !== SSH_OBJECT_BODY), 'browser'])
 
 const TIMEOUT_MS_PREFIX_VERBS = new Set(EXEC_FAMILY_VERBS)
 
