@@ -1,5 +1,7 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
+import { API_DOCS_URI, FEED_URI_PREFIX, browserApiDocs, readFeedText, subscribeFeed, unsubscribeFeed } from './browser-feed.js'
 import { gmDispatch, gmResult } from './dispatch.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
@@ -124,7 +126,7 @@ const SURFACE_INSTRUCTIONS = 'gm-mcp serves one tool, gm_codemode. Every gm verb
 const PROCESS_INSTRUCTION_SESSION_ID = `mcp-instruction-${process.pid}-${Date.now()}`
 
 export function createServer() {
-    const server = new McpServer({ name: 'gm-mcp', version: BUNDLE_VERSION }, { instructions: SURFACE_INSTRUCTIONS, capabilities: { logging: {}, tools: { listChanged: true } } })
+    const server = new McpServer({ name: 'gm-mcp', version: BUNDLE_VERSION }, { instructions: SURFACE_INSTRUCTIONS, capabilities: { logging: {}, resources: { subscribe: true }, tools: { listChanged: true } } })
     const instructionSessionId = PROCESS_INSTRUCTION_SESSION_ID
     const tools = new Map()
     const define = (name, config, handler, verb = null) => tools.set(name, { ...config, verb, handler })
@@ -237,6 +239,27 @@ export function createServer() {
             verb
         )
     }
+
+    server.registerResource(
+        'browser-api',
+        API_DOCS_URI,
+        { title: 'gm browser verbs', description: 'Every browser, session and recorder verb: its description and body fields.', mimeType: 'text/markdown' },
+        async (uri) => ({ contents: [{ uri: uri.href, mimeType: 'text/markdown', text: browserApiDocs() }] })
+    )
+    server.registerResource(
+        'browser-events',
+        new ResourceTemplate(`${FEED_URI_PREFIX}{session}`, { list: undefined }),
+        { title: 'Live browser feed', description: 'JSON lines of the browser events of one feed (browser_events start). Subscribe to be notified when new lines arrive.', mimeType: 'application/x-ndjson' },
+        async (uri, { session }) => ({ contents: [{ uri: uri.href, mimeType: 'application/x-ndjson', text: readFeedText(String(session)) }] })
+    )
+    server.server.setRequestHandler(SubscribeRequestSchema, async ({ params }) => {
+        subscribeFeed(params.uri)
+        return {}
+    })
+    server.server.setRequestHandler(UnsubscribeRequestSchema, async ({ params }) => {
+        unsubscribeFeed(params.uri)
+        return {}
+    })
 
     registerCodeMode(server, tools)
     return server

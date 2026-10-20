@@ -10,6 +10,7 @@ import { fsReadRangeCanonicalBody } from './dispatch.js'
 import { NOTICES } from './notices.js'
 import { CONTINUATION_RESERVE_CHARS, continuedReplyWithin } from './continuation.js'
 import { CODEMODE_HEARTBEAT_MS, DEFAULT_CODEMODE_TIMEOUT_MS } from './codemode-budget.js'
+import { browserAfterCall, screenshotPathsOf } from './browser-feed.js'
 
 let codemodeInvocationSeq = 0
 const newCodemodeSessionId = () => `mcp-codemode-${process.pid}-${Date.now()}-${++codemodeInvocationSeq}`
@@ -355,6 +356,23 @@ function envelopeKeys(args) {
     return Object.fromEntries(ENVELOPE_KEYS.filter((key) => args[key] !== undefined).map((key) => [key, args[key]]))
 }
 
+// What a browser call must report after it returns: feed start or stop for browser-events, and the screenshots a browser or chrome
+// request names (their image bytes ride the reply, row 31). Null for every other verb.
+function browserCallContext(verb, args, callCwd) {
+    const name = String(verb ?? '')
+    const root = typeof args.cwd === 'string' && args.cwd !== '' ? args.cwd : callCwd
+    const body = isPlainObject(args.body) ? args.body : {}
+    if (/^browser[-_]events$/.test(name)) {
+        return { kind: 'events', cwd: root, action: args.action ?? body.action, session: args.session ?? body.session }
+    }
+    if (/^(?:browser|chrome)$/.test(name)) {
+        const raw = typeof args.raw_body === 'string' ? args.raw_body : typeof args.body === 'string' ? args.body : ''
+        const paths = screenshotPathsOf(raw)
+        return paths.length ? { kind: 'shots', cwd: root, paths } : null
+    }
+    return null
+}
+
 function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null) {
     const names = [...tools.keys()]
     const resolve = (name) => {
@@ -390,9 +408,11 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             throw error
         }
         let pending
+        let feedContext = null
         try {
             const merged = withoutEchoedSession(mergeEnvelope(name, args, envelope), session_id)
             const tool = tools.get(name)
+            feedContext = browserCallContext(tool.verb, merged, defaultCwdFor(merged, cwd))
             const defaults = {}
             const folded = canonicalFsReadArgs(tool.verb, sessionAliasArgs(foldVerbArgs(verbShapedTool(tool, merged), merged)))
             const refuse = (code, check) => {
@@ -421,7 +441,12 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             fail(error)
         }
         if (!entry) return pending.then(replyValue)
-        return pending.then((text) => { entry.text = text; entry.dispatch_id = dispatchIdOf(text); return replyValue(text) }, fail)
+        return pending.then((text) => {
+            entry.text = text
+            entry.dispatch_id = dispatchIdOf(text)
+            if (feedContext) entry.images = browserAfterCall(feedContext, text, extra?.sendNotification)
+            return replyValue(text)
+        }, fail)
     }
     let envelopeCache
     const dispatchEnvelopeSchema = () => {
@@ -553,7 +578,8 @@ export function registerCodeMode(server, tools) {
                     : []
                 const joined = [...logs, formatValue(value), ...unreturned].filter((line) => line !== '').join('\n')
                 const reply = joined.trim() === '' ? EMPTY_REPLY_MARKER : joined
-                return { content: [{ type: 'text', text: capWithContinuation(session_id, reply, cap) }] }
+                const images = replies.flatMap((entry) => entry.images ?? [])
+                return { content: [{ type: 'text', text: capWithContinuation(session_id, reply, cap) }, ...images] }
             } catch (error) {
                 const detail = describeError(error)
                 const diagnosticId = `codemode-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`
