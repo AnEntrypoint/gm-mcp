@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
+const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
+const bundleRebuiltByCi = existsSync(path.join(repoRoot, '.github', 'workflows', 'bundle.yml'))
 const NULL_SHA = /^0{40}$/
 const [base, head] = process.argv.slice(2)
 
@@ -51,8 +56,8 @@ if (!paths.includes('src/bundle-version.js')) {
         problems.push(`src/ changed (${srcPaths.join(', ')}) and src/bundle-version.js was touched, but BUNDLE_VERSION is ${after === null ? 'unreadable' : `still ${after}`} (base ${before ?? 'absent'}); bump it so the self-update guard sees a newer build`)
     }
 }
-if (!paths.includes('bin/gm-mcp-server.js')) {
-    problems.push(`src/ changed (${srcPaths.join(', ')}) but bin/gm-mcp-server.js did not; run npm run build and commit the bundle in the same commit`)
+if (!paths.includes('bin/gm-mcp-server.js') && !bundleRebuiltByCi) {
+    problems.push(`src/ changed (${srcPaths.join(', ')}) but bin/gm-mcp-server.js did not, and no .github/workflows/bundle.yml rebuilds it`)
 }
 
 if (problems.length > 0) {
@@ -64,4 +69,4 @@ if (problems.length > 0) {
     process.exit(1)
 }
 
-console.log(`check-version-bump: src/ change ships with a BUNDLE_VERSION bump and a rebuilt bundle (${srcPaths.length} path(s))`)
+console.log(`check-version-bump: src/ change ships with a BUNDLE_VERSION bump (${srcPaths.length} path(s)); bin/gm-mcp-server.js ${paths.includes('bin/gm-mcp-server.js') ? 'is rebuilt in this range' : 'is rebuilt by bundle.yml after the push'}`)

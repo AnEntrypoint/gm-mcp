@@ -7,10 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { buildBundle, bundleVersion, srcSha256 } from './build.mjs'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-if (!existsSync(path.join(repoRoot, 'node_modules', 'esbuild', 'package.json'))) {
-    console.error(`esbuild is not installed under ${path.join(repoRoot, 'node_modules')} (a gm-mcp devDependency, absent from a clean clone), so the drift gate cannot build the bundle: install the locked devDependencies and rerun`)
-    process.exit(1)
-}
+const esbuildInstalled = existsSync(path.join(repoRoot, 'node_modules', 'esbuild', 'package.json'))
 const binRel = 'bin/gm-mcp-server.js'
 const committedPath = path.join(repoRoot, binRel)
 const includedSrc = (process.env.GM_MCP_BUILD_INCLUDE || '').split(',').map(s => s.trim()).filter(Boolean)
@@ -54,28 +51,39 @@ const committed = binStaged
     ? git(['show', `:${binRel}`]).stdout
     : shipsWorkingBin || headBin.status !== 0 ? readFileSync(committedPath, 'utf8') : headBin.stdout
 
-const result = await buildBundle(false, buildRoot)
-const fresh = result.outputFiles[0].text
+const headChanged = git(['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', 'HEAD'])
+const headFiles = headChanged.status === 0 ? headChanged.stdout.split('\n').map(line => line.trim()).filter(Boolean) : []
+const srcFiles = headFiles.filter(p => p.startsWith('src/'))
+const regenSet = [binRel, ...srcFiles].join(' ')
+const changedNow = includedSrc.length ? includedSrc : headFiles
+const srcChangedNow = changedNow.some(p => p.startsWith('src/'))
+const binChangedNow = changedNow.includes(binRel)
+const bundleRebuiltByCi = existsSync(path.join(repoRoot, '.github', 'workflows', 'bundle.yml'))
+
+if (srcChangedNow && !binChangedNow && bundleRebuiltByCi) {
+    if (stagedDir) rmSync(stagedDir, { recursive: true, force: true })
+    console.log('bin/gm-mcp-server.js is pending: src/ changed without the bin, and .github/workflows/bundle.yml rebuilds it on main after the push. No local bundle build is needed.')
+    process.exit(0)
+}
+
 const currentSrcSha = srcSha256(buildRoot)
+const fresh = esbuildInstalled ? (await buildBundle(false, buildRoot)).outputFiles[0].text : null
 if (stagedDir) rmSync(stagedDir, { recursive: true, force: true })
 
-if (!fresh.includes(`var BUNDLE_VERSION = ${JSON.stringify(BUNDLE_VERSION)};`)) {
+if (fresh !== null && !fresh.includes(`var BUNDLE_VERSION = ${JSON.stringify(BUNDLE_VERSION)};`)) {
     console.error(`fresh bundle is missing the working-tree BUNDLE_VERSION ${BUNDLE_VERSION} banner`)
     process.exit(1)
 }
 
 const recordedSrcSha = /var BUNDLE_SRC_SHA256 = "([0-9a-f]{64})";/.exec(committed)?.[1] ?? null
 if (recordedSrcSha !== currentSrcSha) {
-    console.error(`bin/gm-mcp-server.js records src sha256 ${recordedSrcSha ?? 'none'} but src/ hashes to ${currentSrcSha}: a src/ file changed after the bundle was built, so the bundle is stale. Run npm run build and commit the bundle with the src/ change.`)
+    console.error(`bin/gm-mcp-server.js records src sha256 ${recordedSrcSha ?? 'none'} but src/ hashes to ${currentSrcSha}: a src/ file changed after the bundle was built, so the bundle is stale. Commit the rebuilt bundle with the src/ change, or push src/ alone and let bundle.yml rebuild it.`)
     process.exit(1)
 }
 
-const headChanged = git(['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', 'HEAD'])
-const headFiles = headChanged.status === 0 ? headChanged.stdout.split('\n').map(line => line.trim()).filter(Boolean) : []
-const srcFiles = headFiles.filter(p => p.startsWith('src/'))
-const regenSet = [binRel, ...srcFiles].join(' ')
-
-if (committed === fresh) {
+if (fresh === null) {
+    console.log(`bin/gm-mcp-server.js records the current src sha256 (${currentSrcSha}); esbuild is not installed here, so the byte-for-byte comparison runs in CI`)
+} else if (committed === fresh) {
     console.log(`bin/gm-mcp-server.js matches a fresh build of ${binStaged ? 'the staged' : shipsWorkingBin ? 'the working-tree' : "HEAD's"} src/ (${fresh.length} bytes) -- no drift`)
 } else {
     console.error(`bin/gm-mcp-server.js is STALE: it does not match a fresh build of ${binStaged ? 'the staged' : "HEAD's"} src/ (committed ${committed.length} bytes, fresh ${fresh.length} bytes).`)
