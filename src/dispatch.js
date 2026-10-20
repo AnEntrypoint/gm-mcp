@@ -2464,6 +2464,7 @@ function bundleNoticeTail(verb, drift) {
         bundle_reloadable: drift.reloadable === true,
         bundle_action: drift.reloadable === true ? 'reload_pending' : 'none',
         bundle_restart: drift.reloadable === true ? 'not needed: reloading between dispatches' : `restart the MCP client that launched this server (or reconnect the gm MCP server) so it relaunches from ${installedPath}`,
+        one_command: drift.one_command ?? null,
         bundle_answer_from: 'served-bundle',
     }, { lineWidth: 100 })
     if (READ_ONLY_STATUS_VERBS.has(verb)) return block + '\n'
@@ -2478,11 +2479,22 @@ function pendingBundleNoticeReserve(verb) {
     return bundleNoticeTail(verb, drift).length + 1
 }
 
-function withStaleBundleNotice(verb, text) {
+const staleNoticeAnnounced = new Set()
+
+
+function staleNoticeKey(sessionId, drift) {
+    return [sessionId ?? '', drift.installed_sha256, drift.running_sha256, drift.refusal_code].map((v) => v ?? '').join('|')
+}
+
+
+function withStaleBundleNotice(verb, text, sessionId) {
     if (VERBATIM_REPLY_VERBS.has(verb)) return text
     if (typeof text !== 'string' || text === '') return text
     const drift = bundleDrift()
     if (!drift.stale) return text
+    const key = staleNoticeKey(sessionId, drift)
+    if (staleNoticeAnnounced.has(key)) return text
+    staleNoticeAnnounced.add(key)
     const withNewline = text.endsWith('\n') ? text : text + '\n'
     return withNewline + bundleNoticeTail(verb, drift)
 }
@@ -2661,7 +2673,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     appendDiagnostic('dispatch-start', { call_id: callId, session_id: sessionId, verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
     try {
         const waits = CI_STATUS_VERBS.has(args?.verb) && isPlainObject(args?.body) && args.body.wait === true
-        const reply = withStaleBundleNotice(args?.verb, waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver))
+        const reply = withStaleBundleNotice(args?.verb, waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver), sessionId)
         if (typeof reply === 'string') replyDispatchId = /^dispatch_id: (\S+)/m.exec(reply)?.[1] ?? null
         if (VERBATIM_REPLY_VERBS.has(args?.verb)) return reply
         return continuedReply(continuationKeyOf(args), reply)
