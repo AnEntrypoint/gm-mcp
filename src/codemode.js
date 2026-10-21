@@ -345,7 +345,9 @@ function capCodemodeText(text, cap, reserve = 0) {
         }
         return found
     }
-    const dispatchId = lastBefore(/^[ \t-]*dispatch_id: (\S+)/gm, 1)
+    const dispatchHits = [...text.matchAll(/^[ \t-]*dispatch_id: (\S+)|--- partial [^\n]*? dispatch_id: (\S+)/gm)].filter((m) => m.index < room)
+    const lastHit = dispatchHits.at(-1)
+    const dispatchId = lastHit ? (lastHit[1] ?? lastHit[2]) : null
     const spoolFile = lastBefore(new RegExp(SPOOL_FILE_PATTERN.source, 'g'), 0)
     const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${cap}\ndispatch_id: ${dispatchId ?? 'not reported'}\nspool_file: ${spoolFile ?? 'not reported'}\n`
     const flagged = text.replace(/^(\s*)truncated: false$/gm, "$1truncated: true")
@@ -421,6 +423,8 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             if (entry) {
                 entry.failed = true
                 entry.error = describeError(error)
+                // A failed call names its own dispatch so the cut notice and the partial header can point at it.
+                entry.dispatch_id ??= /dispatch_id[:=]\s*(\S+)/.exec(entry.error)?.[1] ?? null
             }
             throw error
         }
@@ -613,7 +617,7 @@ export function registerCodeMode(server, tools) {
                         const head = `--- partial ${label} completed before the throw dispatch_id: ${entry.dispatch_id ?? 'none'} ---`
                         return args.full_response === true ? `${head}\n${completedReplyText(entry.text, replyBudget)}` : head
                     }
-                    if (entry.failed) return `--- partial ${label} failed (error detailed once, above) ---`
+                    if (entry.failed) return `--- partial ${label} failed (error detailed once, above) dispatch_id: ${entry.dispatch_id ?? 'none'} ---`
                     return `--- partial ${label} still pending ---`
                 })
                 const failedCount = replies.filter((entry) => entry.failed).length
