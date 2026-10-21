@@ -238,11 +238,12 @@ export function refuseUndeclaredBodyKeys(name, verb, folded) {
     if (unknown.length === 0) return
     const hint = verb.startsWith('codeinsight') || verb.startsWith('callers') || verb.startsWith('callees') || verb.startsWith('impact') ? ' -- codeinsight answers structure: use {symbol, verb:"find"|"callers"|...} for symbols, or gm.codesearch({query}) for text' : ''
     const canonical = verb === 'fs_read' ? [...Object.keys(schema.fields).filter((key) => !FS_READ_RANGE_ALIASES.includes(key)), 'startLine', 'endLine'] : Object.keys(schema.fields)
+    const cwdHint = verb === 'git_pull' ? ' -- git_pull has no path key: name the checkout with cwd=<directory> (a submodule directory works)' : ''
     const prdHint = verb === 'prd-list' ? ' -- prd-list has no text search (no query key): filter by id, status, limit, offset, full or brief, then match subject client-side' : ''
     const outputHint = verb === 'grep' && unknown.includes('output') ? ' -- grep spells this key output_mode (content|files_with_matches|count), not output' : ''
     const aliasSpellings = Object.entries(schema.fields).flatMap(([field, spec]) => (spec.aliases ?? []).map((alias) => `${alias}=${field}`))
     const aliasClause = aliasSpellings.length > 0 ? ` -- alias spellings: ${aliasSpellings.join(', ')}` : ''
-    throw new Error(`${name} body has undeclared key ${unknown.join(', ')} -- declared body fields: ${canonical.join(', ')}${aliasClause}${hint}${outputHint}${prdHint}`)
+    throw new Error(`${name} body has undeclared key ${unknown.join(', ')} -- declared body fields: ${canonical.join(', ')}${aliasClause}${hint}${outputHint}${cwdHint}${prdHint}`)
 }
 
 export function refuseMissingRequiredBodyKeys(name, verb, folded) {
