@@ -484,6 +484,25 @@ const GIT_FINALIZE_BODY = {
         untrack: { type: 'boolean', description: 'Removes the named .agentplug* paths from the index only (git rm --cached semantics; files stay on disk) in a commit that names nothing else, then pushes. Add and modify of .agentplug* stay refused.' },
     },
 }
+const GIT_FETCH_BODY = {
+    required: [],
+    fields: {
+        remote: { type: 'string', description: 'Configured remote name; defaults to origin.' },
+        ref: { type: 'string', description: 'Sha, branch or refspec to fetch. Must not start with a dash. Wins over rev and refspec when several are given.' },
+        rev: { type: 'string', description: 'Alias of ref, read when ref is absent.' },
+        refspec: { type: 'string', description: 'Refspec to fetch, read when ref and rev are absent.' },
+    },
+}
+
+const GIT_REMOTE_BODY = {
+    required: [],
+    fields: {
+        action: { type: 'string', description: 'add or remove; omit to list the configured remotes.' },
+        name: { type: 'string', description: 'Remote name for add or remove. origin is never added, removed or changed.' },
+        url: { type: 'string', description: 'https URL with a host and no user:password for add. Required with action add.' },
+    },
+}
+
 const GIT_PUSH_BODY = {
     required: [],
     fields: {
@@ -678,9 +697,9 @@ const REGISTRY_ROWS = [
     { canonical: 'git_log', ...scopedGitRow('git_log') },
     { canonical: 'git_diff', ...scopedGitRow('git_diff') },
     { canonical: 'git_show', aliases: GIT_SHOW_KEYS, fields: GIT_SHOW_FIELDS, description: GIT_SHOW_DESCRIPTION },
-    { canonical: 'git_fetch' },
+    { canonical: 'git_fetch', body: GIT_FETCH_BODY },
     { canonical: 'git_branch' },
-    { canonical: 'git_remote' },
+    { canonical: 'git_remote', body: GIT_REMOTE_BODY },
     { canonical: 'git_submodule_add', description: 'Add a git submodule: git submodule add [-b branch] -- url path. Stages .gitmodules and the gitlink; does not commit. Protected-path gate as git_add.', body: GIT_SUBMODULE_ADD_BODY },
     { canonical: 'git_submodule_update', description: 'Initialise and check out a submodule at the parent gitlink: git submodule update --init [--recursive] -- path. Protected-path gate as git_add.', body: GIT_SUBMODULE_UPDATE_BODY },
     { canonical: 'git_checkout', ...scopedGitRow('git_checkout') },
