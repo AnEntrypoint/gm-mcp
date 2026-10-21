@@ -77,7 +77,9 @@ async function submitRequest(inDir, name, text) {
     } catch (error) {
         try {
             fs.rmSync(tempPath, { force: true })
-        } catch {}
+        } catch (cleanupError) {
+            process.stderr.write(`gm-mcp: could not remove spool temp ${tempPath}: ${cleanupError?.code ?? cleanupError?.message}\n`)
+        }
         if (DISK_FULL_CODES.has(error.code)) throw spoolError('disk-full', `spool request not written: the disk is full (${error.code}); free space and resubmit`, { path: finalPath })
         throw error
     }
@@ -110,7 +112,9 @@ function waitForReply({ outDir, replyPath, deadline, budgetMs, verb, name }) {
             if (done) return
             done = true
             clearInterval(timer)
-            try { watcher?.close() } catch {}
+            try { watcher?.close() } catch (closeError) {
+                process.stderr.write(`gm-mcp: could not close spool watcher on ${outDir}: ${closeError?.code ?? closeError?.message}\n`)
+            }
             fn(value)
         }
         const check = () => {
@@ -129,7 +133,9 @@ function waitForReply({ outDir, replyPath, deadline, budgetMs, verb, name }) {
                 check()
             })
             watcher.on('error', () => {
-                try { watcher?.close() } catch {}
+                try { watcher?.close() } catch (closeError) {
+                    process.stderr.write(`gm-mcp: could not close spool watcher on ${outDir}: ${closeError?.code ?? closeError?.message}\n`)
+                }
                 watcher = null
             })
         } catch {
