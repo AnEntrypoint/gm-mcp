@@ -244,11 +244,13 @@ await test('a check that never deferred arms no retry and refreshes exactly as b
     }
 })
 
-await test('the retry delay honours GM_MCP_SELF_UPDATE_INTERVAL_MS', async () => {
+await test('the retry delay never undercuts the 60 s check-interval floor', async () => {
     const s = scenario()
     try {
         process.env.GM_MCP_SELF_UPDATE_INTERVAL_MS = '4000'
-        assert.equal(deferRetryState().delay_ms, 4000, 'the retry would fetch faster than the interval the operator asked for')
+        assert.equal(deferRetryState().delay_ms, 20_000, 'an operator interval below the 60 s floor must not make the retry faster than the default delay')
+        process.env.GM_MCP_SELF_UPDATE_INTERVAL_MS = '2'
+        assert.equal(deferRetryState().delay_ms, 20_000, 'a 2 ms operator interval is clamped to the floor, so the retry delay stays at the default')
         delete process.env.GM_MCP_SELF_UPDATE_INTERVAL_MS
         const fallback = deferRetryState().delay_ms
         assert.ok(fallback > 4000 && fallback <= 60_000, `the default retry delay is not seconds-scale: ${fallback}`)
