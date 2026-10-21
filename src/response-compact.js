@@ -319,7 +319,7 @@ export function cleanResponse(value, keyHint, outPath, plainTextFile, untruncate
 
 const WIRE_EXCERPT_CHARS = 160
 
-const WIRE_EXCERPT_IMMUNE_KEYS = new Set(['id', 'key', 'status', 'session_id', 'verb'])
+const WIRE_EXCERPT_IMMUNE_KEYS = new Set(['id', 'key', 'status', 'session_id', 'verb', 'hint', 'why', 'description'])
 
 const WIRE_OMITTED_KEYS = new Set(['route_hint', 'reply_hash', 'orient_nouns'])
 

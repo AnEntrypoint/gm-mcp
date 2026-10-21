@@ -2548,17 +2548,18 @@ function pendingBundleNoticeReserve(verb) {
 const staleNoticeAnnounced = new Set()
 
 
-function staleNoticeKey(sessionId, drift) {
-    return [sessionId ?? '', drift.installed_sha256, drift.running_sha256, drift.refusal_code].map((v) => v ?? '').join('|')
+// Keyed on the bundle state alone: every session of this process sees the notice once per bundle state, not once per session id.
+function staleNoticeKey(drift) {
+    return [drift.installed_sha256, drift.running_sha256, drift.refusal_code].map((v) => v ?? '').join('|')
 }
 
 
-function withStaleBundleNotice(verb, text, sessionId) {
+function withStaleBundleNotice(verb, text) {
     if (VERBATIM_REPLY_VERBS.has(verb)) return text
     if (typeof text !== 'string' || text === '') return text
     const drift = bundleDrift()
     if (!drift.stale) return text
-    const key = staleNoticeKey(sessionId, drift)
+    const key = staleNoticeKey(drift)
     if (staleNoticeAnnounced.has(key)) return text
     staleNoticeAnnounced.add(key)
     const withNewline = text.endsWith('\n') ? text : text + '\n'
@@ -2739,7 +2740,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     appendDiagnostic('dispatch-start', { call_id: callId, session_id: sessionId, verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
     try {
         const waits = CI_STATUS_VERBS.has(args?.verb) && isPlainObject(args?.body) && args.body.wait === true
-        const reply = withStaleBundleNotice(args?.verb, waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver), sessionId)
+        const reply = withStaleBundleNotice(args?.verb, waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver))
         if (typeof reply === 'string') replyDispatchId = /^dispatch_id: (\S+)/m.exec(reply)?.[1] ?? null
         if (VERBATIM_REPLY_VERBS.has(args?.verb)) return reply
         return continuedReply(continuationKeyOf(args), reply)
