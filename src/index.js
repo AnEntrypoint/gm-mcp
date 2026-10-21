@@ -62,8 +62,15 @@ async function stdioRelayTarget() {
 }
 
 function watchForStaleBundle({ handOver = null, transportKind = 'stdio', settled = () => false } = {}) {
+    let settledNoted = false
     return startBundleDriftWatch(async (state) => {
-        if (settled()) return null
+        if (settled()) {
+            if (!settledNoted) {
+                settledNoted = true
+                appendDiagnostic('bundle-drift-settled', { transport: transportKind, from: state?.running_sha256 ?? null, to: state?.installed_sha256 ?? null, pid: process.pid })
+            }
+            return null
+        }
         const handable = handOver !== null && state?.stale === true && (state.refusal_code == null || state.refusal_code === 'no-handover')
         if (handable) {
             // Announce only after the handover outcome is known: a failed or deferred handover did not reload.
