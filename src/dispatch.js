@@ -2752,6 +2752,7 @@ function prdAddCwdRefusal(args) {
 
 export async function gmDispatch(args, signal, responseValueObserver) {
     if (PRD_ADD_VERBS.has(args?.verb) && !args?.resume_task && !(typeof args?.cwd === 'string' && args.cwd.trim())) return prdAddCwdRefusal(args)
+    if ((args?.verb === 'codesearch' || args?.verb === 'code_search') && typeof args?.max_chars !== 'number' && typeof args?.body?.max_chars === 'number') args = { ...args, max_chars: args.body.max_chars }
     if (typeof args?.max_chars === 'number' && !VERBATIM_REPLY_VERBS.has(args?.verb)) {
         const reserve = continuationReserveFor(continuationKeyOf(args))
         if (reserve > 0 && args.max_chars > 2 * reserve) args = { ...args, max_chars: args.max_chars - reserve, requested_max_chars: args.max_chars }
