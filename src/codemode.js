@@ -87,10 +87,10 @@ function failedReplyDetail(text, verb) {
 }
 
 function failedVerbLine(entry) {
-    const first = (entry.error ?? '').split('\n')[0].replace(CONTINUATION_TAIL, '')
-    if (/^verb=\S+ error_code=/.test(first)) return first
+    const lines = withoutContinuation(entry.error ?? '').split('\n').map((line) => line.replace(CONTINUATION_TAIL, ''))
+    if (/^verb=\S+ error_code=/.test(lines[0] ?? '')) return lines.join('\n')
     const code = /error_code: ([^\s)]+)/.exec(entry.error ?? '')?.[1] ?? 'none'
-    return `verb=${entry.verb} error_code=${code} dispatch_id=${entry.dispatch_id ?? 'none'}`
+    return `verb=${entry.verb} error_code=${code} dispatch_id=${entry.dispatch_id ?? 'none'}\n${lines.join('\n').trim() || 'no error field'}`
 }
 
 function compactFailureDetail(text, verb) {
@@ -111,9 +111,19 @@ function isNotFoundReply(text) {
     return /^error_code: not_found$/m.test(text.split(/^--- data/m)[0]) || /error_code: not_found\)/.test(text.split(/^--- data/m)[0])
 }
 
+// Every failed reply becomes one error that names error_code and dispatch_id, even when the reply carries no structured error field.
+function replyErrorText(text, verb) {
+    const structured = failedReplyDetail(text, verb) ?? compactFailureDetail(text, verb)
+    if (structured !== null) return structured
+    const code = /error_code: ([^\s)]+)/.exec(text)?.[1] ?? 'none'
+    const dispatchId = dispatchIdOf(text) ?? /dispatch_id: (\S+)/.exec(text)?.[1] ?? 'none'
+    const head = text.trim().split('\n').slice(0, 3).join(' | ').replace(/\s+/g, ' ').trim()
+    return `verb=${verb} error_code=${code} dispatch_id=${dispatchId}\n${head || 'no error field and no reply text'}`
+}
+
 function replyText(result, verb) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
-    if (result?.isError) throw new Error(text)
+    if (result?.isError) throw new Error(replyErrorText(text, verb))
     const failed = failedReplyDetail(text, verb) ?? compactFailureDetail(text, verb)
     if (failed !== null && !isChildExitReply(text) && !isNotFoundReply(text)) throw new Error(failed)
     return text
@@ -594,7 +604,7 @@ export function registerCodeMode(server, tools) {
                         const head = `--- partial ${label} completed before the throw dispatch_id: ${entry.dispatch_id ?? 'none'} ---`
                         return args.full_response === true ? `${head}\n${completedReplyText(entry.text, replyBudget)}` : head
                     }
-                    if (entry.failed) return `--- partial ${label} failed ---\n${capCodemodeText(withFrameLimit(withoutContinuation(entry.error).split('\n').map((line) => line.replace(CONTINUATION_TAIL, '')).join('\n')), cap)}`
+                    if (entry.failed) return `--- partial ${label} failed (error detailed once, above) ---`
                     return `--- partial ${label} still pending ---`
                 })
                 const failedCount = replies.filter((entry) => entry.failed).length
