@@ -16,7 +16,7 @@ import { gitToplevel, runGit } from './git-adapter.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { tableRow } from './verb-table.js'
 import { undeclaredBodyKeys } from './verb-bodies.js'
-import { execFileSync } from './process-port.js'
+import { execFile } from './process-port.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withCodesearchCompleteness, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING, VERBATIM_TEXT_MARKER } from './response-compact.js'
 
 let inflightDispatches = 0
@@ -599,7 +599,7 @@ export function shapeGitDiffReply(verb, body, out) {
 const GIT_SHOW_CAPTURE_LIMIT = /output exceeded the host capture limit/
 const GIT_SHOW_INLINE_MAX = 60000
 
-function gitShowCaptureFallback(verb, body, out, root) {
+async function gitShowCaptureFallback(verb, body, out, root) {
     if (verb !== 'git_show' || !isPlainObject(out) || out.error_code !== 'git_show_rev_unresolved') return out
     if (!GIT_SHOW_CAPTURE_LIMIT.test(String(out.error ?? ''))) return out
     const rev = typeof out.rev === 'string' && out.rev ? out.rev : 'HEAD'
@@ -608,7 +608,12 @@ function gitShowCaptureFallback(verb, body, out, root) {
     const argv = ['show', '--no-color', '--stat', rev, ...(scoped.length ? ['--', ...scoped] : [])]
     let stat
     try {
-        stat = execFileSync('git', argv, { cwd: repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000, windowsHide: true })
+        stat = await new Promise((resolve, reject) => {
+            execFile('git', argv, { cwd: repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000, windowsHide: true }, (error, stdout) => {
+                if (error) reject(error)
+                else resolve(stdout)
+            })
+        })
     } catch (error) {
         const detail = String(error?.stderr ?? error?.message ?? '').trim()
         return { ...out, error_code: 'git_show_failed', error: `git ${argv.join(' ')} failed in cwd ${repo}: ${detail}` }
@@ -1289,6 +1294,33 @@ function plainTextFromBody(body) {
 
 const GLOB_FILTER_FIELDS = ['glob', 'path_glob', 'include']
 const GLOB_EXCLUDE_FIELDS = ['exclude_glob', 'exclude_globs']
+
+const GIT_BOOL_STRING_FIELDS = { git_diff: ['staged', 'stat'], git_reset: ['hard'], git_merge: ['ff_only'] }
+
+// Folds the git body aliases the guest does not read (sha as rev on git_push), coerces "true"/"false" on boolean-only git fields, refuses any other string there, and turns git_show path into the paths form so the guest never builds rev:path.
+export function withGitBodyCoerced(verb, body) {
+    if (!body || typeof body !== 'object' || !verb.startsWith('git_')) return { value: body }
+    const coerced = { ...body }
+    for (const field of GIT_BOOL_STRING_FIELDS[verb] ?? []) {
+        const value = coerced[field]
+        if (value === undefined || value === null || typeof value === 'boolean') continue
+        if (value === 'true' || value === 'false') { coerced[field] = value === 'true'; continue }
+        return { error: `${verb} body.${field} must be a boolean (true or false); received ${JSON.stringify(value)}, which is refused rather than read as a default` }
+    }
+    if (verb === 'git_push' && coerced.sha !== undefined) {
+        if (coerced.rev !== undefined && coerced.rev !== coerced.sha) return { error: 'git_push body names both rev and sha with different values; send one revision' }
+        if (coerced.rev === undefined) coerced.rev = coerced.sha
+        delete coerced.sha
+    }
+    if (verb === 'git_show' && typeof coerced.path === 'string') {
+        const scoped = Array.isArray(coerced.paths) ? coerced.paths : Array.isArray(coerced.files) ? coerced.files : []
+        const combined = [...scoped, coerced.path]
+        delete coerced.path
+        delete coerced.files
+        coerced.paths = combined
+    }
+    return { value: coerced }
+}
 
 export function withGlobFiltersCoerced(verb, body) {
     if (!body || typeof body !== 'object') return { value: body }
@@ -2378,7 +2410,7 @@ function carriedNoFailure(out) {
         && (!isPlainObject(out.data) || carriedNoFailure(out.data))
 }
 
-const DISPATCH_WAIT_DISCLOSED_AT_MS = 2000
+const DISPATCH_WAIT_DISCLOSED_AT_MS = 250
 
 function withDispatchWait(out, waitedMs, claimedAtMs, daemonSpanMs) {
     if (waitedMs < DISPATCH_WAIT_DISCLOSED_AT_MS || !isPlainObject(out)) return out
@@ -2399,10 +2431,10 @@ function withDispatchWait(out, waitedMs, claimedAtMs, daemonSpanMs) {
         : beforeGuestCapMs - (executed === null ? 0 : Math.min(executed, beforeGuestCapMs))
     const postClaimMs = waitedMs - admissionMs - claimMs
     const daemonMs = daemonSpanMs === null ? null : Math.min(Math.max(0, daemonSpanMs), postClaimMs)
-    const execMs = executed !== null ? Math.min(executed, postClaimMs) : daemonMs
+    const execMs = executed !== null ? Math.min(executed, postClaimMs) : null
     const guestMs = firstReportedMs(out, ['guest_elapsed_ms'])
     const embedMs = firstReportedMs(out, ['embed_ms', 'embed_query'])
-    const split = { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, daemon_span_ms: daemonMs, guest_elapsed_ms: guestMs, embed_ms: embedMs, lane_wait_ms: claimMs, post_claim_ms: postClaimMs, daemon_handoff_ms: execMs === null ? null : Math.max(0, daemonMs - execMs), reply_poll_ms: daemonMs === null ? postClaimMs : postClaimMs - daemonMs, unattributed_ms: execMs === null ? postClaimMs : postClaimMs - execMs, ...lane }
+    const split = { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, daemon_span_ms: daemonMs, guest_elapsed_ms: guestMs, embed_ms: embedMs, lane_wait_ms: claimMs, post_claim_ms: postClaimMs, daemon_handoff_ms: execMs === null ? null : Math.max(0, daemonMs - execMs), reply_poll_ms: daemonMs === null ? postClaimMs : postClaimMs - daemonMs, unattributed_ms: execMs === null ? null : postClaimMs - execMs, ...lane }
     return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: Object.fromEntries(Object.entries(split).filter(([, value]) => value !== null && value !== undefined)) }
 }
 
@@ -2548,7 +2580,8 @@ function pendingBundleNoticeReserve(verb) {
 const staleNoticeAnnounced = new Set()
 
 
-function staleNoticeKey(sessionId, drift) {
+// Keyed on session id, installed sha, running sha and refusal code: each session sees the notice once per bundle state.
+function staleNoticeKey(drift, sessionId) {
     return [sessionId ?? '', drift.installed_sha256, drift.running_sha256, drift.refusal_code].map((v) => v ?? '').join('|')
 }
 
@@ -2558,7 +2591,7 @@ function withStaleBundleNotice(verb, text, sessionId) {
     if (typeof text !== 'string' || text === '') return text
     const drift = bundleDrift()
     if (!drift.stale) return text
-    const key = staleNoticeKey(sessionId, drift)
+    const key = staleNoticeKey(drift, sessionId)
     if (staleNoticeAnnounced.has(key)) return text
     staleNoticeAnnounced.add(key)
     const withNewline = text.endsWith('\n') ? text : text + '\n'
@@ -2719,6 +2752,7 @@ function prdAddCwdRefusal(args) {
 
 export async function gmDispatch(args, signal, responseValueObserver) {
     if (PRD_ADD_VERBS.has(args?.verb) && !args?.resume_task && !(typeof args?.cwd === 'string' && args.cwd.trim())) return prdAddCwdRefusal(args)
+    if ((args?.verb === 'codesearch' || args?.verb === 'code_search') && typeof args?.max_chars !== 'number' && typeof args?.body?.max_chars === 'number') args = { ...args, max_chars: args.body.max_chars }
     if (typeof args?.max_chars === 'number' && !VERBATIM_REPLY_VERBS.has(args?.verb)) {
         const reserve = continuationReserveFor(continuationKeyOf(args))
         if (reserve > 0 && args.max_chars > 2 * reserve) args = { ...args, max_chars: args.max_chars - reserve, requested_max_chars: args.max_chars }
@@ -2814,9 +2848,11 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         } else {
             const globCoerced = withGlobFiltersCoerced(verb, normalized.value)
             if (globCoerced.error) return `error: ${globCoerced.error}`
-            const diagnostic = objectBodyDiagnostic(verb, globCoerced.value) ?? fsWriteEnvelopeDiagnostic(verb, globCoerced.value)
+            const gitCoerced = withGitBodyCoerced(verb, globCoerced.value)
+            if (gitCoerced.error) return `error: ${gitCoerced.error}`
+            const diagnostic = objectBodyDiagnostic(verb, gitCoerced.value) ?? fsWriteEnvelopeDiagnostic(verb, gitCoerced.value)
             if (diagnostic) return `error: ${diagnostic}`
-            const coerced = withCodesearchScalarsCoerced(verb, globCoerced.value)
+            const coerced = withCodesearchScalarsCoerced(verb, gitCoerced.value)
             const dualRouted = withCodesearchDualPathRouted(verb, coerced, cwd)
             codesearchDualScope = dualRouted.scope
             const withDefaultK = withCodesearchDefaultK(verb, dualRouted.body)
@@ -2904,7 +2940,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const deadline = Date.now() + timeoutMs
 
 
-    const readLandedOutFile = () => {
+    const readLandedOutFile = async () => {
         if (!fs.existsSync(outPath)) return undefined
         let landedAtMs = null
         let opened
@@ -2942,7 +2978,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
             if (verb === 'prd-list' && isPlainObject(out) && out.ledger === undefined) out = { ...out, ledger: root, ledger_source: resolvedRoot.root_source }
-            out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, gitShowCaptureFallback(verb, normalizedBody, out, root))))
+            out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, await gitShowCaptureFallback(verb, normalizedBody, out, root))))
             out = withCodesearchDualPathScope(codesearchDualScope, out)
             out = withRuleExcludedMatchesDropped(verb, out)
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
@@ -3002,7 +3038,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     while (true) {
         if (signal?.aborted) return abortedReply()
         ensureSpoolRunnerRunning(root)
-        const landed = readLandedOutFile()
+        const landed = await readLandedOutFile()
         if (landed !== undefined) return landed
         if (claimedAtMs === null && fs.existsSync(`${inPath}.inflight`)) claimedAtMs = Date.now() - callStartedAtMs
         if (Date.now() >= deadline) {
@@ -3013,7 +3049,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 } catch {
                     break
                 }
-                const landedLate = readLandedOutFile()
+                const landedLate = await readLandedOutFile()
                 if (landedLate !== undefined) return landedLate
             }
             return toYaml(timeoutReply({

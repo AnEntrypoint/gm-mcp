@@ -21,7 +21,11 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
 function codemodeTimeoutMs() {
     const configured = Number(process.env.GM_CODEMODE_TIMEOUT_MS)
-    return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_CODEMODE_TIMEOUT_MS
+    if (Number.isFinite(configured) && configured > 0) return configured
+    // A gm call may wait up to the poll ceiling, so the body budget must outlast it or a legal dispatch is cut.
+    const ceiling = Number(process.env.GM_MCP_POLL_TIMEOUT_CEILING_MS)
+    const pollCeilingMs = Number.isFinite(ceiling) && ceiling > 0 ? Math.round(ceiling) : 600000
+    return Math.max(DEFAULT_CODEMODE_TIMEOUT_MS, pollCeilingMs + CODEMODE_HEARTBEAT_MS)
 }
 
 function withCodemodeDeadline(pending, timeoutMs) {
@@ -87,10 +91,12 @@ function failedReplyDetail(text, verb) {
 }
 
 function failedVerbLine(entry) {
-    const first = (entry.error ?? '').split('\n')[0].replace(CONTINUATION_TAIL, '')
-    if (/^verb=\S+ error_code=/.test(first)) return first
-    const code = /error_code: ([^\s)]+)/.exec(entry.error ?? '')?.[1] ?? 'none'
-    return `verb=${entry.verb} error_code=${code} dispatch_id=${entry.dispatch_id ?? 'none'}`
+    // The verb error is shown once: no "Error: " prefix and no internal stack frames (REPLY_STACK_FRAME_LIMIT is 0 here).
+    const lines = withoutContinuation(entry.error ?? '').split('\n').map((line) => line.replace(CONTINUATION_TAIL, '').replace(/^Error: /, '')).filter((line) => !/^\s+at /.test(line))
+    if (/^verb=\S+ error_code=/.test(lines[0] ?? '')) return lines.join('\n')
+    const code = /error_code[:=]\s*([^\s)]+)/.exec(entry.error ?? '')?.[1] ?? 'none'
+    const id = entry.dispatch_id ?? /dispatch_id[:=]\s*(\S+)/.exec(entry.error ?? '')?.[1] ?? 'none'
+    return `verb=${entry.verb} error_code=${code} dispatch_id=${id}\n${lines.join('\n').trim() || 'no error field'}`
 }
 
 function compactFailureDetail(text, verb) {
@@ -111,9 +117,19 @@ function isNotFoundReply(text) {
     return /^error_code: not_found$/m.test(text.split(/^--- data/m)[0]) || /error_code: not_found\)/.test(text.split(/^--- data/m)[0])
 }
 
+// Every failed reply becomes one error that names error_code and dispatch_id, even when the reply carries no structured error field.
+function replyErrorText(text, verb) {
+    const structured = failedReplyDetail(text, verb) ?? compactFailureDetail(text, verb)
+    if (structured !== null) return structured
+    const code = /error_code: ([^\s)]+)/.exec(text)?.[1] ?? 'none'
+    const dispatchId = dispatchIdOf(text) ?? /dispatch_id: (\S+)/.exec(text)?.[1] ?? 'none'
+    const head = text.trim().split('\n').slice(0, 3).join(' | ').replace(/\s+/g, ' ').trim()
+    return `verb=${verb} error_code=${code} dispatch_id=${dispatchId}\n${head || 'no error field and no reply text'}`
+}
+
 function replyText(result, verb) {
     const text = (result?.content ?? []).map((part) => part.text ?? '').join('\n')
-    if (result?.isError) throw new Error(text)
+    if (result?.isError) throw new Error(replyErrorText(text, verb))
     const failed = failedReplyDetail(text, verb) ?? compactFailureDetail(text, verb)
     if (failed !== null && !isChildExitReply(text) && !isNotFoundReply(text)) throw new Error(failed)
     return text
@@ -587,6 +603,8 @@ export function registerCodeMode(server, tools) {
                 const diagnosticId = `codemode-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`
                 const callIds = replies.map((entry) => entry.dispatch_id).filter(Boolean)
                 const diagnosticRecord = appendDiagnostic('codemode-threw', { diagnostic_id: diagnosticId, session_id, gm_dispatch_ids: callIds, error: detail })
+                // The error text is already the lead line, so the record names the log key without repeating it.
+                const replyRecord = diagnosticRecord.replace(/,"error":"(?:[^"\\]|\\.)*"/, '')
                 const settled = replies.filter((entry) => entry.text !== undefined)
                 const replyBudget = Math.max(PARTIAL_REPLY_MIN_CHARS, Math.floor((cap - CONTINUATION_RESERVE_CHARS) / Math.max(1, settled.length)) - PARTIAL_BLOCK_OVERHEAD_CHARS)
                 const partial = replies.map((entry, index) => {
@@ -595,7 +613,7 @@ export function registerCodeMode(server, tools) {
                         const head = `--- partial ${label} completed before the throw dispatch_id: ${entry.dispatch_id ?? 'none'} ---`
                         return args.full_response === true ? `${head}\n${completedReplyText(entry.text, replyBudget)}` : head
                     }
-                    if (entry.failed) return `--- partial ${label} failed ---\n${capCodemodeText(withFrameLimit(withoutContinuation(entry.error).split('\n').map((line) => line.replace(CONTINUATION_TAIL, '')).join('\n')), cap)}`
+                    if (entry.failed) return `--- partial ${label} failed (error detailed once, above) ---`
                     return `--- partial ${label} still pending ---`
                 })
                 const failedCount = replies.filter((entry) => entry.failed).length
@@ -612,7 +630,7 @@ export function registerCodeMode(server, tools) {
                 const failedHead = echoed ? failedVerbLine(failedEntry) : null
                 const lead = echoed ? (failedHead === null ? [] : [failedHead]) : [...failingVerb, ...wrapper]
                 const tail = echoed ? [] : detailLines
-                const text = [...lead, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id)`, `diagnostic_record: ${diagnosticRecord}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
+                const text = [...lead, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id)`, `diagnostic_record: ${replyRecord}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
                 return { content: [{ type: 'text', text: capWithContinuation(session_id, text, cap) }], isError: true }
             } finally {
                 stopHeartbeat()

@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 const numberLike = z.union([z.number(), z.string()])
 const booleanLike = z.union([z.boolean(), z.string()])
-const boolString = z.preprocess(v => v === 'true' ? true : v === 'false' ? false : v, z.boolean())
+const boolString = z.preprocess(v => v === 'true' ? true : v === 'false' ? false : v, z.boolean({ error: 'must be a boolean; the strings "true" and "false" are coerced, any other value is refused' }))
 const pathspec = z.union([z.string(), z.array(z.string())])
 
 export const EXEC_LANGS = ['nodejs', 'js', 'python', 'py', 'bash', 'sh', 'shell', 'powershell', 'ps1', 'deno', 'agent', 'claude']
@@ -80,7 +80,7 @@ const GIT_SINGLE_SHAPE = (verb, keys, sample) => ` ${keys.join(', ')} ${keys.len
 const GIT_COMMIT_DESCRIPTION = GIT_SINGLE_SHAPE('git_commit', GIT_COMMIT_VERB_KEYS, 'message') + ` The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit. claim_only:true only claims paths in .gm/lane-claims.json for SESSION_ID (needs a non-empty paths array) and does not commit or publish.`
 const GIT_FINALIZE_DESCRIPTION = ` ${GIT_COMMIT_KEYS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body. The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit. .agentplug* paths are runtime state: add and modify are refused with a reason; untrack:true with only tracked .agentplug* paths commits their index removal (files stay on disk).`
 
-const GIT_PUSH_KEYS = ['rev']
+const GIT_PUSH_KEYS = ['rev', 'sha']
 const GIT_PUSH_FIELDS = aliasFields('git_push', GIT_COMMIT_TYPES, GIT_PUSH_KEYS)
 const GIT_PUSH_DESCRIPTION = GIT_SINGLE_SHAPE('git_push', GIT_PUSH_KEYS, 'rev') + ' Every other push field (remote, branch, force, recover_remote_moved, allow_foreign_commits) goes under body only.'
 
