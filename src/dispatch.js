@@ -16,7 +16,7 @@ import { gitToplevel, runGit } from './git-adapter.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { tableRow } from './verb-table.js'
 import { undeclaredBodyKeys } from './verb-bodies.js'
-import { execFileSync } from './process-port.js'
+import { execFile } from './process-port.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withCodesearchCompleteness, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING, VERBATIM_TEXT_MARKER } from './response-compact.js'
 
 let inflightDispatches = 0
@@ -599,7 +599,7 @@ export function shapeGitDiffReply(verb, body, out) {
 const GIT_SHOW_CAPTURE_LIMIT = /output exceeded the host capture limit/
 const GIT_SHOW_INLINE_MAX = 60000
 
-function gitShowCaptureFallback(verb, body, out, root) {
+async function gitShowCaptureFallback(verb, body, out, root) {
     if (verb !== 'git_show' || !isPlainObject(out) || out.error_code !== 'git_show_rev_unresolved') return out
     if (!GIT_SHOW_CAPTURE_LIMIT.test(String(out.error ?? ''))) return out
     const rev = typeof out.rev === 'string' && out.rev ? out.rev : 'HEAD'
@@ -608,7 +608,12 @@ function gitShowCaptureFallback(verb, body, out, root) {
     const argv = ['show', '--no-color', '--stat', rev, ...(scoped.length ? ['--', ...scoped] : [])]
     let stat
     try {
-        stat = execFileSync('git', argv, { cwd: repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000, windowsHide: true })
+        stat = await new Promise((resolve, reject) => {
+            execFile('git', argv, { cwd: repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000, windowsHide: true }, (error, stdout) => {
+                if (error) reject(error)
+                else resolve(stdout)
+            })
+        })
     } catch (error) {
         const detail = String(error?.stderr ?? error?.message ?? '').trim()
         return { ...out, error_code: 'git_show_failed', error: `git ${argv.join(' ')} failed in cwd ${repo}: ${detail}` }
@@ -2575,18 +2580,18 @@ function pendingBundleNoticeReserve(verb) {
 const staleNoticeAnnounced = new Set()
 
 
-// Keyed on the bundle state alone: every session of this process sees the notice once per bundle state, not once per session id.
-function staleNoticeKey(drift) {
-    return [drift.installed_sha256, drift.running_sha256, drift.refusal_code].map((v) => v ?? '').join('|')
+// Keyed on session id, installed sha, running sha and refusal code: each session sees the notice once per bundle state.
+function staleNoticeKey(drift, sessionId) {
+    return [sessionId ?? '', drift.installed_sha256, drift.running_sha256, drift.refusal_code].map((v) => v ?? '').join('|')
 }
 
 
-function withStaleBundleNotice(verb, text) {
+function withStaleBundleNotice(verb, text, sessionId) {
     if (VERBATIM_REPLY_VERBS.has(verb)) return text
     if (typeof text !== 'string' || text === '') return text
     const drift = bundleDrift()
     if (!drift.stale) return text
-    const key = staleNoticeKey(drift)
+    const key = staleNoticeKey(drift, sessionId)
     if (staleNoticeAnnounced.has(key)) return text
     staleNoticeAnnounced.add(key)
     const withNewline = text.endsWith('\n') ? text : text + '\n'
@@ -2767,7 +2772,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     appendDiagnostic('dispatch-start', { call_id: callId, session_id: sessionId, verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
     try {
         const waits = CI_STATUS_VERBS.has(args?.verb) && isPlainObject(args?.body) && args.body.wait === true
-        const reply = withStaleBundleNotice(args?.verb, waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver))
+        const reply = withStaleBundleNotice(args?.verb, waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver), sessionId)
         if (typeof reply === 'string') replyDispatchId = /^dispatch_id: (\S+)/m.exec(reply)?.[1] ?? null
         if (VERBATIM_REPLY_VERBS.has(args?.verb)) return reply
         return continuedReply(continuationKeyOf(args), reply)
@@ -2934,7 +2939,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const deadline = Date.now() + timeoutMs
 
 
-    const readLandedOutFile = () => {
+    const readLandedOutFile = async () => {
         if (!fs.existsSync(outPath)) return undefined
         let landedAtMs = null
         let opened
@@ -2972,7 +2977,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
             if (verb === 'prd-list' && isPlainObject(out) && out.ledger === undefined) out = { ...out, ledger: root, ledger_source: resolvedRoot.root_source }
-            out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, gitShowCaptureFallback(verb, normalizedBody, out, root))))
+            out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, await gitShowCaptureFallback(verb, normalizedBody, out, root))))
             out = withCodesearchDualPathScope(codesearchDualScope, out)
             out = withRuleExcludedMatchesDropped(verb, out)
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
@@ -3032,7 +3037,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     while (true) {
         if (signal?.aborted) return abortedReply()
         ensureSpoolRunnerRunning(root)
-        const landed = readLandedOutFile()
+        const landed = await readLandedOutFile()
         if (landed !== undefined) return landed
         if (claimedAtMs === null && fs.existsSync(`${inPath}.inflight`)) claimedAtMs = Date.now() - callStartedAtMs
         if (Date.now() >= deadline) {
@@ -3043,7 +3048,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 } catch {
                     break
                 }
-                const landedLate = readLandedOutFile()
+                const landedLate = await readLandedOutFile()
                 if (landedLate !== undefined) return landedLate
             }
             return toYaml(timeoutReply({
