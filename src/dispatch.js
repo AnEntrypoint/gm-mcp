@@ -1311,7 +1311,7 @@ function plainTextFromBody(body) {
 const GLOB_FILTER_FIELDS = ['glob', 'path_glob', 'include']
 const GLOB_EXCLUDE_FIELDS = ['exclude_glob', 'exclude_globs']
 
-const GIT_BOOL_STRING_FIELDS = { git_diff: ['staged', 'stat'], git_reset: ['hard'], git_merge: ['ff_only'] }
+const GIT_BOOL_STRING_FIELDS = { git_diff: ['staged', 'stat'], git_reset: ['hard'], git_merge: ['ff_only'], git_checkout: ['create'], git_worktree_add: ['create'] }
 
 // Folds the git body aliases the guest does not read (sha as rev on git_push), coerces "true"/"false" on boolean-only git fields, refuses any other string there, and turns git_show path into the paths form so the guest never builds rev:path.
 export function withGitBodyCoerced(verb, body) {
