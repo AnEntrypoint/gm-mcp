@@ -282,6 +282,7 @@ async function probeHead(cached) {
         const retryAfterSec = Number(response.headers.get('retry-after'))
         if ((response.status === 403 || response.status === 429) && resetEpochSec > 0) error.rateLimitResetMs = resetEpochSec * 1000
         else if ((response.status === 403 || response.status === 429) && retryAfterSec > 0) error.rateLimitResetMs = Date.now() + retryAfterSec * 1000
+        else if (response.status === 403 || response.status === 429) error.rateLimitResetMs = Date.now() + FULL_FETCH_INTERVAL_MS
         throw error
     }
     const head = await response.json()
