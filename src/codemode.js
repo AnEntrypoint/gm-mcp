@@ -87,10 +87,12 @@ function failedReplyDetail(text, verb) {
 }
 
 function failedVerbLine(entry) {
-    const lines = withoutContinuation(entry.error ?? '').split('\n').map((line) => line.replace(CONTINUATION_TAIL, ''))
+    // The verb error is shown once: no "Error: " prefix and no internal stack frames (REPLY_STACK_FRAME_LIMIT is 0 here).
+    const lines = withoutContinuation(entry.error ?? '').split('\n').map((line) => line.replace(CONTINUATION_TAIL, '').replace(/^Error: /, '')).filter((line) => !/^\s+at /.test(line))
     if (/^verb=\S+ error_code=/.test(lines[0] ?? '')) return lines.join('\n')
-    const code = /error_code: ([^\s)]+)/.exec(entry.error ?? '')?.[1] ?? 'none'
-    return `verb=${entry.verb} error_code=${code} dispatch_id=${entry.dispatch_id ?? 'none'}\n${lines.join('\n').trim() || 'no error field'}`
+    const code = /error_code[:=]\s*([^\s)]+)/.exec(entry.error ?? '')?.[1] ?? 'none'
+    const id = entry.dispatch_id ?? /dispatch_id[:=]\s*(\S+)/.exec(entry.error ?? '')?.[1] ?? 'none'
+    return `verb=${entry.verb} error_code=${code} dispatch_id=${id}\n${lines.join('\n').trim() || 'no error field'}`
 }
 
 function compactFailureDetail(text, verb) {
@@ -597,6 +599,8 @@ export function registerCodeMode(server, tools) {
                 const diagnosticId = `codemode-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`
                 const callIds = replies.map((entry) => entry.dispatch_id).filter(Boolean)
                 const diagnosticRecord = appendDiagnostic('codemode-threw', { diagnostic_id: diagnosticId, session_id, gm_dispatch_ids: callIds, error: detail })
+                // The error text is already the lead line, so the record names the log key without repeating it.
+                const replyRecord = diagnosticRecord.replace(/,"error":"(?:[^"\\]|\\.)*"/, '')
                 const settled = replies.filter((entry) => entry.text !== undefined)
                 const replyBudget = Math.max(PARTIAL_REPLY_MIN_CHARS, Math.floor((cap - CONTINUATION_RESERVE_CHARS) / Math.max(1, settled.length)) - PARTIAL_BLOCK_OVERHEAD_CHARS)
                 const partial = replies.map((entry, index) => {
@@ -622,7 +626,7 @@ export function registerCodeMode(server, tools) {
                 const failedHead = echoed ? failedVerbLine(failedEntry) : null
                 const lead = echoed ? (failedHead === null ? [] : [failedHead]) : [...failingVerb, ...wrapper]
                 const tail = echoed ? [] : detailLines
-                const text = [...lead, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id)`, `diagnostic_record: ${diagnosticRecord}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
+                const text = [...lead, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id)`, `diagnostic_record: ${replyRecord}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
                 return { content: [{ type: 'text', text: capWithContinuation(session_id, text, cap) }], isError: true }
             } finally {
                 stopHeartbeat()
