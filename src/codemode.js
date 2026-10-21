@@ -347,7 +347,8 @@ function capCodemodeText(text, cap, reserve = 0) {
         }
         return found
     }
-    const dispatchHits = [...text.matchAll(/^[ \t-]*dispatch_id: (\S+)|--- partial [^\n]*? dispatch_id: (\S+)/gm)].filter((m) => m.index < room)
+    // An array or object return is JSON text: a reply header there follows a literal backslash-n, a quote or a comma rather than a line break.
+    const dispatchHits = [...text.matchAll(/(?:^|\\n|["\[,\s])[ \t-]*dispatch_id: ([\w-]+)|--- partial [^\n]*? dispatch_id: ([\w-]+)/gm)].filter((m) => m.index < room)
     const lastHit = dispatchHits.at(-1)
     const dispatchId = lastHit ? (lastHit[1] ?? lastHit[2]) : null
     // A spool path that sits past the cut (a cut partial section's spill notice, for one) is still the path the caller needs, so fall back to the full text.
@@ -634,7 +635,9 @@ export function registerCodeMode(server, tools) {
                     if (entry.text !== undefined) {
                         const head = `--- partial ${label} completed before the throw dispatch_id: ${entry.dispatch_id ?? 'none'} ---`
                         const spill = () => spillPartialReply(args.cwd || process.cwd(), diagnosticId, index, entry.text)
-                        return args.full_response === true ? `${head}\n${completedReplyText(entry.text, replyBudget, spill)}` : head
+                        // An over-budget reply is cut and spilled even without full_response, so the spill path reaches the caller.
+                        const overBudget = entry.text.length > replyBudget
+                        return args.full_response === true || overBudget ? `${head}\n${completedReplyText(entry.text, replyBudget, spill)}` : head
                     }
                     if (entry.failed) return `--- partial ${label} failed (error detailed once, above) dispatch_id: ${entry.dispatch_id ?? 'none'} ---`
                     return `--- partial ${label} still pending ---`
