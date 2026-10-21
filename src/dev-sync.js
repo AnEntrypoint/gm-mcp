@@ -1,5 +1,6 @@
 import { agentplugDir } from './paths.js'
 import { spawn } from './process-port.js'
+import { recordChild } from './child-ledger.js'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
@@ -131,6 +132,8 @@ export function maybeStartDevSync(root) {
         ...hiddenDetachedOptions(),
     })
     child.on('error', (error) => appendDiagnostic('dev-sync-spawn-error', { root, error: describeError(error) }))
+    // A sidecar, not a successor: recorded so a SIGTERM to this server reaps it (transport-guard reapOwnChildren).
+    if (child.pid) recordChild({ root, pid: child.pid, kind: 'dev-sync', verb: 'dev-sync', note: root })
     child.unref()
     return true
 }

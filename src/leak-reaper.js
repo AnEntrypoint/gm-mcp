@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
@@ -7,7 +7,7 @@ import { attributePid, attributeRows } from './child-ledger.js'
 import { pidAlive } from './dispatch.js'
 import { classifyGmServerCommand } from './gm-cmdline.js'
 import { listeningPidOf, portAcceptsConnection } from './ports.js'
-import { readProcessTable } from './process-table.js'
+import { readProcessTableAsync } from './process-table.js'
 import {
     establishedConnectionCount,
     instanceFilePath,
@@ -58,10 +58,10 @@ export function parentAbandoned(parentPid, recordedPpid = null) {
 const WINDOWS_SNAPSHOT_TTL_MS = 5_000
 let windowsSnapshot = null
 
-function windowsCommandByPid() {
+async function windowsCommandByPid() {
     const now = Date.now()
     if (windowsSnapshot === null || now - windowsSnapshot.at > WINDOWS_SNAPSHOT_TTL_MS) {
-        windowsSnapshot = { at: now, byPid: new Map(readProcessTable().map((row) => [Number(row.pid), row.command])) }
+        windowsSnapshot = { at: now, byPid: new Map((await readProcessTableAsync()).map((row) => [Number(row.pid), row.command])) }
     }
     return windowsSnapshot.byPid
 }
@@ -72,7 +72,7 @@ async function commandLineOf(pid) {
     const wanted = Number(pid)
     if (!Number.isInteger(wanted) || wanted <= 0) return null
     if (process.platform === 'win32') {
-        const command = windowsCommandByPid().get(wanted)
+        const command = (await windowsCommandByPid()).get(wanted)
         return typeof command === 'string' && command !== '' ? command : null
     }
     try {
@@ -291,7 +291,7 @@ export async function liveMcpClientInParentChain(pid, parentPid, table, { maxHop
 }
 
 export async function assessUnattributedServers({ roots = [], liveSessionIds = null, now = Date.now(), processes = null, entryPath = null } = {}) {
-    const table = Array.isArray(processes) ? processes : readProcessTable()
+    const table = Array.isArray(processes) ? processes : await readProcessTableAsync()
     const hint = entryPath ?? safeEntryPath()
     const candidates = []
     for (const row of table) {
@@ -378,7 +378,7 @@ function safeEntryPath() {
 async function retirePid(pid, { signal = 'SIGTERM' } = {}) {
     try {
         if (process.platform === 'win32') {
-            execFileSync('taskkill', ['/PID', String(Number(pid)), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+            await execFileAsync('taskkill', ['/PID', String(Number(pid)), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
         } else {
             process.kill(Number(pid), signal)
         }
@@ -399,7 +399,7 @@ function removeFile(filePath) {
 
 export async function reapReport({ roots = [], apply = false, liveSessionIds = null, kinds = DEFAULT_LEAK_KINDS, now = Date.now(), unattributed = unattributedScanEnabled() } = {}) {
     const unattributedEnabled = unattributed !== false && unattributed !== null
-    const table = Array.isArray(unattributed) ? unattributed : (unattributedEnabled ? readProcessTable() : [])
+    const table = Array.isArray(unattributed) ? unattributed : (unattributedEnabled ? await readProcessTableAsync() : [])
     const findings = [
         ...(await assessHttpInstances({ roots, now })),
         ...(await assessLeases({ roots })),

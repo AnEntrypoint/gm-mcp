@@ -1,4 +1,5 @@
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
+import { promisify } from 'node:util'
 
 import { commandTokens } from './gm-cmdline.js'
 
@@ -84,6 +85,10 @@ function posixRows({ exec }) {
             return []
         }
     }
+    return parsePosix(text, withStart)
+}
+
+function parsePosix(text, withStart) {
     const rows = []
     for (const line of text.split('\n')) {
         if (line.trim() === '') continue
@@ -110,6 +115,10 @@ function windowsRows({ exec }) {
         lastError = failureReason(error)
         text = typeof error?.stdout === 'string' ? error.stdout : ''
     }
+    return parseWindows(text)
+}
+
+function parseWindows(text) {
     const rows = []
     for (const line of text.split('\n')) {
         if (line.trim() === '') continue
@@ -126,6 +135,56 @@ function windowsRows({ exec }) {
         })
     }
     return rows
+}
+
+const execFileAsync = promisify(execFile)
+
+function runAsync(file, args) {
+    return execFileAsync(file, args, {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: TABLE_TIMEOUT_MS,
+        stdio: ['ignore', 'pipe', 'pipe'],
+    }).then(({ stdout }) => stdout)
+}
+
+async function posixRowsAsync() {
+    let text = ''
+    let withStart = true
+    try {
+        text = await runAsync('ps', POSIX_ARGS_WITH_START)
+    } catch {
+        try {
+            text = await runAsync('ps', POSIX_ARGS_NO_START)
+            withStart = false
+        } catch {
+            return []
+        }
+    }
+    return parsePosix(text, withStart)
+}
+
+async function windowsRowsAsync() {
+    let text = ''
+    try {
+        text = await runAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', WINDOWS_ENCODED_SCRIPT])
+    } catch (error) {
+        lastError = failureReason(error)
+        text = typeof error?.stdout === 'string' ? error.stdout : ''
+    }
+    return parseWindows(text)
+}
+
+// The same rows as readProcessTable, read through async child processes: callers on the event loop (leak-reaper) use this
+// so a slow ps or powershell never blocks heartbeats or dispatches.
+export async function readProcessTableAsync({ platform = process.platform } = {}) {
+    lastError = null
+    try {
+        return platform === 'win32' ? await windowsRowsAsync() : await posixRowsAsync()
+    } catch (error) {
+        lastError = failureReason(error)
+        return []
+    }
 }
 
 export function liveSessionNameOf(command) {
