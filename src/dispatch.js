@@ -1226,6 +1226,22 @@ function wholeNumber(value) {
     return undefined
 }
 
+const PRD_LIST_QUERY_SCAN_LIMIT = 5000
+
+function prdListQuery(body) {
+    return isPlainObject(body) && typeof body.query === 'string' ? body.query.trim().toLowerCase() : ''
+}
+
+function withPrdListQueryFilter(out, query) {
+    if (!query || !isPlainObject(out)) return out
+    const holder = isPlainObject(out.data) && Array.isArray(out.data.items) ? 'data' : null
+    const source = holder ? out.data : out
+    if (!Array.isArray(source.items)) return out
+    const items = source.items.filter(row => isPlainObject(row) && ['id', 'subject', 'title'].some(key => typeof row[key] === 'string' && row[key].toLowerCase().includes(query)))
+    const filtered = { ...source, items, count: items.length, total: items.length, next_offset: null, truncated: false, query }
+    return holder ? { ...out, data: filtered } : filtered
+}
+
 function withPrdListNextOffset(out) {
     if (!isPlainObject(out) || out.truncated !== true) return out
     if (out.next_offset !== undefined && out.next_offset !== null) return out
@@ -2928,6 +2944,11 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (stored) return toYaml(stored)
         } else {
             const { lane_wait_ms: _publicLaneWait, ...callerBody } = normalizedBody
+            if (verb === 'prd-list' && prdListQuery(normalizedBody)) {
+                delete callerBody.query
+                callerBody.limit ??= PRD_LIST_QUERY_SCAN_LIMIT
+                callerBody.brief ??= true
+            }
             const fullBody = { ...callerBody, session_id }
             fullBody._agentplug_lane_wait_ms = laneBudgetMs === null ? timeoutMs : Math.min(laneBudgetMs, timeoutMs)
             if (verb === 'instruction') {
@@ -2976,7 +2997,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 for (const key of ['complete', 'complete_reason', 'exhaustive']) if (key in out && key in data) delete data[key]
                 out = { ...out, data }
             }
-            if (verb === 'prd-list') out = withPrdListNextOffset(out)
+            if (verb === 'prd-list') out = withPrdListQueryFilter(withPrdListNextOffset(out), prdListQuery(normalizedBody))
             if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
