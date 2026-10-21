@@ -128,7 +128,7 @@ A reload never cuts work. It does not start while any dispatch is in flight
 (`bundle-handover-deferred`, retried on the next tick), and the outgoing
 process waits for the in-flight count to reach 0 before exiting, so a reply
 already being written is finished rather than truncated. Measured with a 40s
-dispatch: the newer bundle was installed 4s in, `/health` went `stale: true`
+dispatch: the newer bundle is installed 4s in, `/health` goes `stale: true`
 while the pid stayed put, the dispatch came back complete at 42.3s carrying the
 notice, and the server moved to the new bundle only afterwards.
 
@@ -198,7 +198,7 @@ out with `GM_MCP_DAEMON_PREFLIGHT=0`.
 
 ## Continuation channel
 
-Every dispatch reply ends with a `continuation` block: `state` (`running` or `stopped`), `pending_rows` (from the reply's `prd_pending_count`, `null` until one is seen), `idle_ms` since the previous reply on that session, and `action`. `action` is `continue` while rows are pending (with `max_concurrency`, the pending count capped at 4 workers), `stop` when no rows are pending or the session was stopped, and `none` when the pending count is unknown. A JSON object reply gets `continuation` as a field, a JSON array reply carries none, and file-content replies (`fs_read`, `result`, `gm_result`) stay byte for byte.
+Every dispatch reply ends with a `continuation` block: `state` (`running` or `stopped`), `pending_rows` (from the reply's `prd_pending_count`, `null` until one is seen), `idle_ms` since the previous reply on that session, and `action`. `action` is `continue` while rows are pending (with `max_concurrency`, the pending count capped at 4 workers), `stop` when no rows are pending or the session is stopped, and `none` when the pending count is unknown. A JSON object reply gets `continuation` as a field, a JSON array reply carries none, and file-content replies (`fs_read`, `result`, `gm_result`) stay byte for byte.
 
 `continuation-stop` (dispatched through `gm` with `verb: "continuation-stop"`, or on the session body) marks the session stopped. The next `instruction` dispatch with a non-empty `prompt` resumes it.
 
@@ -256,7 +256,7 @@ node ~/.gm-tools/gm-mcp-server.mjs ensure-http                     # Unix
 node C:\Users\you\.gm-tools\gm-mcp-server.mjs ensure-http          # Windows
 ```
 
-The supervisor is the part that has to survive, not the server. It is a detached `http-supervise` sibling that probes `/health` every 15 s (`GM_MCP_HTTP_SUPERVISOR_INTERVAL_SECONDS` moves it) and runs the same start path when the answer stops coming. `ensure-http` arms it on every run, including a run that found the server already up, so a supervisor that was killed comes back on the next `ensure-http` instead of leaving the durable transport unwatched. A `--http` server arms one for itself on start, and `GM_MCP_HTTP_SUPERVISOR=0` opts out of both -- `ensure-http` then prints `supervisor disabled`.
+The supervisor is the part that has to survive, not the server. It is a detached `http-supervise` sibling that probes `/health` every 15 s (`GM_MCP_HTTP_SUPERVISOR_INTERVAL_SECONDS` moves it) and runs the same start path when the answer stops coming. `ensure-http` arms it on every run, including a run that found the server already up, so a supervisor that is killed comes back on the next `ensure-http` instead of leaving the durable transport unwatched. A `--http` server arms one for itself on start, and `GM_MCP_HTTP_SUPERVISOR=0` opts out of both -- `ensure-http` then prints `supervisor disabled`.
 
 Run the supervisor directly instead when you would rather supervise than probe once:
 
@@ -361,7 +361,7 @@ from the watch. The same pass now also scans for processes whose `ppid` is `1`
 or above `GM_MCP_LEAK_ORPHAN_RSS_MB`, default 150 MB) and **idle**, CPU seconds
 burned divided by seconds alive below `GM_MCP_LEAK_ORPHAN_DUTY` (default `0.02`), after `GM_MCP_LEAK_ORPHAN_MIN_AGE_MS` (default 900000 ms, 15 minutes) alive.
 The duty ratio is the discriminator: the 11 real leaks sat near 0.01 while the
-one live run of the same binary was still burning CPU.
+one live run of the same binary is still burning CPU.
 
 ```
   ORPHAN pid 1860399 -- 292.1 MB RSS, 791s alive, 15.5s cpu (duty 0.0196) -- target/debug/litebox_runner_linux_userland -Z --uid 0 ...
@@ -402,7 +402,7 @@ the MCP SDK silently STRIPS arguments the schema does not declare. A committed
 bundle older than `src/` therefore ships a server that drops a caller's new
 argument without a word -- witnessed at commit `d7f7cb6`, whose `src/` declared
 `resume_task` while its bundle did not: `{resume_task}` with no body reached
-`gmDispatch` as `undefined`, a fresh task was minted, a new spool entry was
+`gmDispatch` as `undefined`, a fresh task is minted, a new spool entry is
 written with an empty body, and the caller got the resumed verb's own
 body-validation error (`query required`) with nothing pointing at the stale
 bundle. Rebuild in the same commit as any `src/` change.
