@@ -582,9 +582,11 @@ function formatValue(value) {
 
 const REPLY_STACK_FRAME_LIMIT = 3
 
+// A frame in the served bundle names minified code that maps to no src function, so it is dropped with its eval wrapper.
+const BUNDLE_FRAME = /gm-mcp-server\.m?js/
 function withFrameLimit(text) {
     let frames = 0
-    return text.split('\n').filter((line) => !/^\s+at /.test(line) || frames++ < REPLY_STACK_FRAME_LIMIT).join('\n')
+    return text.split('\n').filter((line) => !/^\s+at /.test(line) || (!BUNDLE_FRAME.test(line) && frames++ < REPLY_STACK_FRAME_LIMIT)).join('\n')
 }
 
 export function registerCodeMode(server, tools) {
@@ -657,7 +659,8 @@ export function registerCodeMode(server, tools) {
                 const lead = echoed ? (failedHead === null ? [] : [failedHead]) : [...failingVerb, ...wrapper]
                 const tail = echoed ? [] : detailLines
                 const text = [...lead, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id)`, `diagnostic_record: ${replyRecord}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
-                return { content: [{ type: 'text', text: capWithContinuation(session_id, text, cap) }], isError: true }
+                // A body that settled at least one gm call returns those results and per-call errors as one structured reply; isError is for a throw before any call.
+                return { content: [{ type: 'text', text: capWithContinuation(session_id, text, cap) }], isError: replies.length === 0 }
             } finally {
                 stopHeartbeat()
             }
