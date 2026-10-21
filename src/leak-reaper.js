@@ -52,7 +52,25 @@ export function parentAbandoned(parentPid, recordedPpid = null) {
     if (process.platform === 'win32') return false
     const recorded = Number(recordedPpid)
     if (Number.isInteger(recorded) && recorded > 0) return Number(parentPid) !== recorded
-    return Number(parentPid) === 1 || Number(parentPid) === 2
+    return Number(parentPid) === 1
+}
+
+// Parent pid first seen for each unattributed candidate, keyed by pid and command. A later sweep that finds another parent
+// has seen the process re-parented (Linux hands an orphan to the nearest child subreaper, not to pid 1), so its parent is abandoned.
+const firstSeenParent = new Map()
+
+function reparentedSinceFirstSeen(pid, ppid, command) {
+    const seen = firstSeenParent.get(pid)
+    if (!seen || seen.command !== command) {
+        firstSeenParent.set(pid, { ppid, command })
+        return false
+    }
+    return seen.ppid !== ppid
+}
+
+function pruneFirstSeenParents(livePids) {
+    const live = new Set(livePids)
+    for (const pid of firstSeenParent.keys()) if (!live.has(pid)) firstSeenParent.delete(pid)
 }
 
 const WINDOWS_SNAPSHOT_TTL_MS = 5_000
@@ -301,6 +319,7 @@ export async function assessUnattributedServers({ roots = [], liveSessionIds = n
         if (!Number.isInteger(pid) || pid <= 0) continue
         candidates.push({ pid, row, info })
     }
+    pruneFirstSeenParents(candidates.map((candidate) => candidate.pid))
     if (candidates.length === 0) return []
     const ledgerByPid = new Map()
     for (const root of [...roots, null]) {
@@ -321,7 +340,8 @@ export async function assessUnattributedServers({ roots = [], liveSessionIds = n
         const ledgerRow = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1] : null
         const parentPid = Number.isInteger(Number(row.ppid)) && Number(row.ppid) > 0 ? Number(row.ppid) : await parentPidOf(pid)
         const attributed = ledgerRow !== null
-        const evidence = [attributed ? null : 'unattributed', parentAbandoned(parentPid) ? 'parent-abandoned' : null].filter(Boolean).join('+')
+        const reparented = reparentedSinceFirstSeen(pid, parentPid, row.command)
+        const evidence = [attributed ? null : 'unattributed', parentAbandoned(parentPid) || reparented ? 'parent-abandoned' : null].filter(Boolean).join('+')
         const port = info.port
         const health = port === null ? null : await probeHealth(port)
         const owned = ownedPorts.find((entry) => entry.owner === pid) ?? null
