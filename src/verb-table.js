@@ -114,14 +114,14 @@ const GIT_SCOPED_TYPES = {
     git_revert: { ref: z.string(), paths: z.array(z.string()) },
     git_cherry_pick: { rev: z.string(), ref: z.string() },
     git_reset: { ref: z.string(), rev: z.string(), mode: z.string(), hard: boolString, paths: z.array(z.string()), files: z.array(z.string()) },
-    git_checkout: { ref: z.string(), create: z.boolean(), path: GIT_PATHSPEC, paths: GIT_PATHSPEC, files: GIT_PATHSPEC },
+    git_checkout: { ref: z.string(), create: boolString, path: GIT_PATHSPEC, paths: GIT_PATHSPEC, files: GIT_PATHSPEC },
     git_merge: { ref: z.string(), ff_only: boolString, message: z.string() },
     git_stash_pop: { ref: z.string() },
     git_stash_drop: { ref: z.string() },
-    git_worktree_add: { ref: z.string(), rev: z.string(), commit: z.string(), start_point: z.string(), path: z.string(), create: z.boolean(), allowOutsideRoot: z.boolean() },
+    git_worktree_add: { ref: z.string(), rev: z.string(), commit: z.string(), start_point: z.string(), path: z.string(), create: boolString, allowOutsideRoot: z.boolean() },
     git_status: { path: GIT_PATHSPEC, paths: GIT_PATHSPEC, files: GIT_PATHSPEC, summary: z.boolean(), limit: z.number(), eol: z.boolean() },
-    git_pull: { remote: z.string(), branch: z.string(), ff_only: booleanLike, rebase: booleanLike, autostash: booleanLike, user_name: z.string(), author_name: z.string(), user_email: z.string(), author_email: z.string() },
-    git_rewrite_authors: { apply: booleanLike, confirm: z.string(), since: z.string(), author_name: z.string(), author_email: z.string() },
+    git_pull: { remote: z.string(), branch: z.string(), ff_only: boolString, rebase: boolString, autostash: boolString, user_name: z.string(), author_name: z.string(), user_email: z.string(), author_email: z.string() },
+    git_rewrite_authors: { apply: boolString, confirm: z.string(), since: z.string(), author_name: z.string(), author_email: z.string() },
 }
 
 const ZOD_BODY_TYPE_NAMES = { string: 'string', boolean: 'boolean', number: 'number', array: 'array' }
