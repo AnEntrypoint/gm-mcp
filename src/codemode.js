@@ -21,7 +21,11 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
 function codemodeTimeoutMs() {
     const configured = Number(process.env.GM_CODEMODE_TIMEOUT_MS)
-    return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_CODEMODE_TIMEOUT_MS
+    if (Number.isFinite(configured) && configured > 0) return configured
+    // A gm call may wait up to the poll ceiling, so the body budget must outlast it or a legal dispatch is cut.
+    const ceiling = Number(process.env.GM_MCP_POLL_TIMEOUT_CEILING_MS)
+    const pollCeilingMs = Number.isFinite(ceiling) && ceiling > 0 ? Math.round(ceiling) : 600000
+    return Math.max(DEFAULT_CODEMODE_TIMEOUT_MS, pollCeilingMs + CODEMODE_HEARTBEAT_MS)
 }
 
 function withCodemodeDeadline(pending, timeoutMs) {
