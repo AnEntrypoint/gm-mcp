@@ -254,7 +254,7 @@ const COMMANDS = {
         await sweepHttpInstances()
         const result = await ensureHttpSingleton({ port })
         if (!result.url) {
-            console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.error} port=${port} log=${logFilePath()}`)
+            console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.error} port=${port} pid=${result.pid ?? 'none'} log=${logFilePath()}`)
             return 1
         }
         console.log(`gm-mcp ${BUNDLE_VERSION}: ${result.reused ? 'reusing' : 'started'} the shared HTTP server (pid ${result.pid}) -- ${result.url}`)
@@ -274,7 +274,7 @@ const COMMANDS = {
         const intervalMs = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : supervisorIntervalMs()
         recordRunningImage('supervisor', runningBundle())
         const result = await runHttpSupervisor({ port, intervalMs })
-        console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.reason} port=${port} log=${logFilePath()}`)
+        console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.reason} port=${port} pid=${process.pid} log=${logFilePath()}`)
         return result.supervised === false ? 1 : 0
     },
     call: async () => {
