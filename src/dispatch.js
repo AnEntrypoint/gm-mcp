@@ -1801,6 +1801,10 @@ function sleep(ms, signal) {
 
 const SPOOL_WATCHED_FALLBACK_MS = 2000
 const SPOOL_RESPONSE_MAX_AGE_MS = 60 * 60 * 1000
+// Verbs whose replies are read once or re-read through a spill (gm_result) only shortly after the call.
+const SPOOL_VERB_MAX_AGE_MS = [
+    [/^(codesearch|code_search|search|grep|fs_read)-/, 10 * 60 * 1000],
+]
 const SPOOL_REFUSED_MAX_AGE_MS = 15 * 60 * 1000
 const SPOOL_PRUNE_EVERY_MS = 10 * 60 * 1000
 const SPOOL_REFUSAL_HEAD_BYTES = 4096
@@ -1821,6 +1825,11 @@ function isUnreadRefusalFile(file) {
     }
 }
 
+function spoolResponseMaxAgeMs(name) {
+    for (const [pattern, ms] of SPOOL_VERB_MAX_AGE_MS) if (pattern.test(name)) return ms
+    return SPOOL_RESPONSE_MAX_AGE_MS
+}
+
 function pruneSpoolResponsesOnce(outDir) {
     const now = Date.now()
     if (now - (spoolPrunedAt.get(outDir) ?? 0) < SPOOL_PRUNE_EVERY_MS) return
@@ -1835,7 +1844,7 @@ function pruneSpoolResponsesOnce(outDir) {
         const file = path.join(outDir, name)
         try {
             const age = now - fs.statSync(file).mtimeMs
-            if (age > SPOOL_RESPONSE_MAX_AGE_MS) fs.unlinkSync(file)
+            if (age > spoolResponseMaxAgeMs(name)) fs.unlinkSync(file)
             else if (age > SPOOL_REFUSED_MAX_AGE_MS && isUnreadRefusalFile(file)) fs.unlinkSync(file)
         } catch {
         }
