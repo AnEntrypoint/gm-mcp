@@ -363,7 +363,7 @@ async function establishedLocalPortsViaNetstat() {
 }
 
 const WINDOWS_WILDCARD_FOREIGN = /^(0\.0\.0\.0|\[::\]):0$/
-const WINDOWS_NON_ESTABLISHED_STATE = /^(LISTEN|TIME_WAIT|CLOSE_WAIT|SYN_|FIN_|LAST_ACK|CLOSING|CLOSED)/i
+const WINDOWS_NON_ESTABLISHED_STATE = /^(LISTEN|TIME_WAIT|CLOSE_WAIT|SYN_|FIN_|LAST_ACK|CLOSING|CLOSED|DELETE)/i
 
 export function netstatEstablishedLocalPorts(text, win) {
     if (!win && !text.includes('ESTABLISHED')) return []
@@ -373,7 +373,12 @@ export function netstatEstablishedLocalPorts(text, win) {
         const fields = line.trim().split(/\s+/)
         if (fields.length < 4 || !/^tcp/i.test(fields[0])) continue
         if (win) {
-            if (WINDOWS_WILDCARD_FOREIGN.test(fields[2]) || WINDOWS_NON_ESTABLISHED_STATE.test(fields[3])) continue
+            // The state column is localized on non-English Windows. A state that is neither ESTABLISHED nor a known
+            // English non-established state cannot be classified, so the whole read is unknown (null), not a guess.
+            if (WINDOWS_WILDCARD_FOREIGN.test(fields[2])) continue
+            if (/^ESTABLISHED$/i.test(fields[3])) { /* kept below */ }
+            else if (WINDOWS_NON_ESTABLISHED_STATE.test(fields[3])) continue
+            else return null
         } else if (!fields.includes('ESTABLISHED')) {
             continue
         }
