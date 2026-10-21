@@ -215,9 +215,17 @@ function checkIntervalMs() {
     return Number.isFinite(fromEnv) && fromEnv > 0 ? Math.max(MIN_CHECK_INTERVAL_MS, fromEnv) : DEFAULT_CHECK_INTERVAL_MS
 }
 
+function stampCheckedAt(stampPath) {
+    try {
+        const checkedAt = JSON.parse(readFileSync(stampPath, 'utf8')).checked_at
+        if (Number.isFinite(checkedAt)) return checkedAt
+    } catch {}
+    return statSync(stampPath).mtimeMs
+}
+
 function checkedRecently(stampPath) {
     if (!existsSync(stampPath)) return false
-    return Date.now() - statSync(stampPath).mtimeMs < checkIntervalMs()
+    return Date.now() - stampCheckedAt(stampPath) < checkIntervalMs()
 }
 
 function deferRetryDelayMs() {
@@ -228,9 +236,7 @@ function deferRetryDelayMs() {
 }
 
 function touch(stampPath) {
-    if (!existsSync(stampPath)) writeFileSync(stampPath, '')
-    const now = new Date()
-    utimesSync(stampPath, now, now)
+    writeFileSync(stampPath, JSON.stringify({ checked_at: Date.now() }))
 }
 
 function bundleCachePath(deployedPath) {
