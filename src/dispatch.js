@@ -53,7 +53,7 @@ function rememberProjectRoot(root) {
     if (root === rememberedProjectRoot || gitRootAt(root) !== root) return
     rememberedProjectRoot = root
     try {
-        mkdirSync(agentplugDir(), { recursive: true })
+        mkdirSync(agentplugDir(), { recursive: true, mode: 0o700 })
         writeFileSync(path.join(agentplugDir(), LAST_PROJECT_FILE), root)
     } catch (error) {
         appendDiagnostic('last-project-root-write-failed', { root, error: String(error?.message || error) })
@@ -1467,7 +1467,7 @@ export function ensureAgentLease(root, session_id) {
     const file = path.join(LEASES_DIR, `${key}.${process.pid}.lease`)
     try {
         if (!fs.existsSync(file)) {
-            fs.mkdirSync(LEASES_DIR, { recursive: true })
+            fs.mkdirSync(LEASES_DIR, { recursive: true, mode: 0o700 })
             writeFileAtomically(file, entry)
             appendDiagnostic('lease-attached', { root: entry, pid: process.pid, lease_file: file })
         }
@@ -1618,7 +1618,7 @@ export function launcherLockMayBeReclaimed(held, lockPath) {
 }
 
 function claimGlobalLauncher() {
-    fs.mkdirSync(AGENTPLUG_DIR, { recursive: true })
+    fs.mkdirSync(AGENTPLUG_DIR, { recursive: true, mode: 0o700 })
     for (let attempt = 0; attempt < 2; attempt++) {
         let claimed
         try {
@@ -2463,9 +2463,20 @@ function withDispatchWait(out, waitedMs, claimedAtMs, daemonSpanMs) {
     return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: Object.fromEntries(Object.entries(split).filter(([, value]) => value !== null && value !== undefined)) }
 }
 
+function parseJsonObjectText(text) {
+    try {
+        const parsed = JSON.parse(text)
+        return isPlainObject(parsed) ? parsed : null
+    } catch {
+        return null
+    }
+}
+
 function firstReportedMs(out, keys) {
+    // Exec-family replies carry duration_ms inside a JSON-string data field (live: exec_js full_response, exec_timed false).
+    const data = typeof out.data === 'string' ? parseJsonObjectText(out.data) : out.data
     for (const key of keys) {
-        const value = Number(out[key] ?? out.data?.[key])
+        const value = Number(out[key] ?? data?.[key])
         if (Number.isFinite(value) && value > 0) return value
     }
     return null
@@ -2841,7 +2852,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const spoolDir = spoolDirOf(root)
     const inDir = path.join(spoolDir, 'in', verb)
     const outDir = path.join(spoolDir, 'out')
-    fs.mkdirSync(outDir, { recursive: true })
+    fs.mkdirSync(outDir, { recursive: true, mode: 0o700 })
     pruneSpoolResponsesOnce(outDir)
     const callStartedAtMs = Date.now()
     let lastWakeSource = 'initial_check'
@@ -2935,6 +2946,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         return toYaml({ ok: false, verb, error: 'prd-list limit 0 refused: a zero-row page cannot advance next_offset, so paging would loop; pass limit 1 or more, or omit limit for the default page', accepted_limit: 'integer 1 or more' })
     }
 
+    // The poll deadline starts before the pre-poll awaits (daemon cold-start grace, owner probe), so timeout_seconds bounds the whole call.
+    const deadline = Date.now() + timeoutMs
     if (!resume_task) {
         const unavailable = runnerUnavailable(root, spoolDir)
         if (unavailable) return toYaml(unavailable)
@@ -2970,7 +2983,6 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     }
 
     const pollMs = Math.max(25, (Number(poll_interval_seconds) || 0.25) * 1000)
-    const deadline = Date.now() + timeoutMs
 
 
     const readLandedOutFile = async () => {
