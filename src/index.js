@@ -62,13 +62,22 @@ async function stdioRelayTarget() {
 }
 
 function watchForStaleBundle({ handOver = null, transportKind = 'stdio', settled = () => false } = {}) {
-    return startBundleDriftWatch((state) => {
+    return startBundleDriftWatch(async (state) => {
         if (settled()) return null
         const handable = handOver !== null && state?.stale === true && (state.refusal_code == null || state.refusal_code === 'no-handover')
-        const honest = handable ? { ...state, reloadable: true, refusal_code: null, refusal_reason: null } : handOver ? state : { ...state, reloadable: false, refusal_code: 'no-handover', refusal_reason: 'a ' + transportKind + ' server cannot replace itself without dropping its client, so a relaunch serves the installed bundle' }
+        if (handable) {
+            // Announce only after the handover outcome is known: a failed or deferred handover did not reload.
+            const outcome = await handOver({ ...state, reloadable: true, refusal_code: null, refusal_reason: null })
+            if (outcome?.outcome !== 'failed' && outcome?.outcome !== 'deferred') return outcome
+            const unhanded = { ...state, reloadable: false, refusal_code: 'handover-' + outcome.outcome, refusal_reason: outcome.reason ?? outcome.outcome }
+            const line = bundleStalenessAnnouncement(unhanded)
+            if (line) console.error(line)
+            if (line) appendDiagnostic('bundle-stale-no-handover', { ...unhanded, transport: transportKind })
+            return outcome
+        }
+        const honest = handOver ? state : { ...state, reloadable: false, refusal_code: 'no-handover', refusal_reason: 'a ' + transportKind + ' server cannot replace itself without dropping its client, so a relaunch serves the installed bundle' }
         const line = bundleStalenessAnnouncement(honest)
         if (line) console.error(line)
-        if (handOver && honest.reloadable === true) return handOver(honest)
         if (line) appendDiagnostic('bundle-stale-no-handover', { ...honest, transport: transportKind })
         return null
     }, { transport: transportKind })
