@@ -56,17 +56,17 @@ const headFiles = headChanged.status === 0 ? headChanged.stdout.split('\n').map(
 const srcFiles = headFiles.filter(p => p.startsWith('src/'))
 const regenSet = [binRel, ...srcFiles].join(' ')
 const changedNow = includedSrc.length ? includedSrc : headFiles
-const srcChangedNow = changedNow.some(p => p.startsWith('src/'))
 const binChangedNow = changedNow.includes(binRel)
 const bundleRebuiltByCi = existsSync(path.join(repoRoot, '.github', 'workflows', 'bundle.yml'))
 
-if (srcChangedNow && !binChangedNow && bundleRebuiltByCi) {
+const currentSrcSha = srcSha256(buildRoot)
+const recordedSrcSha = /var BUNDLE_SRC_SHA256 = "([0-9a-f]{64})";/.exec(committed)?.[1] ?? null
+if (recordedSrcSha !== currentSrcSha && !binChangedNow && bundleRebuiltByCi) {
     if (stagedDir) rmSync(stagedDir, { recursive: true, force: true })
-    console.log('bin/gm-mcp-server.js is pending: src/ changed without the bin, and .github/workflows/bundle.yml rebuilds it on main after the push. No local bundle build is needed.')
+    console.log('bin/gm-mcp-server.js is pending: its recorded src sha256 differs from src/, this change does not touch the bin, and .github/workflows/bundle.yml rebuilds it on main after the push. No local bundle build is needed.')
     process.exit(0)
 }
 
-const currentSrcSha = srcSha256(buildRoot)
 const fresh = esbuildInstalled ? (await buildBundle(false, buildRoot)).outputFiles[0].text : null
 if (stagedDir) rmSync(stagedDir, { recursive: true, force: true })
 
@@ -75,7 +75,6 @@ if (fresh !== null && !fresh.includes(`var BUNDLE_VERSION = ${JSON.stringify(BUN
     process.exit(1)
 }
 
-const recordedSrcSha = /var BUNDLE_SRC_SHA256 = "([0-9a-f]{64})";/.exec(committed)?.[1] ?? null
 if (recordedSrcSha !== currentSrcSha) {
     console.error(`bin/gm-mcp-server.js records src sha256 ${recordedSrcSha ?? 'none'} but src/ hashes to ${currentSrcSha}: a src/ file changed after the bundle was built, so the bundle is stale. Commit the rebuilt bundle with the src/ change, or push src/ alone and let bundle.yml rebuild it.`)
     process.exit(1)

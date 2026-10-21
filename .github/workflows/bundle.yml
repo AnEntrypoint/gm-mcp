@@ -22,6 +22,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+      actions: write
     defaults:
       run:
         shell: bash
@@ -43,6 +44,8 @@ jobs:
       - name: drift gate on the rebuilt bundle
         run: GM_MCP_BUILD_INCLUDE=bin/gm-mcp-server.js node scripts/check-bin-drift.mjs
       - name: commit the rebuilt bundle to main
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "lanmower"
           git config user.email "almagestfraternite@gmail.com"
@@ -57,6 +60,9 @@ jobs:
             git add bin/gm-mcp-server.js
             git commit -m "bundle: rebuild gm-mcp-server.js"
             if git push origin HEAD:main; then
+              # A push made with GITHUB_TOKEN starts no workflow run, so build-verify never
+              # checks this bundle commit. workflow_dispatch is the exception: dispatch it here.
+              gh workflow run verify.yml --repo "$GITHUB_REPOSITORY" --ref main
               exit 0
             fi
             echo "push rejected (attempt $attempt); refetching origin/main and rebuilding"
