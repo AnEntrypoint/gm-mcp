@@ -94,8 +94,9 @@ const PRD_LIST_TYPES = {
     limit: numberLike,
     offset: numberLike,
     full: booleanLike,
+    query: z.string(),
 }
-const PRD_LIST_KEYS = ['id', 'status', 'limit', 'offset', 'full']
+const PRD_LIST_KEYS = ['id', 'status', 'limit', 'offset', 'full', 'query']
 const PRD_LIST_FIELDS = aliasFields('prd_list', PRD_LIST_TYPES, PRD_LIST_KEYS)
 const PRD_LIST_DESCRIPTION = ` ${PRD_LIST_KEYS.join(', ')} are accepted at the top level and folded into body, so {"id":"<row id>"} and body:{"id":"<row id>"} are the same call; a key named in both takes its value from body. Without one of them the whole PRD is listed, which is what a dropped selector used to look like.`
 
@@ -270,6 +271,7 @@ const PRD_LIST_BODY = {
         offset: { type: 'integer', description: 'First row to return (0-based); use next_offset of the previous page.' },
         full: { type: 'boolean', aliases: ['verbose', 'bodies'], description: 'Expands row bodies; the default is full when an id filter was given.' },
         brief: { type: 'boolean', aliases: ['compact'], description: 'Compresses rows.' },
+        query: { type: 'string', description: 'Keeps rows whose id, subject or title contains this text (case-insensitive); total and count are the matching rows.' },
     },
 }
 const POOL_OBSERVE_BODY = {
