@@ -6,7 +6,7 @@ const LOG_FILE_NAME = 'gm-mcp-server.log'
 const MAX_LOG_BYTES = 2 * 1024 * 1024
 const REPEAT_WINDOW_MS = 60 * 1000
 const MAX_REPEAT_KEYS = 512
-const REPEAT_KEY_IGNORED_FIELDS = new Set(['ms', 'inflight', 'dispatches_inflight', 'pid', 'dispatch_id'])
+const REPEAT_KEY_IGNORED_FIELDS = new Set(['ms', 'inflight', 'dispatches_inflight', 'pid', 'dispatch_id', 'call_id'])
 const lastWrittenByKey = new Map()
 
 export function logFilePath() {

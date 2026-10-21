@@ -314,7 +314,27 @@ async function establishedLocalPorts() {
         const viaSs = await establishedLocalPortsViaSs()
         if (viaSs !== null) return viaSs
     }
+    else {
+        const viaPowerShell = await establishedLocalPortsViaGetNetTCPConnection()
+        if (viaPowerShell !== null) return viaPowerShell
+    }
     return establishedLocalPortsViaNetstat()
+}
+
+// Get-NetTCPConnection filters on the State enum, so the result does not depend on the OS display language (netstat prints localized state names).
+async function establishedLocalPortsViaGetNetTCPConnection() {
+    const script = 'Get-NetTCPConnection -State Established -ErrorAction Stop | ForEach-Object { $_.LocalPort }'
+    const text = await execFileText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] })
+    if (text === null) return null
+    const locals = []
+    for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim()
+        if (trimmed === '') continue
+        const port = Number(trimmed)
+        if (!Number.isInteger(port) || port <= 0) return null
+        locals.push(port)
+    }
+    return locals.length === 0 ? null : locals
 }
 
 function localPortOf(address) {
@@ -736,11 +756,11 @@ function readFileSyncSafe(file) {
 }
 
 function moveStaleClaimAside(file) {
-    try { renameSync(file, `${file}.${process.pid}.stale`) } catch {}
+    try { renameSync(file, `${file}.${process.pid}.stale`) } catch (error) { appendDiagnostic('spawn-claim-stale-rename-failed', { file, error: describeError(error) }) }
 }
 
 export function releaseSpawnClaim(name, port) {
-    try { unlinkSync(spawnClaimPath(name, port)) } catch {}
+    try { unlinkSync(spawnClaimPath(name, port)) } catch (error) { appendDiagnostic('spawn-claim-unlink-failed', { name, port, error: describeError(error) }) }
 }
 
 export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs(), force = false } = {}) {
