@@ -2,7 +2,7 @@ import { isPlainObject } from './plain-object.js';
 import { agentplugDir } from './paths.js'
 import { execFile, spawn } from './process-port.js'
 import { classifyGmServerCommand } from './gm-cmdline.js'
-import { readProcessTable, readProcessTableAsync } from './process-table.js'
+import { readProcessTableAsync } from './process-table.js'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -567,8 +567,8 @@ export async function allocateHttpPort({ preferred = null, from = PORT_POOL_FROM
     return null
 }
 
-export function listHttpSupervisors({ processes = null, platform = process.platform, exec = undefined } = {}) {
-    const table = Array.isArray(processes) ? processes : readProcessTable({ platform, exec })
+export async function listHttpSupervisors({ processes = null, platform = process.platform } = {}) {
+    const table = Array.isArray(processes) ? processes : await readProcessTableAsync({ platform })
     const rows = []
     for (const row of table) {
         const info = classifyGmServerCommand(row.command, { entryPath: launchedEntryPath() })
@@ -611,9 +611,9 @@ function dupeReapEnabled() {
     return !(value !== null && OFF_VALUES.has(value))
 }
 
-export function retireDuplicateHttpSupervisors({ processes = null, now = Date.now(), signalPid = signalSupervisorPid, dryRun = false, platform = process.platform, exec = undefined } = {}) {
+export async function retireDuplicateHttpSupervisors({ processes = null, now = Date.now(), signalPid = signalSupervisorPid, dryRun = false, platform = process.platform } = {}) {
     if (!dupeReapEnabled()) return []
-    const rows = listHttpSupervisors({ processes, platform, exec })
+    const rows = await listHttpSupervisors({ processes, platform })
     const retired = []
     for (const port of [...new Set(rows.map((row) => row.port))].sort((left, right) => left - right)) {
         const group = rows.filter((row) => row.port === port)
@@ -635,7 +635,7 @@ export function retireDuplicateHttpSupervisors({ processes = null, now = Date.no
 }
 
 export async function sweepHttpInstances(options = {}) {
-    const duplicate_supervisors = retireDuplicateHttpSupervisors(options)
+    const duplicate_supervisors = await retireDuplicateHttpSupervisors(options)
     const reclaimed = await reclaimDeadPortRegistries()
     const orphaned = await reapOrphanedHttpInstances(options)
     const dead = await reapDeadHttpInstances()

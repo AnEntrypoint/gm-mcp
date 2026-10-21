@@ -1,7 +1,7 @@
 import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { agentplugDir } from './paths.js'
-import { readProcessTable } from './process-table.js'
+import { readProcessTableAsync } from './process-table.js'
 
 const IMAGE_DIR_NAME = 'gm-mcp-images'
 
@@ -47,8 +47,8 @@ const BUNDLE_LAUNCHER_COMMAND = /(^|[\\/\s])node(\.exe)?\s+-e\s/
 // Live gm-mcp bundle processes that wrote no image record (launched by a bundle that predates the record, or
 // whose record write failed). A process that started before the deployed bundle file was last written is running
 // an image that is no longer deployed, so it is stale: true. Any other one has an unknown image: 'unknown', never false.
-export function unrecordedBundleProcesses(recordedPids, deployedMtimeMs = null) {
-    return readProcessTable()
+export async function unrecordedBundleProcesses(recordedPids, deployedMtimeMs = null) {
+    return (await readProcessTableAsync())
         .filter((row) => row.pid !== process.pid && !recordedPids.has(row.pid))
         .filter((row) => BUNDLE_PROCESS_COMMAND.test(row.command) && !BUNDLE_LAUNCHER_COMMAND.test(row.command))
         .map((row) => {

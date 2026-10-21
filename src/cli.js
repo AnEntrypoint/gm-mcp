@@ -219,14 +219,14 @@ const COMMANDS = {
         console.log(`gm-mcp ${BUNDLE_VERSION}: cleared the local-build pin at ${clearedLocalBuildPinPath} --the release channel may update the deployed bundle again`)
         return 0
     },
-    'self-update-status': () => {
-        console.log(JSON.stringify(selfUpdateStatus(), null, 2))
+    'self-update-status': async () => {
+        console.log(JSON.stringify(await selfUpdateStatus(), null, 2))
         return 0
     },
     'self-update-now': async () => {
         // Read-only apart from the deployed bundle and its stamp: no server is started, no port is
         // bound, nothing is signalled, and this process is never handed over to the bundle it installs.
-        const { deployed_bundle: deployedPath } = selfUpdateStatus()
+        const { deployed_bundle: deployedPath } = await selfUpdateStatus()
         const before = deployedBundleVersion(deployedPath)
         const result = await refreshDeployedBundleNow(deployedPath)
         const after = deployedBundleVersion(deployedPath)

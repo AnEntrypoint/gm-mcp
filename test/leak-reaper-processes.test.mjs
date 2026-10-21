@@ -10,7 +10,7 @@ const root = mkdtempSync(path.join(tmpdir(), 'gm-reaper-proc-root-'))
 process.env.AGENTPLUG_HOME = home
 mkdirSync(path.join(root, '.gm', 'exec-spool'), { recursive: true })
 
-const { readProcessTable } = await import('../src/process-table.js')
+const { readProcessTableAsync } = await import('../src/process-table.js')
 const { classifyGmServerCommand, flagPortOf } = await import('../src/gm-cmdline.js')
 const { assessUnattributedServers, reapReport, liveMcpClientInParentChain } = await import('../src/leak-reaper.js')
 const { listHttpSupervisors, retireDuplicateHttpSupervisors, supervisorStateFilePath } = await import('../src/singleton.js')
@@ -46,7 +46,7 @@ process.on('exit', cleanup)
 
 const row = (pid, ppid, command, startedAt = null) => ({ pid, ppid, started_at: startedAt, command })
 
-await test('the posix table is read as pid, ppid, start time and command', () => {
+await test('the posix table is read as pid, ppid, start time and command', async () => {
     const text = [
         `  101     1 Mon Oct 13 12:34:56 2025 ${NODE} ${ENTRY}`,
         `  102   101 Mon Oct 13 12:35:56 2025 ${NODE} ${ENTRY} http-supervise --port 8787 --interval 15`,
@@ -57,7 +57,7 @@ await test('the posix table is read as pid, ppid, start time and command', () =>
         if (!args.some((arg) => arg.includes('lstart='))) throw new Error('ps: lstart unsupported here')
         return text
     }
-    const table = readProcessTable({ exec, platform: 'linux' })
+    const table = await readProcessTableAsync({ exec, platform: 'linux' })
     assert.equal(table.length, 2)
     assert.equal(table[0].pid, 101)
     assert.equal(table[0].ppid, 1)
@@ -67,21 +67,21 @@ await test('the posix table is read as pid, ppid, start time and command', () =>
     assert.equal(table[1].ppid, 101)
 })
 
-await test('a ps without lstart still yields a table, with the start time unmeasured', () => {
+await test('a ps without lstart still yields a table, with the start time unmeasured', async () => {
     const exec = (file, args) => {
         if (args.some((arg) => arg.includes('lstart='))) throw new Error('ps: illegal option -- o')
         return `  101     1 ${NODE} ${ENTRY}\n`
     }
-    const table = readProcessTable({ exec, platform: 'linux' })
+    const table = await readProcessTableAsync({ exec, platform: 'linux' })
     assert.equal(table.length, 1)
     assert.equal(table[0].pid, 101)
     assert.equal(table[0].command, `${NODE} ${ENTRY}`)
     assert.equal(table[0].started_at, null)
 })
 
-await test('the win32 table carries the CIM creation date and the parent', () => {
+await test('the win32 table carries the CIM creation date and the parent', async () => {
     const text = `101|1|20251013123456.000000-420|${NODE} ${ENTRY}\n102|101|20251013123556.000000-420|${NODE} ${ENTRY} http-supervise --port 8787\n`
-    const table = readProcessTable({ exec: () => text, platform: 'win32' })
+    const table = await readProcessTableAsync({ exec: () => text, platform: 'win32' })
     assert.equal(table.length, 2)
     assert.equal(table[0].pid, 101)
     assert.equal(table[0].ppid, 1)
@@ -89,7 +89,7 @@ await test('the win32 table carries the CIM creation date and the parent', () =>
     assert.equal(table[1].command, `${NODE} ${ENTRY} http-supervise --port 8787`)
 })
 
-await test('a command is classified only when node runs the gm-mcp entry', () => {
+await test('a command is classified only when node runs the gm-mcp entry', async () => {
     assert.deepEqual(classifyGmServerCommand(`${NODE} ${ENTRY}`), { entry: ENTRY, transport: 'stdio', port: null })
     assert.deepEqual(classifyGmServerCommand(`"${NODE}" "${ENTRY}" --http --port 8787 --host 127.0.0.1`), { entry: ENTRY, transport: 'http', port: 8787 })
     assert.deepEqual(classifyGmServerCommand(`${NODE} ${ENTRY} http-supervise --port 8787 --interval 15`), { entry: ENTRY, transport: 'supervisor', port: 8787 })
@@ -141,7 +141,7 @@ await test('a measured start time still yields the age it names', async () => {
     assert.equal(finding.age_ms, 5_000)
 })
 
-await test('an unmeasured millisecond reading stays null instead of collapsing to zero', () => {
+await test('an unmeasured millisecond reading stays null instead of collapsing to zero', async () => {
     assert.equal(measuredMs(null), null)
     assert.equal(measuredMs(undefined), null)
     assert.equal(measuredMs(''), null)
@@ -238,8 +238,8 @@ const supervisorRows = (startedAt) => [
     row(7003, 1, `${NODE} ${ENTRY} http-supervise --port 8787 --interval 15`, startedAt[2]),
 ]
 
-await test('only supervisor processes on a port are read as supervisors', () => {
-    const rows = listHttpSupervisors({ processes: [
+await test('only supervisor processes on a port are read as supervisors', async () => {
+    const rows = await listHttpSupervisors({ processes: [
         ...supervisorRows([now - 1000, now - 2000, now - 3000]),
         row(7004, 1, `${NODE} ${ENTRY} --http --port 8787 --host 127.0.0.1`),
         row(7005, 1, `${NODE} ${ENTRY} http-supervise --port 8788 --interval 15`),
@@ -248,9 +248,9 @@ await test('only supervisor processes on a port are read as supervisors', () => 
     assert.deepEqual([...new Set(rows.map((entry) => entry.port))], [8787, 8788])
 })
 
-await test('the freshest supervisor is kept and the older duplicates are retired', () => {
+await test('the freshest supervisor is kept and the older duplicates are retired', async () => {
     const signalled = []
-    const retired = retireDuplicateHttpSupervisors({
+    const retired = await retireDuplicateHttpSupervisors({
         processes: [...supervisorRows([now - 17 * 86_400_000, now - 86_400_000, now - 3_600_000]), row(process.pid, 1, `${NODE} ${ENTRY} http-supervise --port 8787 --interval 15`, now - 30 * 86_400_000)],
         now,
         signalPid: (pid) => { signalled.push(pid); return true },
@@ -261,10 +261,10 @@ await test('the freshest supervisor is kept and the older duplicates are retired
     assert.equal(signalled.includes(process.pid), false, 'the sweep never signals itself')
 })
 
-await test('a fresh claim in the state file outranks an older start time', () => {
+await test('a fresh claim in the state file outranks an older start time', async () => {
     writeFileSync(supervisorStateFilePath(8787), JSON.stringify({ port: 8787, pid: liveServerStandInPid, ts: now, interval_ms: 15_000, server_pid: 8000 }, null, 2), 'utf8')
     const signalled = []
-    const retired = retireDuplicateHttpSupervisors({
+    const retired = await retireDuplicateHttpSupervisors({
         processes: [row(liveServerStandInPid, 1, `${NODE} ${ENTRY} http-supervise --port 8787 --interval 15`, now - 30 * 86_400_000), ...supervisorRows([now - 17 * 86_400_000, now - 86_400_000, now - 3_600_000])],
         now,
         signalPid: (pid) => { signalled.push(pid); return true },
@@ -274,10 +274,10 @@ await test('a fresh claim in the state file outranks an older start time', () =>
     rmSync(supervisorStateFilePath(8787), { force: true })
 })
 
-await test('two supervisors that cannot be ordered are both left alone', () => {
+await test('two supervisors that cannot be ordered are both left alone', async () => {
     rmSync(supervisorStateFilePath(8787), { force: true })
     const signalled = []
-    const retired = retireDuplicateHttpSupervisors({
+    const retired = await retireDuplicateHttpSupervisors({
         processes: supervisorRows([now - 60_000, now - 60_000, now - 60_000]),
         now,
         signalPid: (pid) => { signalled.push(pid); return true },
@@ -286,9 +286,9 @@ await test('two supervisors that cannot be ordered are both left alone', () => {
     assert.deepEqual(retired, [])
 })
 
-await test('one supervisor on a port is not a duplicate', () => {
+await test('one supervisor on a port is not a duplicate', async () => {
     const signalled = []
-    const retired = retireDuplicateHttpSupervisors({
+    const retired = await retireDuplicateHttpSupervisors({
         processes: [supervisorRows([now - 1000, now - 2000, now - 3000])[0]],
         now,
         signalPid: (pid) => { signalled.push(pid); return true },

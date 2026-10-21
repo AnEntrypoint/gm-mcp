@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { execFile, execFileSync } from './process-port.js'
+import { execFile } from './process-port.js'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -7,7 +7,7 @@ import { compareVersions, noSelfUpdateReason } from './self-update.js'
 import { agentplugDir, toolsDir } from './paths.js'
 import { inflightDispatchCount, pidAlive } from './dispatch.js'
 import { appendDiagnostic } from './server-log.js'
-import { readProcessTable } from './process-table.js'
+import { readProcessTableAsync } from './process-table.js'
 
 const RUNNER_REPO = 'AnEntrypoint/agentplug-bin'
 const GUEST_REPO = 'AnEntrypoint/plugkit-bin'
@@ -330,10 +330,10 @@ async function reconcileGuest(release) {
     return { outcome: 'swapped', from: recorded, to: release.version, sha256: newSha, backup }
 }
 
-function processIsRunner(pid) {
+async function processIsRunner(pid) {
     const isRunnerName = name => path.basename(name.trim()).startsWith('agentplug-runner')
     if (process.platform === 'win32') {
-        return readProcessTable().some(row => row.pid === pid && isRunnerName(row.command))
+        return (await readProcessTableAsync()).some(row => row.pid === pid && isRunnerName(row.command))
     }
     if (existsSync('/proc/self/exe')) {
         try {
@@ -343,13 +343,13 @@ function processIsRunner(pid) {
         }
     }
     try {
-        return isRunnerName(execFileSync('ps', ['-o', 'comm=', '-p', String(pid)], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] }))
+        return isRunnerName((await execFileAsync('ps', ['-o', 'comm=', '-p', String(pid)], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] })).stdout)
     } catch {
         return false
     }
 }
 
-export function signalDaemonForSwap(want) {
+export async function signalDaemonForSwap(want) {
     const home = agentplugDir()
     const status = readJson(path.join(home, 'daemon-status.json'))
     const pid = Number(status?.pid)
@@ -363,7 +363,7 @@ export function signalDaemonForSwap(want) {
     if (runnerCurrent && guestCurrent) return { outcome: 'already-current', pid }
     if (status.runner_update_in_progress) return { outcome: 'deferred', reason: 'runner-update-in-progress', pid }
     if (inflightDispatchCount() > 0) return { outcome: 'deferred', reason: 'dispatch-in-flight', pid }
-    if (!processIsRunner(pid)) return { outcome: 'refused', reason: 'pid is not an agentplug-runner process', pid }
+    if (!(await processIsRunner(pid))) return { outcome: 'refused', reason: 'pid is not an agentplug-runner process', pid }
     process.kill(pid, 'SIGTERM')
     return { outcome: 'signalled', pid, signal: 'SIGTERM' }
 }
@@ -413,10 +413,10 @@ function persistBridgeState(state) {
     writeAtomic(bridgeStatePath(), `${JSON.stringify(state, null, 2)}\n`)
 }
 
-function retryPendingSignal(state) {
+async function retryPendingSignal(state) {
     if (!state.pending_signal) return state
     const pending = state.pending_signal
-    const signal = signalDaemonForSwap(pending.want)
+    const signal = await signalDaemonForSwap(pending.want)
     if (signal.outcome === 'signalled') appendDiagnostic('release-bridge-signal', { ...signal, want: pending.want })
     return signal.outcome === 'deferred' ? state : { ...state, pending_signal: null }
 }
@@ -435,13 +435,13 @@ async function reconcileRepo(repo, reconcile) {
     }
 }
 
-function swapSignalFor(runner, guest) {
+async function swapSignalFor(runner, guest) {
     if (runner.outcome !== 'swapped' && guest.outcome !== 'swapped') return null
     const want = {
         exe_sha256: runner.outcome === 'swapped' ? runner.sha256 : null,
         gm_sha256: guest.outcome === 'swapped' ? guest.sha256 : null,
     }
-    return { want, signal: signalDaemonForSwap(want) }
+    return { want, signal: await signalDaemonForSwap(want) }
 }
 
 async function withBridgeLock(body) {
@@ -462,7 +462,7 @@ export async function runReleaseBridge() {
 
     return withBridgeLock(async () => {
         const state = loadBridgeState()
-        let next = retryPendingSignal(state)
+        let next = await retryPendingSignal(state)
 
         const now = Date.now()
         const backoffUntil = Number(next.backoff_until_ms) || 0
@@ -480,7 +480,7 @@ export async function runReleaseBridge() {
         const runner = await reconcileRepo(RUNNER_REPO, reconcileRunner)
         const guest = await reconcileRepo(GUEST_REPO, reconcileGuest)
 
-        const swap = swapSignalFor(runner, guest)
+        const swap = await swapSignalFor(runner, guest)
         const signal = swap ? swap.signal : null
         const pendingSignal = signal?.outcome === 'deferred' ? { want: swap.want, ts: now, reason: signal.reason } : null
         const limitedUntil = Math.max(runner.rate_limited_until_ms ?? 0, guest.rate_limited_until_ms ?? 0)
