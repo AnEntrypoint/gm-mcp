@@ -60,6 +60,9 @@ async function publish(slug, message, specs) {
   const blobs = [];
   for (const f of files) {
     const blob = await gh('POST', `${api}/git/blobs`, { content: f.content.toString('base64'), encoding: 'base64' });
+    if (typeof blob?.sha !== 'string' || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(blob.sha)) {
+      throw new Error(`blob POST for ${f.path} returned no sha; refusing to build the tree`);
+    }
     blobs.push({ path: f.path, mode: FILE_MODE, type: 'blob', sha: blob.sha });
   }
 
