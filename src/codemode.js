@@ -15,7 +15,8 @@ import { browserAfterCall, screenshotPathsOf } from './browser-feed.js'
 let codemodeInvocationSeq = 0
 const newCodemodeSessionId = () => `mcp-codemode-${process.pid}-${Date.now()}-${++codemodeInvocationSeq}`
 import { createRequire } from 'node:module'
-import { resolve as resolvePath } from 'node:path'
+import { resolve as resolvePath, join as joinPath, relative as relativePath, sep as pathSep } from 'node:path'
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
@@ -363,9 +364,24 @@ const PARTIAL_REPLY_MIN_CHARS = 200
 const PARTIAL_BLOCK_OVERHEAD_CHARS = 256
 const SPOOL_FILE_PATTERN = /[^\s'"`()[\]]*\.gm\/exec-spool\/out\/[^\s'"`()[\]]+/
 
-function completedReplyText(text, budget) {
+// The full text of one nested reply that a partial section had to cut, written atomically (temp file, then rename) under the spool out directory.
+function spillPartialReply(root, diagnosticId, index, text) {
+    try {
+        const dir = joinPath(root, '.gm', 'exec-spool', 'out')
+        mkdirSync(dir, { recursive: true })
+        const file = joinPath(dir, `codemode-partial-${diagnosticId}-${index + 1}.txt`)
+        const tmp = `${file}.${process.pid}.tmp`
+        writeFileSync(tmp, text)
+        renameSync(tmp, file)
+        return relativePath(root, file).split(pathSep).join('/')
+    } catch {
+        return null
+    }
+}
+
+function completedReplyText(text, budget, spill = () => null) {
     if (text.length <= budget) return text
-    const spool = text.match(SPOOL_FILE_PATTERN)?.[0] ?? 'not reported'
+    const spool = text.match(SPOOL_FILE_PATTERN)?.[0] ?? spill() ?? 'not reported'
     const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${budget}\nspool_file: ${spool}\n`
     return `${text.slice(0, Math.max(0, budget - notice.length))}${notice}`
 }
@@ -616,7 +632,8 @@ export function registerCodeMode(server, tools) {
                     const label = `${index + 1}/${replies.length}: gm.${entry.verb}`
                     if (entry.text !== undefined) {
                         const head = `--- partial ${label} completed before the throw dispatch_id: ${entry.dispatch_id ?? 'none'} ---`
-                        return args.full_response === true ? `${head}\n${completedReplyText(entry.text, replyBudget)}` : head
+                        const spill = () => spillPartialReply(args.cwd || process.cwd(), diagnosticId, index, entry.text)
+                        return args.full_response === true ? `${head}\n${completedReplyText(entry.text, replyBudget, spill)}` : head
                     }
                     if (entry.failed) return `--- partial ${label} failed (error detailed once, above) dispatch_id: ${entry.dispatch_id ?? 'none'} ---`
                     return `--- partial ${label} still pending ---`
