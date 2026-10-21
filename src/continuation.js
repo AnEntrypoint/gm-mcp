@@ -20,7 +20,7 @@ const entries = new Map()
 function entryFor(key) {
     let entry = entries.get(key)
     if (!entry) {
-        entry = { pending_rows: null, last_ms: Date.now(), stopped: false, notified_for: null }
+        entry = { pending_rows: null, last_ms: Date.now(), stopped: false, notified_for: null, emitted: null }
         entries.set(key, entry)
     }
     return entry
@@ -67,7 +67,7 @@ function textBeforeTrailingBlock(text) {
     return text
 }
 
-export function continuedReply(key, text, now = Date.now()) {
+export function continuedReply(key, text, now = Date.now(), force = false) {
     if (typeof text !== 'string') return text
     const entry = entryFor(key)
     const json = parsedJsonOf(text)
@@ -82,6 +82,10 @@ export function continuedReply(key, text, now = Date.now()) {
     const snapshot = continuationSnapshot(key, now, done)
     entry.last_ms = now
     if (snapshot.action === 'none') return text
+    // idle_ms moves on every reply, so a block is repeated only when its state, pending rows, action or concurrency changed.
+    const state = JSON.stringify([snapshot.state, snapshot.pending_rows, snapshot.action, snapshot.max_concurrency ?? null])
+    if (!force && entry.emitted === state) return text
+    entry.emitted = state
     if (json && json.value && typeof json.value === 'object' && !Array.isArray(json.value)) return JSON.stringify({ ...json.value, continuation: snapshot })
     if (json) return text
     const body = textBeforeTrailingBlock(text)
@@ -101,7 +105,7 @@ export function continuedReplyWithin(key, text, cap, cut, now = Date.now()) {
     if (continued.length <= cap) return continued
     if (continued === text) return cut(text, cap)
     const body = textBeforeTrailingBlock(text)
-    if (!continued.startsWith(body)) return continuedReply(key, cut(text, cap - CONTINUATION_RESERVE_CHARS), now)
+    if (!continued.startsWith(body)) return continuedReply(key, cut(text, cap - CONTINUATION_RESERVE_CHARS), now, true)
     const tail = continued.slice(body.length)
     return cut(body, cap - tail.length) + tail
 }
