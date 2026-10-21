@@ -55,7 +55,7 @@ jobs:
               exit 0
             fi
             git add bin/gm-mcp-server.js
-            git commit -m "bundle: rebuild gm-mcp-server.js [skip ci]"
+            git commit -m "bundle: rebuild gm-mcp-server.js"
             if git push origin HEAD:main; then
               exit 0
             fi
