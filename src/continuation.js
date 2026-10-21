@@ -3,7 +3,8 @@ import * as yaml from 'js-yaml'
 export const CONTINUATION_STOP_VERB = 'continuation-stop'
 export const CONTINUATION_LOGGER = 'gm.continuation'
 const MAX_WORKERS = 4
-const WORST_CASE_CONTINUATION_BLOCK = { continuation: { state: 'stopped', pending_rows: 999999, idle_ms: 9999999999999, action: 'continue', max_concurrency: 4 } }
+const GM_CONTINUE_REMINDER = 'gm walk not complete, run the gm-continue skill before ending this turn so remaining rows are searched for and drained'
+const WORST_CASE_CONTINUATION_BLOCK = { continuation: { state: 'stopped', pending_rows: 999999, idle_ms: 9999999999999, action: 'continue', max_concurrency: 4, reminder: GM_CONTINUE_REMINDER } }
 export const CONTINUATION_RESERVE_CHARS = yaml.dump(WORST_CASE_CONTINUATION_BLOCK, { lineWidth: 100 }).length + 1
 const DEFAULT_IDLE_NOTIFY_MS = 300000
 const MONITOR_TICK_MS = 15000
@@ -42,6 +43,7 @@ export function continuationSnapshot(key, now = Date.now(), done = false) {
         action,
     }
     if (action === 'continue') snapshot.max_concurrency = Math.min(entry.pending_rows, MAX_WORKERS)
+    if (snapshot.state === 'running') snapshot.reminder = GM_CONTINUE_REMINDER
     return snapshot
 }
 
