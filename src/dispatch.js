@@ -2681,6 +2681,7 @@ function continuationKeyOf(args) {
 const CI_STATUS_VERBS = new Set(['ci-status', 'ci_status'])
 const CI_STATUS_WAIT_DEFAULT_MS = 300000
 const CI_STATUS_WAIT_CEILING_MS = 900000
+const CI_STATUS_WAIT_FIRST_POLL_MS = 2000
 const CI_STATUS_WAIT_POLL_MS = 15000
 const CI_STATUS_NON_TERMINAL = new Set(['pending', 'in_progress', 'queued', 'waiting', 'requested'])
 const CI_STATUS_ORIGIN_TIMEOUT_MS = 10000
@@ -2726,12 +2727,14 @@ async function runCiStatusWithWait(args, signal, responseValueObserver) {
     const budgetMs = Math.min(CI_STATUS_WAIT_CEILING_MS, Number.isFinite(requested) && requested > 0 ? Math.round(requested) : CI_STATUS_WAIT_DEFAULT_MS)
     const deadline = Date.now() + budgetMs
     const inner = { ...args, body }
+    let interval = CI_STATUS_WAIT_FIRST_POLL_MS
     for (;;) {
         const reply = await runDispatch(inner, signal, responseValueObserver)
         const status = ciStatusReplyRunStatus(reply)
         const remainingMs = deadline - Date.now()
         if (!CI_STATUS_NON_TERMINAL.has(status) || remainingMs <= 0 || signal?.aborted) return reply
-        await sleepUnlessAborted(Math.min(CI_STATUS_WAIT_POLL_MS, remainingMs), signal)
+        await sleepUnlessAborted(Math.min(interval, remainingMs), signal)
+        interval = Math.min(interval * 2, CI_STATUS_WAIT_POLL_MS)
     }
 }
 
