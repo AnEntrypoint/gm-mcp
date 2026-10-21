@@ -43,17 +43,22 @@ export function runningBundle() {
     if (running) return running
     const path = bundleEntryPath()
     let bytes = null
+    let readError = null
     try {
         bytes = readFileSync(path)
-    } catch {
+    } catch (error) {
+        // The errno is kept so a drift refusal can say why the running bundle could not be read.
+        readError = error?.code ?? 'unknown'
         bytes = null
     }
+    if (readError !== null) appendDiagnostic('bundle-running-unreadable', { path, code: readError })
     running = {
         path,
         version: BUNDLE_VERSION,
         sha256: bytes ? sha256(bytes) : null,
         bundled: bytes ? isBundle(bytes) : false,
         readable: bytes !== null,
+        read_error: readError,
     }
     return running
 }
