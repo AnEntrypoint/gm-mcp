@@ -19,6 +19,9 @@ const LOCAL_INIT_ID = 'gm-relay-local-init'
 const RELAY_BUDGET_MS = (Number(process.env.GM_CODEMODE_TIMEOUT_MS) > 0 ? Number(process.env.GM_CODEMODE_TIMEOUT_MS) : DEFAULT_CODEMODE_TIMEOUT_MS) + 5000
 const HEALTH_PROBE_MS = 1500
 const RESTART_BUDGET_MS = 8000
+// After a failed singleton restart, calls in this window skip the health probe and the respawn and are served in-process.
+// A singleton that comes back inside the window is picked up once it expires (find9-relay-restart-probe-latency).
+const RESTART_COOLDOWN_MS = 30_000
 const LOCAL_START_BUDGET_MS = 15000
 
 function within(promise, ms, layer) {
@@ -192,13 +195,22 @@ function createLocalFallback(initializeParams) {
     }
 }
 
+function restartCoolingDown(state) {
+    return state.restartFailedAt != null && Date.now() - state.restartFailedAt < RESTART_COOLDOWN_MS
+}
+
 async function restartSingleton(recover, state) {
-    if (!recover) return null
+    if (!recover || restartCoolingDown(state)) return null
     const restarted = await within(recover(), RESTART_BUDGET_MS, 'http singleton restart').catch((error) => {
         appendDiagnostic('stdio-relay-restart-failed', { url: state.url, error: describeError(error) })
         return null
     })
-    if (restarted) state.url = restarted
+    if (restarted) {
+        state.url = restarted
+        state.restartFailedAt = null
+    } else {
+        state.restartFailedAt = Date.now()
+    }
     return restarted
 }
 
@@ -228,7 +240,7 @@ async function forwardLine(line, recover, state) {
     const outbound = withDefaultCwd(request, line, state.defaultCwd)
     const routedRequest = outbound === line ? request : JSON.parse(outbound)
     const deadline = Date.now() + RELAY_BUDGET_MS
-    if (state.local.active() && !(await httpLiveCached(state)) && !(await restartSingleton(recover, state))) return deliverLocal(state, routedRequest, expectsReply, null, deadline)
+    if (state.local.active() && (restartCoolingDown(state) || (!(await httpLiveCached(state)) && !(await restartSingleton(recover, state))))) return deliverLocal(state, routedRequest, expectsReply, null, deadline)
     let target = state.url
     let { reply, failure } = await within(postWithRetry(target, outbound, request?.method ?? null), remainingMs(deadline), 'http singleton call').catch((error) => ({ reply: null, failure: error }))
     if (!reply) {

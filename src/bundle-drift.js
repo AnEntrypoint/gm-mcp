@@ -109,6 +109,11 @@ function reloadRefusal(runningState, installedState) {
 
 let servingTransport = null
 
+// Transports whose drift watch wires a handover in index.js: http replaces its listener, stdio hands over to the HTTP
+// singleton, and a stdio relay exits when idle. A stale process on one of these is reloadable, so the no-handover refusal
+// is only for a transport with no handover (gm-stale-bundle-stdio-relay-handover-1018).
+const HANDOVER_TRANSPORTS = new Set(['http', 'stdio', 'stdio-relay'])
+
 export function setServingTransport(kind) {
     servingTransport = kind
 }
@@ -129,7 +134,7 @@ export function bundleDrift({ transport = servingTransport ?? process.env.GM_MCP
     const stale = runningState.sha256 !== installedState.sha256
     if (!stale) return { ...base, stale: false, reloadable: false, refusal: null }
     const refused = reloadRefusal(runningState, installedState)
-    const refusal = refused.code === null && transport !== 'http'
+    const refusal = refused.code === null && !HANDOVER_TRANSPORTS.has(transport)
         ? { code: 'no-handover', reason: `a ${transport} server cannot replace itself without dropping its client, so a relaunch serves the installed bundle` }
         : refused
     return {
