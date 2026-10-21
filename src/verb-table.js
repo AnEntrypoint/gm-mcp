@@ -391,8 +391,6 @@ const GIT_ADD_BODY = {
     required: [],
     fields: {
         paths: { type: 'array', aliases: ['files'], description: 'Pathspecs to stage with git add. Protected gm state paths are refused and named in the refusal.' },
-        hunks: { type: 'object', description: 'Refused: git_add stages whole files only, so hunk-scoped staging has no verb. Use git_commit {hunks} to commit named hunks without staging the rest.' },
-        patch: { type: 'string', description: 'Refused: git_add stages whole files only, so patch-scoped staging has no verb. Use git_commit {patch} to commit a diff without staging the rest.' },
     },
 }
 
