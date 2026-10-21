@@ -446,6 +446,7 @@ function renderMatchesKept(out, holder, kept, toYaml, slim = false) {
     if (slim) {
         const source = holder === out ? out : { ...out, ...out.data }
         const header = Object.fromEntries(SLIM_MATCH_HEADER_KEYS.filter((key) => source[key] !== undefined).map((key) => [key, source[key]]))
+        if (keptMatches.some((match) => typeof match === 'string')) header.matches_form = 'one_line'
         return toYaml({ ...header, matches: keptMatches })
     }
     return holder === out
@@ -471,12 +472,19 @@ function largestMatchesFittingReply(out, holder, maxChars, matchesTotal, toYaml,
 }
 
 const MATCH_TEXT_CLIP_CHARS = 160
-const MATCH_TEXT_TIGHT_CLIP_CHARS = 80
+const MATCH_TEXT_TIGHT_CLIP_CHARS = 50
 const MIN_MATCHES_PER_REPLY = 20
 
 function clipMatchText(match, clipChars = MATCH_TEXT_CLIP_CHARS) {
     if (typeof match?.text !== 'string' || match.text.length <= clipChars) return match
     return { ...match, text: match.text.slice(0, clipChars), text_clipped: true }
+}
+
+function oneLineMatch(match) {
+    if (match === null || typeof match !== 'object') return match
+    const text = typeof match.text === 'string' ? match.text.replace(/\s+/g, ' ').trim() : ''
+    const clipped = text.length > MATCH_TEXT_TIGHT_CLIP_CHARS ? `${text.slice(0, MATCH_TEXT_TIGHT_CLIP_CHARS)}...` : text
+    return `${match.path}:${match.line}: ${clipped}`
 }
 
 const OUTCOME_KEYS = ['dispatch_id', 'ok', 'error_code', 'error', 'verb', 'branch']
@@ -520,7 +528,7 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
             }
         }
         if (matchesReturned < Math.min(holder.matches.length, MIN_MATCHES_PER_REPLY)) {
-            const tight = { ...holder, matches: holder.matches.map((match) => clipMatchText(match, MATCH_TEXT_TIGHT_CLIP_CHARS)) }
+            const tight = { ...holder, matches: holder.matches.map(oneLineMatch) }
             const tightReturned = largestMatchesFittingReply(out, tight, maxChars, matchesTotal, toYaml, buildNotice, true)
             if (tightReturned > matchesReturned) {
                 slim = true
