@@ -590,7 +590,8 @@ export function registerCodeMode(server, tools) {
                 const joined = [...logs, formatValue(value), ...unreturned].filter((line) => line !== '').join('\n')
                 const reply = joined.trim() === '' ? EMPTY_REPLY_MARKER : joined
                 const images = replies.flatMap((entry) => entry.images ?? [])
-                return { content: [{ type: 'text', text: capWithContinuation(session_id, reply, cap) }, ...images] }
+                const objectReturn = value !== null && typeof value === 'object'
+                return { content: [{ type: 'text', text: objectReturn ? capCodemodeText(reply, cap) : capWithContinuation(session_id, reply, cap) }, ...images] }
             } catch (error) {
                 const detail = describeError(error)
                 const diagnosticId = `codemode-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`

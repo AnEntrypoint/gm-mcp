@@ -640,6 +640,7 @@ const PRD_WITNESS_REQUEST_BODY = {
     fields: {
         id: { type: 'string', aliases: ['prd_id', 'row'], description: 'PRD row id that needs a verifier witness.' },
         note: { type: 'string', aliases: ['expect', 'observe'], description: 'What the verifier must observe.' },
+        witness_dispatch_id: { type: 'string', description: 'Dispatch id of the executor live run, accepted under the same key prd-resolve uses.' },
     },
 }
 
