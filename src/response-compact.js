@@ -516,6 +516,11 @@ function equalJsonValues(left, right, depth = 0) {
         && keys.every(key => Object.hasOwn(right, key) && equalJsonValues(left[key], right[key], depth + 1))
 }
 
+// The reply's own top-level dispatch_id already names the full payload; repeat it only when that is absent.
+function fullPayloadIdOf(response) {
+    return typeof response.dispatch_id === 'string' && response.dispatch_id.length > 0 ? {} : { full_payload_dispatch_id: null }
+}
+
 export function omitRepeatedFaultStdout(response, outPath) {
     if (!isPlainObject(response)) return response
     const omitted = []
@@ -545,7 +550,7 @@ export function omitRepeatedFaultStdout(response, outPath) {
             ...(result.wire_compacted || {}),
             omitted: [result.wire_compacted?.omitted, ...omitted].filter(Boolean).join(' '),
             full_payload_at: outPath,
-            full_payload_dispatch_id: response.dispatch_id ?? null,
+            ...fullPayloadIdOf(response),
             full_payload_via: WIRE_FULL_PAYLOAD_VIA,
         },
     }
@@ -626,7 +631,7 @@ export function compactWireResponse(response, outPath, receiptVerb = response?.v
         omitted: omitted.join(' '),
         shortened: shortened.join(' '),
         full_payload_at: outPath,
-        full_payload_dispatch_id: response.dispatch_id ?? null,
+        ...fullPayloadIdOf(response),
         full_payload_via: WIRE_FULL_PAYLOAD_VIA,
     })
     return out
