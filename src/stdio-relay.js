@@ -202,6 +202,17 @@ async function restartSingleton(recover, state) {
     return restarted
 }
 
+const LIVE_PROBE_TTL_MS = 2_000
+
+async function httpLiveCached(state) {
+    const now = Date.now()
+    const cached = state.liveProbe
+    if (cached && cached.url === state.url && now - cached.at < LIVE_PROBE_TTL_MS) return cached.live
+    const live = await httpLive(state.url)
+    state.liveProbe = { url: state.url, at: now, live }
+    return live
+}
+
 async function forwardLine(line, recover, state) {
     let request
     try {
@@ -217,10 +228,11 @@ async function forwardLine(line, recover, state) {
     const outbound = withDefaultCwd(request, line, state.defaultCwd)
     const routedRequest = outbound === line ? request : JSON.parse(outbound)
     const deadline = Date.now() + RELAY_BUDGET_MS
-    if (state.local.active() && !(await httpLive(state.url)) && !(await restartSingleton(recover, state))) return deliverLocal(state, routedRequest, expectsReply, null, deadline)
+    if (state.local.active() && !(await httpLiveCached(state)) && !(await restartSingleton(recover, state))) return deliverLocal(state, routedRequest, expectsReply, null, deadline)
     let target = state.url
     let { reply, failure } = await within(postWithRetry(target, outbound, request?.method ?? null), remainingMs(deadline), 'http singleton call').catch((error) => ({ reply: null, failure: error }))
     if (!reply) {
+        state.liveProbe = null
         const restarted = await restartSingleton(recover, state)
         if (restarted) {
             target = restarted
