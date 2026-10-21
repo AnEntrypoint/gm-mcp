@@ -152,6 +152,7 @@ function codesearchIncompleteReasons(out) {
     if (searchScopeSize(data) === 0 || searchScopeSize(out) === 0) reasons.push('searched_zero_files')
     for (const source of [out, data]) {
         reasons.push(...incompleteScanReasons(source))
+        if (source.stale_tree && typeof source.stale_tree === 'object') reasons.push('stale_tree')
         if (source.truncated === true) reasons.push('truncated')
         if (Number.isFinite(source.dropped) && source.dropped > 0) reasons.push(`dropped:${source.dropped}`)
         if (Array.isArray(source.skipped_files) && source.skipped_files.length > 0) reasons.push('skipped_files')
