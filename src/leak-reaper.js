@@ -1,4 +1,5 @@
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
+import { promisify } from 'node:util'
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
 
@@ -65,7 +66,9 @@ function windowsCommandByPid() {
     return windowsSnapshot.byPid
 }
 
-function commandLineOf(pid) {
+const execFileAsync = promisify(execFile)
+
+async function commandLineOf(pid) {
     const wanted = Number(pid)
     if (!Number.isInteger(wanted) || wanted <= 0) return null
     if (process.platform === 'win32') {
@@ -73,16 +76,16 @@ function commandLineOf(pid) {
         return typeof command === 'string' && command !== '' ? command : null
     }
     try {
-        const text = execFileSync('ps', ['-o', 'args=', '-p', String(wanted)], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] })
-        const value = text.trim()
+        const { stdout } = await execFileAsync('ps', ['-o', 'args=', '-p', String(wanted)], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] })
+        const value = stdout.trim()
         return value === '' ? null : value
     } catch {
         return null
     }
 }
 
-function isProtectedBrowser(pid) {
-    const command = commandLineOf(pid)
+async function isProtectedBrowser(pid) {
+    const command = await commandLineOf(pid)
     if (command === null) return false
     const lowered = command.toLowerCase()
     if (![...BROWSER_NAMES].some((name) => lowered.includes(name.toLowerCase()))) return false
@@ -137,6 +140,7 @@ export async function assessHttpInstances({ now = Date.now(), roots = [] } = {})
         const supervisorPid = liveSupervisorPid(port, instance, now)
         const parentPid = await parentPidOf(serverPid)
         const attached = await establishedConnectionCount(port)
+        const notBrowser = (await isProtectedBrowser(serverPid)) === false
         const predicates = [
             measure('attributed', 'registry', true),
             measure('not-self', serverPid !== process.pid, serverPid !== process.pid),
@@ -145,7 +149,7 @@ export async function assessHttpInstances({ now = Date.now(), roots = [] } = {})
             measure('no-live-supervisor', supervisorPid === null ? true : supervisorPid, supervisorPid === null),
             measure('parent-abandoned', parentPid, parentAbandoned(parentPid)),
             measure('zero-attached-clients', attached, attached === 0),
-            measure('not-user-browser', isProtectedBrowser(serverPid) === false, isProtectedBrowser(serverPid) === false),
+            measure('not-user-browser', notBrowser, notBrowser),
         ]
         findings.push(verdictOf(predicates, {
             source: 'http-instance',
@@ -231,6 +235,7 @@ export async function assessAttributedChildren({ roots = [], liveSessionIds = nu
             const port = Number.isInteger(Number(row.port)) && Number(row.port) > 0 ? Number(row.port) : null
             const attached = port === null ? null : await establishedConnectionCount(port)
             const sessionLive = typeof row.session_id === 'string' && liveSessionIds ? liveSessionIds.has(row.session_id) : null
+            const notBrowser = (await isProtectedBrowser(pid)) === false
             const predicates = [
                 measure('attributed', attributed.dispatch_id ?? row.kind, true),
                 measure('not-self', pid !== process.pid, pid !== process.pid),
@@ -238,7 +243,7 @@ export async function assessAttributedChildren({ roots = [], liveSessionIds = nu
                 measure('parent-abandoned', parentPid, parentAbandoned(parentPid, attributed.recorded_ppid)),
                 measure('no-live-lane', sessionLive === null ? 'no-session-recorded' : sessionLive === false, sessionLive === null ? true : sessionLive === false),
                 measure('zero-attached-clients', attached, port === null ? true : attached === 0),
-                measure('not-user-browser', isProtectedBrowser(pid) === false, isProtectedBrowser(pid) === false),
+                measure('not-user-browser', notBrowser, notBrowser),
             ]
             findings.push(verdictOf(predicates, {
                 source: 'attributed-child',
@@ -271,7 +276,7 @@ export async function liveMcpClientInParentChain(pid, parentPid, table, { maxHop
         if (seen.has(current)) break
         seen.add(current)
         if (pidAlive(current) !== true) return { value: `parent-${current}-dead`, client: false }
-        const command = byPid.get(current)?.command ?? commandLineOf(current)
+        const command = byPid.get(current)?.command ?? await commandLineOf(current)
         if (typeof command !== 'string' || command === '') {
             unreadable = current
         } else if (MCP_CLIENT_PATTERNS.some((pattern) => pattern.test(command))) {
@@ -333,6 +338,7 @@ export async function assessUnattributedServers({ roots = [], liveSessionIds = n
             ? await liveMcpClientInParentChain(pid, parentPid, table)
             : { value: 'not-a-stdio-server', client: false }
         const alive = pidAlive(pid)
+        const notBrowser = (await isProtectedBrowser(pid)) === false
         const predicates = [
             measure('gm-mcp-entry', info.entry, true),
             measure('not-self', pid !== process.pid, pid !== process.pid),
@@ -341,7 +347,7 @@ export async function assessUnattributedServers({ roots = [], liveSessionIds = n
             measure('orphan-evidence', evidence === '' ? null : evidence, evidence !== ''),
             measure('no-live-lane', laneValue, lanePass),
             measure('no-live-mcp-client', chain.value, chain.value !== null && chain.client === false),
-            measure('not-user-browser', isProtectedBrowser(pid) === false, isProtectedBrowser(pid) === false),
+            measure('not-user-browser', notBrowser, notBrowser),
         ]
         findings.push(verdictOf(predicates, {
             source: 'unattributed-server',
