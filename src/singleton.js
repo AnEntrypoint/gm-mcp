@@ -756,11 +756,11 @@ function readFileSyncSafe(file) {
 }
 
 function moveStaleClaimAside(file) {
-    try { renameSync(file, `${file}.${process.pid}.stale`) } catch {}
+    try { renameSync(file, `${file}.${process.pid}.stale`) } catch (error) { appendDiagnostic('spawn-claim-stale-rename-failed', { file, error: describeError(error) }) }
 }
 
 export function releaseSpawnClaim(name, port) {
-    try { unlinkSync(spawnClaimPath(name, port)) } catch {}
+    try { unlinkSync(spawnClaimPath(name, port)) } catch (error) { appendDiagnostic('spawn-claim-unlink-failed', { name, port, error: describeError(error) }) }
 }
 
 export function ensureHttpSupervisor({ port = defaultHttpPort(), intervalMs = supervisorIntervalMs(), force = false } = {}) {
