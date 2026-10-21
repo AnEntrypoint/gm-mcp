@@ -5,7 +5,7 @@ import { classifyGmServerCommand } from './gm-cmdline.js'
 import { MCP_CLIENT_PATTERNS, reapReport, VERDICT } from './leak-reaper.js'
 import { listeningPidOf } from './ports.js'
 import { orphanFindings, orphanRssTotalMb } from './orphan-scan.js'
-import { liveSessionNameOf, readProcessTable } from './process-table.js'
+import { liveSessionNameOf, readProcessTableAsync } from './process-table.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import {
     launchedEntryPath,
@@ -228,7 +228,7 @@ function findingSummary(finding) {
 }
 
 export async function leakWatchReport({ roots = null, processes = null, now = Date.now(), apply = false, httpPorts = null, signalPid = signalPidByDefault, minAgeMs = DEFAULT_MIN_RETIRE_AGE_MS, maxPerPass = DEFAULT_MAX_AUTO_RETIRE_PER_PASS, warnAt = populationWarnAt(), readProc = undefined, ppidMap = null } = {}) {
-    const table = Array.isArray(processes) ? processes : readProcessTable()
+    const table = Array.isArray(processes) ? processes : await readProcessTableAsync()
     const scanRoots = Array.isArray(roots) && roots.length > 0 ? roots : knownProjectRoots()
     const reap = await reapReport({ roots: scanRoots, apply: false, now, unattributed: table })
     const census = censusGmProcesses(table)
