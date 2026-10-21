@@ -68,6 +68,10 @@ function cronBlock() {
     ].join('\n')
 }
 
+// Under --check nothing is written, so a changed action is reported as would-<action>.
+const DRY_RUN_VERB = { created: 'create', added: 'add', refreshed: 'refresh' }
+const dryRunAction = (action, changed) => (hasFlag('check') && changed ? `would-${DRY_RUN_VERB[action] ?? action}` : action)
+
 function installHook() {
     const existed = existsSync(hookFile)
     const original = existed ? readFileSync(hookFile, 'utf8') : '#!/bin/bash\n'
@@ -83,7 +87,7 @@ function installHook() {
         file: hookFile,
         managed: hadBlock,
         changed,
-        action: !existed ? 'created' : changed ? (hadBlock ? 'refreshed' : 'added') : 'unchanged',
+        action: dryRunAction(!existed ? 'created' : changed ? (hadBlock ? 'refreshed' : 'added') : 'unchanged', changed),
     }
 }
 
@@ -101,7 +105,7 @@ function installCron() {
         const loaded = spawnSync('crontab', [cronFile], { encoding: 'utf8', windowsHide: true })
         if (loaded.status !== 0) spawnSync('sudo', ['crontab', '-u', process.env.USER || 'abc', cronFile], { encoding: 'utf8', windowsHide: true })
     }
-    return { file: cronFile, managed: original.includes(MARKER), changed, action: changed ? (original.includes(MARKER) ? 'refreshed' : 'added') : 'unchanged' }
+    return { file: cronFile, managed: original.includes(MARKER), changed, action: dryRunAction(changed ? (original.includes(MARKER) ? 'refreshed' : 'added') : 'unchanged', changed) }
 }
 
 function uninstall() {
@@ -124,7 +128,7 @@ function uninstall() {
             continue
         }
         if (!hasFlag('check')) writeFileSync(file, `${next}\n`, 'utf8')
-        report.push({ file, action: 'removed' })
+        report.push({ file, action: hasFlag('check') ? 'would-remove' : 'removed' })
     }
     return report
 }
@@ -220,7 +224,8 @@ const report = {
 const platform = flagValue('platform') || process.platform
 report.platform = platform
 if (hasFlag('uninstall')) {
-    report.uninstall = uninstall()
+    if (platform === 'linux') report.uninstall = uninstall()
+    else report.unsupported = `${platform}: uninstall only edits the linux hook and cron files; nothing was written`
 } else if (platform === 'darwin') {
     report.launchd = installLaunchd()
     report.ensure_http = ensureNow()
