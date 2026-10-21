@@ -3,6 +3,7 @@ import path from 'node:path'
 
 import { agentplugDir, leasesDir, spoolDirOf } from './paths.js'
 import { ageMsSince } from './timestamp.js'
+import { appendDiagnostic, describeError } from './server-log.js'
 
 export const LEDGER_NAME = '.child-pids.jsonl'
 const GLOBAL_LEDGER_NAME = 'gm-child-pids.jsonl'
@@ -61,7 +62,7 @@ function rotateIfLarge(file) {
         const size = statSync(file).size
         if (size < MAX_LEDGER_BYTES) return
         const rotated = `${file}${ROTATED_SUFFIX}`
-        try { rmSync(rotated, { force: true }) } catch {}
+        try { rmSync(rotated, { force: true }) } catch (error) { appendDiagnostic('ledger-rotate-remove-failed', { file: rotated, error: describeError(error) }) }
         renameSync(file, rotated)
     } catch {
         return
@@ -88,7 +89,9 @@ export function recordChild({ root = null, pid, kind = 'child', verb = null, dis
     const file = root ? projectLedgerPath(root) : globalLedgerPath()
     try {
         mkdirSync(path.dirname(file), { recursive: true })
-    } catch {}
+    } catch (error) {
+        appendDiagnostic('ledger-mkdir-failed', { file, error: describeError(error) })
+    }
     rotateIfLarge(file)
     if (writeLine(file, entry)) return entry
     return null
