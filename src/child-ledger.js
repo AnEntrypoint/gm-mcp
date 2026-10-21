@@ -63,7 +63,7 @@ function rotateIfLarge(file) {
         if (size < MAX_LEDGER_BYTES) return
         const rotated = `${file}${ROTATED_SUFFIX}`
         try { rmSync(rotated, { force: true }) } catch (error) { appendDiagnostic('ledger-rotate-remove-failed', { file: rotated, error: describeError(error) }) }
-        renameSync(file, rotated)
+        try { renameSync(file, rotated) } catch (error) { appendDiagnostic('ledger-rotate-failed', { file, error: describeError(error) }) }
     } catch {
         return
     }
