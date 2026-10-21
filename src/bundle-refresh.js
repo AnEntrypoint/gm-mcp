@@ -16,6 +16,7 @@ export const HANDOVER_LISTEN_RETRY_MS = 60_000
 const HANDOVER_FALLBACK_PROBE_MS = 10_000
 const HANDOVER_DRAIN_TIMEOUT_MS = 60_000
 const HANDOVER_DRAIN_POLL_MS = 50
+const HANDOVER_DRAIN_FORCE_MS = 3_000
 const HANDOVER_DEFER_LIMIT_MS = 120_000
 const HANDOVER_TARGET_TIMEOUT_MS = 15_000
 let deferralStartedAt = null
@@ -114,11 +115,14 @@ async function drainAndExit(server) {
         } catch {
         }
     }
-    const deadline = Date.now() + HANDOVER_DRAIN_TIMEOUT_MS
+    const started = Date.now()
+    const deadline = started + HANDOVER_DRAIN_TIMEOUT_MS
     let open = 0
     while (Date.now() < deadline) {
         if (inflightDispatchCount() === 0) {
             server?.closeIdleConnections?.()
+            // Active keep-alive and SSE sockets stay open past the idle sweep: after the grace period, with no dispatch in flight, close them so clients reconnect to the new bundle.
+            if (Date.now() - started >= HANDOVER_DRAIN_FORCE_MS) server?.closeAllConnections?.()
             open = await openConnectionCount(server)
             if (open <= 0) break
         }
