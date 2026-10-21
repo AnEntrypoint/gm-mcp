@@ -17,6 +17,7 @@ const HANDOVER_FALLBACK_PROBE_MS = 10_000
 const HANDOVER_DRAIN_TIMEOUT_MS = 60_000
 const HANDOVER_DRAIN_POLL_MS = 50
 const HANDOVER_DEFER_LIMIT_MS = 120_000
+const HANDOVER_TARGET_TIMEOUT_MS = 15_000
 let deferralStartedAt = null
 
 export const HANDOVER_ENV = 'GM_MCP_HANDOVER'
@@ -142,9 +143,18 @@ function clientInitializeParams(server) {
     }
 }
 
+function withTimeout(promise, ms) {
+    let timer
+    const timeout = new Promise(resolve => {
+        timer = setTimeout(() => resolve(null), ms)
+        timer.unref?.()
+    })
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+}
+
 export async function handOverStdioToRefreshedBundle({ state, transport, server, monitor = null, target, recover }) {
     if (stdioHandedOver) return { outcome: 'handed-over', already: true }
-    const url = await target()
+    const url = await withTimeout(target(), HANDOVER_TARGET_TIMEOUT_MS)
     const detail = { from: shortHash(state.running_sha256), to: shortHash(state.installed_sha256), to_version: state.installed_version ?? null, from_pid: process.pid }
     if (!url) {
         appendDiagnostic('bundle-handover-stdio-failed', { ...detail, reason: 'no-http-singleton' })
