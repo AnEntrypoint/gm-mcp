@@ -1290,6 +1290,33 @@ function plainTextFromBody(body) {
 const GLOB_FILTER_FIELDS = ['glob', 'path_glob', 'include']
 const GLOB_EXCLUDE_FIELDS = ['exclude_glob', 'exclude_globs']
 
+const GIT_BOOL_STRING_FIELDS = { git_diff: ['staged', 'stat'], git_reset: ['hard'], git_merge: ['ff_only'] }
+
+// Folds the git body aliases the guest does not read (sha as rev on git_push), coerces "true"/"false" on boolean-only git fields, refuses any other string there, and turns git_show path into the paths form so the guest never builds rev:path.
+export function withGitBodyCoerced(verb, body) {
+    if (!body || typeof body !== 'object' || !verb.startsWith('git_')) return { value: body }
+    const coerced = { ...body }
+    for (const field of GIT_BOOL_STRING_FIELDS[verb] ?? []) {
+        const value = coerced[field]
+        if (value === undefined || value === null || typeof value === 'boolean') continue
+        if (value === 'true' || value === 'false') { coerced[field] = value === 'true'; continue }
+        return { error: `${verb} body.${field} must be a boolean (true or false); received ${JSON.stringify(value)}, which is refused rather than read as a default` }
+    }
+    if (verb === 'git_push' && coerced.sha !== undefined) {
+        if (coerced.rev !== undefined && coerced.rev !== coerced.sha) return { error: 'git_push body names both rev and sha with different values; send one revision' }
+        if (coerced.rev === undefined) coerced.rev = coerced.sha
+        delete coerced.sha
+    }
+    if (verb === 'git_show' && typeof coerced.path === 'string') {
+        const scoped = Array.isArray(coerced.paths) ? coerced.paths : Array.isArray(coerced.files) ? coerced.files : []
+        const combined = [...scoped, coerced.path]
+        delete coerced.path
+        delete coerced.files
+        coerced.paths = combined
+    }
+    return { value: coerced }
+}
+
 export function withGlobFiltersCoerced(verb, body) {
     if (!body || typeof body !== 'object') return { value: body }
     const coerced = { ...body }
@@ -2815,9 +2842,11 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
         } else {
             const globCoerced = withGlobFiltersCoerced(verb, normalized.value)
             if (globCoerced.error) return `error: ${globCoerced.error}`
-            const diagnostic = objectBodyDiagnostic(verb, globCoerced.value) ?? fsWriteEnvelopeDiagnostic(verb, globCoerced.value)
+            const gitCoerced = withGitBodyCoerced(verb, globCoerced.value)
+            if (gitCoerced.error) return `error: ${gitCoerced.error}`
+            const diagnostic = objectBodyDiagnostic(verb, gitCoerced.value) ?? fsWriteEnvelopeDiagnostic(verb, gitCoerced.value)
             if (diagnostic) return `error: ${diagnostic}`
-            const coerced = withCodesearchScalarsCoerced(verb, globCoerced.value)
+            const coerced = withCodesearchScalarsCoerced(verb, gitCoerced.value)
             const dualRouted = withCodesearchDualPathRouted(verb, coerced, cwd)
             codesearchDualScope = dualRouted.scope
             const withDefaultK = withCodesearchDefaultK(verb, dualRouted.body)
