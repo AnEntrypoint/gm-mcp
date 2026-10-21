@@ -108,18 +108,16 @@ function openConnectionCount(server) {
 
 async function drainAndExit(server) {
     if (server) {
-        await new Promise((resolve) => {
-            try {
-                server.close(() => resolve())
-            } catch {
-                resolve()
-            }
-        })
+        try {
+            server.close(() => {})
+        } catch {
+        }
     }
     const deadline = Date.now() + HANDOVER_DRAIN_TIMEOUT_MS
     let open = 0
     while (Date.now() < deadline) {
         if (inflightDispatchCount() === 0) {
+            server?.closeIdleConnections?.()
             open = await openConnectionCount(server)
             if (open <= 0) break
         }
