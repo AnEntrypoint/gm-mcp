@@ -151,7 +151,10 @@ function parseDispatchArgv(argv) {
 
     const numericFlag = (name) => {
         const raw = dispatchFlag(argv, name)
-        if (raw === undefined) return {}
+        if (raw === undefined) {
+            const present = argv.some((arg) => arg.startsWith('--') && flagNameOf(arg).name === name)
+            return present ? { usageError: `gm-mcp dispatch: --${name} needs a value` } : {}
+        }
         const parsed = Number(raw)
         if (Number.isFinite(parsed) && parsed > 0) return { value: parsed }
         return { usageError: `gm-mcp dispatch: --${name} must be a positive number, got "${raw}"` }
