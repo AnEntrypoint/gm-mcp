@@ -121,8 +121,8 @@ function supervisorStateOf(port) {
     }
 }
 
-export function duplicateSupervisorFindings({ processes, now = Date.now() } = {}) {
-    const rows = listHttpSupervisors({ processes })
+export async function duplicateSupervisorFindings({ processes, now = Date.now() } = {}) {
+    const rows = await listHttpSupervisors({ processes })
     const findings = []
     for (const port of [...new Set(rows.map((row) => row.port))].sort((left, right) => left - right)) {
         const group = rows.filter((row) => row.port === port)
@@ -232,7 +232,7 @@ export async function leakWatchReport({ roots = null, processes = null, now = Da
     const scanRoots = Array.isArray(roots) && roots.length > 0 ? roots : knownProjectRoots()
     const reap = await reapReport({ roots: scanRoots, apply: false, now, unattributed: table })
     const census = censusGmProcesses(table)
-    const duplicates = duplicateSupervisorFindings({ processes: table, now })
+    const duplicates = await duplicateSupervisorFindings({ processes: table, now })
     const sharedPids = await sharedHttpPids(Array.isArray(httpPorts) ? httpPorts : registeredHttpPorts())
     // Orphans are processes gm does not own at all, so they never appear in the ledger the reap
     // above reads: they are found by walking the process table itself. Report only.

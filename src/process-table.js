@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 import { commandTokens } from './gm-cmdline.js'
@@ -63,31 +63,6 @@ function failureReason(error) {
     return error?.code ?? error?.message ?? String(error)
 }
 
-function run(exec, file, args) {
-    return exec(file, args, {
-        encoding: 'utf8',
-        windowsHide: true,
-        timeout: TABLE_TIMEOUT_MS,
-        stdio: ['ignore', 'pipe', 'pipe'],
-    })
-}
-
-function posixRows({ exec }) {
-    let text = ''
-    let withStart = true
-    try {
-        text = run(exec, 'ps', POSIX_ARGS_WITH_START)
-    } catch {
-        try {
-            text = run(exec, 'ps', POSIX_ARGS_NO_START)
-            withStart = false
-        } catch {
-            return []
-        }
-    }
-    return parsePosix(text, withStart)
-}
-
 function parsePosix(text, withStart) {
     const rows = []
     for (const line of text.split('\n')) {
@@ -105,17 +80,6 @@ function parsePosix(text, withStart) {
         })
     }
     return rows
-}
-
-function windowsRows({ exec }) {
-    let text = ''
-    try {
-        text = run(exec, 'powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', WINDOWS_ENCODED_SCRIPT])
-    } catch (error) {
-        lastError = failureReason(error)
-        text = typeof error?.stdout === 'string' ? error.stdout : ''
-    }
-    return parseWindows(text)
 }
 
 function parseWindows(text) {
@@ -139,23 +103,21 @@ function parseWindows(text) {
 
 const execFileAsync = promisify(execFile)
 
-function runAsync(file, args) {
-    return execFileAsync(file, args, {
-        encoding: 'utf8',
-        windowsHide: true,
-        timeout: TABLE_TIMEOUT_MS,
-        stdio: ['ignore', 'pipe', 'pipe'],
-    }).then(({ stdout }) => stdout)
+// An injected exec (tests) may answer synchronously with the text; the default is an async child process.
+function runAsync(file, args, exec = null) {
+    const options = { encoding: 'utf8', windowsHide: true, timeout: TABLE_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'] }
+    if (exec) return Promise.resolve().then(() => exec(file, args, options)).then((out) => (typeof out === 'string' ? out : out?.stdout ?? ''))
+    return execFileAsync(file, args, options).then(({ stdout }) => stdout)
 }
 
-async function posixRowsAsync() {
+async function posixRowsAsync(exec = null) {
     let text = ''
     let withStart = true
     try {
-        text = await runAsync('ps', POSIX_ARGS_WITH_START)
+        text = await runAsync('ps', POSIX_ARGS_WITH_START, exec)
     } catch {
         try {
-            text = await runAsync('ps', POSIX_ARGS_NO_START)
+            text = await runAsync('ps', POSIX_ARGS_NO_START, exec)
             withStart = false
         } catch {
             return []
@@ -164,10 +126,10 @@ async function posixRowsAsync() {
     return parsePosix(text, withStart)
 }
 
-async function windowsRowsAsync() {
+async function windowsRowsAsync(exec = null) {
     let text = ''
     try {
-        text = await runAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', WINDOWS_ENCODED_SCRIPT])
+        text = await runAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', WINDOWS_ENCODED_SCRIPT], exec)
     } catch (error) {
         lastError = failureReason(error)
         text = typeof error?.stdout === 'string' ? error.stdout : ''
@@ -177,10 +139,10 @@ async function windowsRowsAsync() {
 
 // The same rows as readProcessTable, read through async child processes: callers on the event loop (leak-reaper) use this
 // so a slow ps or powershell never blocks heartbeats or dispatches.
-export async function readProcessTableAsync({ platform = process.platform } = {}) {
+export async function readProcessTableAsync({ platform = process.platform, exec = null } = {}) {
     lastError = null
     try {
-        return platform === 'win32' ? await windowsRowsAsync() : await posixRowsAsync()
+        return platform === 'win32' ? await windowsRowsAsync(exec) : await posixRowsAsync(exec)
     } catch (error) {
         lastError = failureReason(error)
         return []
@@ -195,12 +157,3 @@ export function liveSessionNameOf(command) {
     return LIVE_SESSION_NAMES.has(program) ? program : null
 }
 
-export function readProcessTable({ exec = execFileSync, platform = process.platform } = {}) {
-    lastError = null
-    try {
-        return platform === 'win32' ? windowsRows({ exec }) : posixRows({ exec })
-    } catch (error) {
-        lastError = failureReason(error)
-        return []
-    }
-}

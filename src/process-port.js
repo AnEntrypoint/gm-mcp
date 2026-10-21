@@ -1,1 +1,1 @@
-export { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
+export { execFile, spawn, spawnSync } from 'node:child_process'

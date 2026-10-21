@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { lastTableError, readProcessTable } from '../src/process-table.js'
+import { lastTableError, readProcessTableAsync } from '../src/process-table.js'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const BUILT_BUNDLE = path.join(repoRoot, 'bin', 'gm-mcp-server.js')
@@ -116,8 +116,8 @@ async function roundTrip(client, id, method) {
     return waitFor(async () => client.replies.get(id) ?? null, 10000, 50)
 }
 
-function gmProcesses(bundleDir) {
-    const table = readProcessTable()
+async function gmProcesses(bundleDir) {
+    const table = await readProcessTableAsync()
     if (table.length === 0 && lastTableError()) console.log('process table read failed: ' + lastTableError())
     const rows = []
     for (const row of table) {

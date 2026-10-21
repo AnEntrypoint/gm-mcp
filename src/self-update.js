@@ -157,7 +157,7 @@ export function localBuildPinReason(deployedHash) {
     }
 }
 
-export function selfUpdateStatus() {
+export async function selfUpdateStatus() {
     const deployedPath = defaultDeployedPath()
     let bytes = null
     try {
@@ -179,7 +179,7 @@ export function selfUpdateStatus() {
             started_at: image.started_at,
             stale: Boolean(deployedSha) && (image.version !== deployedVersion || image.sha256 !== deployedSha),
         })),
-        ...unrecordedBundleProcesses(new Set(recorded.map((image) => image.pid)), deployedMtimeMs),
+        ...(await unrecordedBundleProcesses(new Set(recorded.map((image) => image.pid)), deployedMtimeMs)),
     ]
     return {
         installed_version: BUNDLE_VERSION,

@@ -111,8 +111,8 @@ await test('a desktop session is classified by what it is, so age never retires 
     assert.equal(liveSessionNameOf(null), null)
 })
 
-await test('duplicate supervisors on one port are counted, and the keeper is named', () => {
-    const findings = duplicateSupervisorFindings({
+await test('duplicate supervisors on one port are counted, and the keeper is named', async () => {
+    const findings = await duplicateSupervisorFindings({
         processes: [supervisorOn(7001, 8787, now - 3 * HOUR), supervisorOn(7002, 8787, now - HOUR), supervisorOn(7003, 8788, now - HOUR)],
         now,
     })
@@ -123,8 +123,8 @@ await test('duplicate supervisors on one port are counted, and the keeper is nam
     assert.deepEqual(findings[0].duplicates, [7001])
 })
 
-await test('two supervisors whose order cannot be measured name no duplicate', () => {
-    const findings = duplicateSupervisorFindings({ processes: [supervisorOn(7001, 8787, now - HOUR), supervisorOn(7002, 8787, now - HOUR)], now })
+await test('two supervisors whose order cannot be measured name no duplicate', async () => {
+    const findings = await duplicateSupervisorFindings({ processes: [supervisorOn(7001, 8787, now - HOUR), supervisorOn(7002, 8787, now - HOUR)], now })
     assert.equal(findings.length, 1)
     assert.equal(findings[0].kept_pid, null)
     assert.deepEqual(findings[0].duplicates, [])
