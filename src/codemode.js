@@ -350,7 +350,8 @@ function capCodemodeText(text, cap, reserve = 0) {
     const dispatchHits = [...text.matchAll(/^[ \t-]*dispatch_id: (\S+)|--- partial [^\n]*? dispatch_id: (\S+)/gm)].filter((m) => m.index < room)
     const lastHit = dispatchHits.at(-1)
     const dispatchId = lastHit ? (lastHit[1] ?? lastHit[2]) : null
-    const spoolFile = lastBefore(new RegExp(SPOOL_FILE_PATTERN.source, 'g'), 0)
+    // A spool path that sits past the cut (a cut partial section's spill notice, for one) is still the path the caller needs, so fall back to the full text.
+    const spoolFile = lastBefore(new RegExp(SPOOL_FILE_PATTERN.source, 'g'), 0) ?? text.match(SPOOL_FILE_PATTERN)?.[0] ?? null
     const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${cap}\ndispatch_id: ${dispatchId ?? 'not reported'}\nspool_file: ${spoolFile ?? 'not reported'}\n`
     const flagged = text.replace(/^(\s*)truncated: false$/gm, "$1truncated: true")
     return `${flagged.slice(0, Math.max(0, room - notice.length))}${notice}`
