@@ -2,7 +2,7 @@ import { isPlainObject } from './plain-object.js';
 import { agentplugDir } from './paths.js'
 import { execFile, spawn } from './process-port.js'
 import { classifyGmServerCommand } from './gm-cmdline.js'
-import { readProcessTable } from './process-table.js'
+import { readProcessTable, readProcessTableAsync } from './process-table.js'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -389,20 +389,25 @@ export function netstatEstablishedLocalPorts(text, win) {
     return locals.length === 0 ? null : locals
 }
 
+// Windows parent pids come from one process-table snapshot shared by a reap pass (TTL 5 s), not one
+// PowerShell Get-CimInstance cold start per pid: N candidates cost one powershell.exe spawn, not N.
+const WINDOWS_PARENT_SNAPSHOT_TTL_MS = 5_000
+let windowsParentSnapshot = null
+
+async function windowsParentPidOf(wanted) {
+    const now = Date.now()
+    if (windowsParentSnapshot === null || now - windowsParentSnapshot.at > WINDOWS_PARENT_SNAPSHOT_TTL_MS) {
+        windowsParentSnapshot = { at: now, rows: await readProcessTableAsync() }
+    }
+    const row = windowsParentSnapshot.rows.find((entry) => Number(entry.pid) === wanted)
+    const parsed = Number(row?.ppid)
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+}
+
 export async function parentPidOf(pid) {
     const wanted = Number(pid)
     if (!Number.isInteger(wanted) || wanted <= 0) return null
-    if (process.platform === 'win32') {
-        const text = await execFileText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${wanted}'; if ($p) { $p.ParentProcessId }`], {
-            windowsHide: true,
-            timeout: 15_000,
-            stdio: ['ignore', 'pipe', 'pipe'],
-        })
-        if (text === null) return null
-        const fields = text.trim().split(/\s+/).filter(Boolean)
-        const parsed = Number.parseInt(fields[fields.length - 1] ?? '', 10)
-        return Number.isInteger(parsed) && parsed > 0 ? parsed : null
-    }
+    if (process.platform === 'win32') return windowsParentPidOf(wanted)
     const text = await execFileText('ps', ['-o', 'ppid=', '-p', String(wanted)], {
         windowsHide: true,
         timeout: 10_000,
