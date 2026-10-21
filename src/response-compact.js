@@ -192,6 +192,7 @@ function withNoticeCodesAt(level, capCut) {
     const replaced = {}
     for (const [key, value] of Object.entries(level)) {
         if (key === 'exhaustive_note' && capCut && typeof value === 'string') replaced[key] = 'exhaustive_cap'
+        else if (key === 'file_source_detail' && level.file_source !== 'git') replaced[key] = value
         else replaced[key] = SEARCH_PROSE_NOTICE_KEYS.has(key) && typeof value === 'string' ? SEARCH_PROSE_NOTICE_KEYS.get(key) : value
     }
     return replaced
