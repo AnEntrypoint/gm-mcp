@@ -2157,6 +2157,9 @@ export function readDaemonLiveness(spoolDir) {
     }
     const stuck = stuckQueueReport(spoolDir)
     if (stuck) Object.assign(liveness, stuck)
+    // Its own short field: `note` is prose that the 400-char inline budget cuts, and the cut used to land
+    // inside this clause, so the one command that clears a stale daemon was the part that got dropped.
+    liveness.restart_command = daemonRestartCommand(projectRootOfSpool(spoolDir))
     return liveness
 }
 
