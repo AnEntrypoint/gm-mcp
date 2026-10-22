@@ -163,7 +163,7 @@ function runnerSwapRecorded(version, installedSha) {
 
 function recordRunnerSwap(version, installedSha) {
     const home = agentplugDir()
-    mkdirSync(home, { recursive: true })
+    mkdirSync(home, { recursive: true, mode: 0o700 })
     writeAtomic(path.join(home, RUNNER_VERSION_FILE), version)
     writeAtomic(path.join(home, LAST_RUNNER_SWAP_FILE), `${JSON.stringify({ version, swapped_at_ts: Date.now(), sha256: installedSha })}\n`)
 }
@@ -321,7 +321,7 @@ async function reconcileGuest(release) {
 
     const { bytes, sha256: newSha } = await fetchVerified(release, GUEST_ASSET)
     if (!WASM_MAGIC.every((byte, index) => bytes[index] === byte)) throw new Error(`${GUEST_ASSET} is not a wasm module`)
-    mkdirSync(dir, { recursive: true })
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
     const tempPath = `${wasmPath}.bridge-${process.pid}-${Date.now()}.tmp`
     writeFileSync(tempPath, bytes, { flag: 'wx' })
     const backup = swapIn(wasmPath, tempPath, `bak-${recorded ?? 'unversioned'}`)
@@ -445,7 +445,7 @@ async function swapSignalFor(runner, guest) {
 }
 
 async function withBridgeLock(body) {
-    mkdirSync(agentplugDir(), { recursive: true })
+    mkdirSync(agentplugDir(), { recursive: true, mode: 0o700 })
     const lockPath = acquireLock()
     if (!lockPath) return { outcome: 'busy' }
     try {

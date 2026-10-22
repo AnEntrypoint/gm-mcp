@@ -370,7 +370,7 @@ const SPOOL_FILE_PATTERN = /[^\s'"`()[\]]*\.gm\/exec-spool\/out\/[^\s'"`()[\]]+/
 function spillPartialReply(root, diagnosticId, index, text) {
     try {
         const dir = joinPath(root, '.gm', 'exec-spool', 'out')
-        mkdirSync(dir, { recursive: true })
+        mkdirSync(dir, { recursive: true, mode: 0o700 })
         const file = joinPath(dir, `codemode-partial-${diagnosticId}-${index + 1}.txt`)
         const tmp = `${file}.${process.pid}.tmp`
         writeFileSync(tmp, text)

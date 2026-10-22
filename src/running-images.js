@@ -23,7 +23,7 @@ function isLivePid(pid) {
 export function recordRunningImage(role, image) {
     try {
         const dir = imageDir()
-        mkdirSync(dir, { recursive: true })
+        mkdirSync(dir, { recursive: true, mode: 0o700 })
         const file = path.join(dir, `${process.pid}.json`)
         const staging = `${file}.staging`
         const record = { pid: process.pid, role, version: image.version, sha256: image.sha256, started_at: new Date().toISOString() }

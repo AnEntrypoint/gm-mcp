@@ -34,7 +34,7 @@ export function handoverRequested() {
 function childStdio() {
     try {
         const file = logFilePath()
-        mkdirSync(path.dirname(file), { recursive: true })
+        mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
         const fd = openSync(file, 'a')
         return { stdio: ['ignore', fd, fd, 'ipc'], fd }
     } catch {

@@ -2219,7 +2219,7 @@ export async function awaitDaemonHeartbeat(spoolDir, signal, waitMs) {
     }
 }
 
-export async function daemonNotRunning(root, spoolDir, signal) {
+export async function daemonNotRunning(root, spoolDir, signal, budgetMs = Infinity) {
     if (process.env.GM_MCP_DAEMON_PREFLIGHT === '0') return undefined
     const liveness = readDaemonLiveness(spoolDir)
     if (liveness.alive) return undefined
@@ -2231,7 +2231,8 @@ export async function daemonNotRunning(root, spoolDir, signal) {
     ensureSpoolRunnerRunning(root)
     startRunnerWatchdog(root)
     const coldStart = globalDaemonPid() === null
-    const graceMs = coldStart ? DAEMON_COLD_START_GRACE_MS : DAEMON_START_GRACE_MS
+    // The grace is clipped to the caller's remaining poll budget, so timeout_seconds bounds this pre-poll wait too.
+    const graceMs = Math.max(1, Math.min(coldStart ? DAEMON_COLD_START_GRACE_MS : DAEMON_START_GRACE_MS, budgetMs))
     if (await awaitDaemonHeartbeat(spoolDir, signal, graceMs) !== 'still_dead') return undefined
     if (globalDaemonPid() !== null) {
         return undefined
@@ -2533,13 +2534,14 @@ const ownerHeaderCapabilityByRuntime = new Map()
 const OWNER_HEADER_CAPABILITY_CACHE_MAX = 64
 const OWNER_PROBE_DEADLINE_MS = 30000
 
-function boundedOwnerProbe(probe, root, session_id) {
+function boundedOwnerProbe(probe, root, session_id, budgetMs = OWNER_PROBE_DEADLINE_MS) {
+    const limitMs = Math.max(1, Math.min(OWNER_PROBE_DEADLINE_MS, budgetMs))
     let timer
     const stalled = new Promise(resolve => {
         timer = setTimeout(() => {
-            appendDiagnostic('owner-transport-probe-stall', { root, session_id, after_ms: OWNER_PROBE_DEADLINE_MS })
+            appendDiagnostic('owner-transport-probe-stall', { root, session_id, after_ms: limitMs })
             resolve('unverified')
-        }, OWNER_PROBE_DEADLINE_MS)
+        }, limitMs)
     })
     return Promise.race([probe, stalled]).finally(() => clearTimeout(timer))
 }
@@ -2559,7 +2561,7 @@ function ownerHeaderRuntimeIdentity(root) {
     return JSON.stringify([root, GLOBAL_DAEMON_STATUS_PATH, status.pid, status.daemon_boot_ts, hash])
 }
 
-async function plainTextOwnerTransport(root, session_id, signal) {
+async function plainTextOwnerTransport(root, session_id, signal, budgetMs = OWNER_PROBE_DEADLINE_MS) {
     const before = ownerHeaderRuntimeIdentity(root)
     if (before && ownerHeaderCapabilityByRuntime.has(before)) {
         const cached = await ownerHeaderCapabilityByRuntime.get(before)
@@ -2578,7 +2580,7 @@ async function plainTextOwnerTransport(root, session_id, signal) {
         if (response?.ok === true && response.timed_out !== true) return 'legacy-unverified'
         return 'unverified'
     }
-    const pending = boundedOwnerProbe(probe(), root, session_id)
+    const pending = boundedOwnerProbe(probe(), root, session_id, budgetMs)
     if (before) {
         if (ownerHeaderCapabilityByRuntime.size >= OWNER_HEADER_CAPABILITY_CACHE_MAX) {
             ownerHeaderCapabilityByRuntime.delete(ownerHeaderCapabilityByRuntime.keys().next().value)
@@ -2959,12 +2961,12 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     if (!resume_task) {
         const unavailable = runnerUnavailable(root, spoolDir)
         if (unavailable) return toYaml(unavailable)
-        const notRunning = await daemonNotRunning(root, spoolDir, signal)
+        const notRunning = await daemonNotRunning(root, spoolDir, signal, Math.max(1, deadline - Date.now()))
         if (notRunning) return toYaml(notRunning)
         ensureSpoolRunnerRunning(root)
         startRunnerWatchdog(root)
         if (isPlainText) {
-            ownerTransport = await plainTextOwnerTransport(root, session_id, signal)
+            ownerTransport = await plainTextOwnerTransport(root, session_id, signal, Math.max(1, deadline - Date.now()))
             if (signal?.aborted) return toYaml({ error: 'aborted', owner_transport: ownerTransport, wrote_no_new_dispatch: true })
             const plaintext = withTimeoutMsPrefix(verb, raw_body, timeout_seconds)
             const stored = publishSpoolRequest(inDir, inPath, requestNumber, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
