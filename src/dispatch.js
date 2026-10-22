@@ -2460,7 +2460,7 @@ function withDispatchWait(out, waitedMs, claimedAtMs, daemonSpanMs) {
     const lane = admissionStarved
         ? { admission_kind: out.admission_kind, admission_in_flight: out.admission_in_flight, admission_limit: out.admission_limit, admission_holders: out.admission_holders, admission_holders_detail: out.admission_holders_detail, admission_queue_depth: out.admission_queue_depth, lane_queue_depth: out.lane_queue_depth }
         : laneStarved
-            ? { lane_waiters: out.lane_waiters, lane_position: out.lane_position, lane_holder_task: out.lane_holder_task, lane_holder_verb: out.lane_holder_verb, lane_holder_held_ms: out.lane_holder_held_ms }
+            ? { lane_waiters: out.lane_waiters, lane_waiters_active: out.lane_waiters_active, lane_waiters_stale: out.lane_waiters_stale, lane_position: out.lane_position, lane_holder_task: out.lane_holder_task, lane_holder_verb: out.lane_holder_verb, lane_holder_held_ms: out.lane_holder_held_ms, lane_holder_stuck: out.lane_holder_stuck, lane_holder_stuck_reason: out.lane_holder_stuck_reason, lane_holders_detail: out.lane_holders_detail, lane_waiters_detail: out.lane_waiters_detail, lane_queue_depth: out.lane_queue_depth }
             : {}
     const executed = firstReportedMs(out, ['duration_ms', 'guest_elapsed_ms'])
     const beforeGuestCapMs = waitedMs - admissionMs
@@ -2472,7 +2472,13 @@ function withDispatchWait(out, waitedMs, claimedAtMs, daemonSpanMs) {
     const execMs = executed !== null ? Math.min(executed, postClaimMs) : null
     const guestMs = firstReportedMs(out, ['guest_elapsed_ms'])
     const embedMs = firstReportedMs(out, ['embed_ms', 'embed_query'])
+    // The daemon stamps the lane and tool-queue waits it actually served on the reply, so a dispatch that
+    // waited for the git lane and then ran in 30 ms no longer reports the whole queue as unattributed.
+    const daemonLaneMs = firstReportedMs(out, ['lane_waited_ms'])
+    const daemonToolQueueMs = firstReportedMs(out, ['tool_queue_waited_ms'])
     const split = { admission_ms: admissionMs, claim_wait_ms: claimMs, claim_observed: claimedAtMs !== null, exec_ms: execMs, exec_timed: executed !== null, daemon_span_ms: daemonMs, guest_elapsed_ms: guestMs, embed_ms: embedMs, lane_wait_ms: claimMs, post_claim_ms: postClaimMs, daemon_handoff_ms: execMs === null ? null : Math.max(0, daemonMs - execMs), reply_poll_ms: daemonMs === null ? postClaimMs : postClaimMs - daemonMs, ...lane }
+    if (daemonLaneMs !== null) split.lane_waited_ms = daemonLaneMs
+    if (daemonToolQueueMs !== null) split.tool_queue_waited_ms = daemonToolQueueMs
     return { ...out, dispatch_waited_ms: waitedMs, dispatch_wait_split: Object.fromEntries(Object.entries(split).filter(([, value]) => value !== null && value !== undefined)) }
 }
 
