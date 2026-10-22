@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,9 +15,14 @@ const git = args => spawnSync('git', args, { cwd: repoRoot, encoding: 'utf8', ma
 
 const binStaged = git(['diff', '--cached', '--name-only']).stdout.split('\n').map(line => line.trim()).includes(binRel)
 const shipsWorkingBin = includedSrc.includes(binRel)
+// A commit that names the bin and leaves the index alone is HEAD with the named working-tree files, which is what
+// rs-plugkit's commit gate builds in its clone. Building the whole working tree would judge uncommitted src that
+// the commit does not carry, so the local check passes a commit the gate denies.
+const overlayWorkingFiles = shipsWorkingBin && !binStaged
+const basis = binStaged ? 'the staged' : overlayWorkingFiles ? 'HEAD with the named working-tree' : "HEAD's"
 let buildRoot = repoRoot
 let stagedDir = null
-if (binStaged || !shipsWorkingBin) {
+if (binStaged || !shipsWorkingBin || overlayWorkingFiles) {
     stagedDir = mkdtempSync(path.join(tmpdir(), 'gm-mcp-staged-'))
     const treeDir = path.join(stagedDir, 'tree')
     mkdirSync(treeDir)
@@ -34,6 +39,18 @@ if (binStaged || !shipsWorkingBin) {
     if (exported.status !== 0) {
         console.error(`cannot export the ${binStaged ? 'staged index' : 'HEAD tree'}: ${(exported.stderr || '').trim()}`)
         process.exit(1)
+    }
+    if (overlayWorkingFiles) {
+        for (const rel of includedSrc) {
+            const from = path.join(repoRoot, rel)
+            const to = path.join(treeDir, rel)
+            if (existsSync(from)) {
+                mkdirSync(path.dirname(to), { recursive: true })
+                copyFileSync(from, to)
+            } else {
+                rmSync(to, { force: true })
+            }
+        }
     }
     symlinkSync(path.join(repoRoot, 'node_modules'), path.join(treeDir, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
     buildRoot = treeDir
@@ -83,9 +100,9 @@ if (recordedSrcSha !== currentSrcSha) {
 if (fresh === null) {
     console.log(`bin/gm-mcp-server.js records the current src sha256 (${currentSrcSha}); esbuild is not installed here, so the byte-for-byte comparison runs in CI`)
 } else if (committed === fresh) {
-    console.log(`bin/gm-mcp-server.js matches a fresh build of ${binStaged ? 'the staged' : shipsWorkingBin ? 'the working-tree' : "HEAD's"} src/ (${fresh.length} bytes) -- no drift`)
+    console.log(`bin/gm-mcp-server.js matches a fresh build of ${basis} src/ (${fresh.length} bytes) -- no drift`)
 } else {
-    console.error(`bin/gm-mcp-server.js is STALE: it does not match a fresh build of ${binStaged ? 'the staged' : "HEAD's"} src/ (committed ${committed.length} bytes, fresh ${fresh.length} bytes).`)
+    console.error(`bin/gm-mcp-server.js is STALE: it does not match a fresh build of ${basis} src/ (committed ${committed.length} bytes, fresh ${fresh.length} bytes).`)
     console.error(srcFiles.length
         ? `HEAD changed src/ without rebuilding the bin: ${srcFiles.join(', ')}`
         : 'HEAD changed no src/ file, so the bin was edited by hand or built from other sources.')
