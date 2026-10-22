@@ -5,7 +5,7 @@ import { startFastStdio } from './fast-stdio.js'
 import FULL_BUNDLE from 'gm:full-bundle'
 
 globalThis.__gmBundleUrl = import.meta.url
-const loadFull = () => import('data:text/javascript;charset=utf-8,' + encodeURIComponent(FULL_BUNDLE))
+const loadFull = () => import('data:text/javascript;base64,' + Buffer.from(FULL_BUNDLE, 'utf8').toString('base64'))
 
 if (startFastStdio({ onNeedFull: () => setImmediate(loadFull) })) {
     // the cold path arms its own idle load in fast-stdio.js
