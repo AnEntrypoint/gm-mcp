@@ -118,7 +118,17 @@ export function setServingTransport(kind) {
     servingTransport = kind
 }
 
-export function bundleDrift({ transport = servingTransport ?? process.env.GM_MCP_TRANSPORT ?? 'stdio' } = {}) {
+// The transport arrives from three places (setServingTransport, GM_MCP_TRANSPORT, a caller) in whatever case or
+// padding they carry. It is compared against HANDOVER_TRANSPORTS by exact string, so an untrimmed or upper-case
+// value -- or an empty GM_MCP_TRANSPORT, which `??` does not treat as absent -- would be reported `no-handover`
+// for a transport that does have one, telling the operator a restart is required for a reload that will happen.
+function normalizeTransport(value) {
+    const raw = (typeof value === 'string' ? value : '').trim().toLowerCase()
+    return raw === '' ? 'stdio' : raw
+}
+
+export function bundleDrift({ transport } = {}) {
+    const kind = normalizeTransport(transport ?? servingTransport ?? process.env.GM_MCP_TRANSPORT)
     const runningState = runningBundle()
     const installedState = installedBundle()
     const base = {
@@ -134,8 +144,8 @@ export function bundleDrift({ transport = servingTransport ?? process.env.GM_MCP
     const stale = runningState.sha256 !== installedState.sha256
     if (!stale) return { ...base, stale: false, reloadable: false, refusal: null }
     const refused = reloadRefusal(runningState, installedState)
-    const refusal = refused.code === null && !HANDOVER_TRANSPORTS.has(transport)
-        ? { code: 'no-handover', reason: `a ${transport} server cannot replace itself without dropping its client, so a relaunch serves the installed bundle` }
+    const refusal = refused.code === null && !HANDOVER_TRANSPORTS.has(kind)
+        ? { code: 'no-handover', reason: `a ${kind} server cannot replace itself without dropping its client, so a relaunch serves the installed bundle` }
         : refused
     return {
         ...base,
