@@ -14,8 +14,6 @@ import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuationReserve
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel, runGit } from './git-adapter.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
-import { tableRow } from './verb-table.js'
-import { undeclaredBodyKeys } from './verb-bodies.js'
 import { execFile } from './process-port.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withCodesearchCompleteness, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING, VERBATIM_TEXT_MARKER } from './response-compact.js'
 
@@ -129,7 +127,10 @@ const FS_READ_RANGE_PAIRS = [['startLine', 'endLine', false], ['start_line', 'en
 const FS_READ_COUNT_KEYS = ['count', 'limit', 'lines']
 const FS_READ_END_KEYS = ['endLine', 'end_line', 'end', 'to']
 const FS_READ_RANGE_BASIS = '1-based, inclusive on both ends'
-const FS_READ_ACCEPTED_KEYS = tableRow('fs_read').aliases
+// Set by preloadVerbTable(); null until then so a use before the preload fails loudly.
+let tableRow = null
+let undeclaredBodyKeys = null
+let FS_READ_ACCEPTED_KEYS = null
 const FS_READ_ACCEPTED_PAIRS = 'startLine/endLine (or start_line/end_line), start/end, start/count, from/to, offset/limit, line/lines'
 const FS_READ_KNOWN_NON_RANGE_KEYS = new Set(['path', 'file', 'allowOutsideRoot', 'allow_outside_root', 'session_id', 'max_bytes', 'maxBytes', 'encoding', 'verbose'])
 const FS_READ_RANGE_LOOKING_PATTERNS = [
@@ -949,7 +950,7 @@ function withCodesearchScalarsCoerced(verb, body) {
 }
 
 const CODESEARCH_DEFAULT_K = 50
-const CODESEARCH_PATH_ALIASES = ['path', ...tableRow('codesearch').body.fields.path.aliases]
+let CODESEARCH_PATH_ALIASES = null
 
 // The guest scopes only the literal fallback of mode dual, so a dual scan runs unscoped here and its ranked hits are kept under the path.
 export function withCodesearchDualPathRouted(verb, body, cwd) {
@@ -1035,7 +1036,7 @@ export function withRuleExcludedMatchesDropped(verb, out) {
 }
 
 const CODESEARCH_DEFAULT_K_MODES = new Set(['literal', 'regex', 'filename'])
-const CODESEARCH_K_ALIASES = ['k', ...tableRow('codesearch').body.fields.k.aliases]
+let CODESEARCH_K_ALIASES = null
 
 export function withCodesearchDefaultK(verb, body) {
     if (verb !== 'codesearch' || !isPlainObject(body)) return { body, defaulted: false }
@@ -2698,6 +2699,22 @@ export function timeoutReply({ spoolDir, verb, requestNumber, inPath, outPath, t
     }
 }
 
+// verb-table.js (zod, the verb schemas) and verb-bodies.js load here, not at module import, so the
+// dispatch subcommand path does not pay for them. Every entry point calls this before a dispatch helper.
+let verbTableLoaded = null
+export function preloadVerbTable() {
+    if (!verbTableLoaded) {
+        verbTableLoaded = Promise.all([import('./verb-table.js'), import('./verb-bodies.js')]).then(([vt, vb]) => {
+            tableRow = vt.tableRow
+            undeclaredBodyKeys = vb.undeclaredBodyKeys
+            FS_READ_ACCEPTED_KEYS = tableRow('fs_read').aliases
+            CODESEARCH_PATH_ALIASES = ['path', ...tableRow('codesearch').body.fields.path.aliases]
+            CODESEARCH_K_ALIASES = ['k', ...tableRow('codesearch').body.fields.k.aliases]
+        })
+    }
+    return verbTableLoaded
+}
+
 export function replyEnvelopeSelfCheck() {
     const fields = {
         spoolDir: path.join(os.tmpdir(), 'gm-mcp-self-check-absent-spool'),
@@ -2800,6 +2817,7 @@ function prdAddCwdRefusal(args) {
 }
 
 export async function gmDispatch(args, signal, responseValueObserver) {
+    await preloadVerbTable()
     if (PRD_ADD_VERBS.has(args?.verb) && !args?.resume_task && !(typeof args?.cwd === 'string' && args.cwd.trim())) return prdAddCwdRefusal(args)
     if ((args?.verb === 'codesearch' || args?.verb === 'code_search') && typeof args?.max_chars !== 'number' && typeof args?.body?.max_chars === 'number') args = { ...args, max_chars: args.body.max_chars }
     if (typeof args?.max_chars === 'number' && !VERBATIM_REPLY_VERBS.has(args?.verb)) {
