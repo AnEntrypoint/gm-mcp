@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { main, flagValue } from './index.js'
-import { gmDispatch, replyEnvelopeSelfCheck } from './dispatch.js'
+import { flagValue } from './argv.js'
+import { gmDispatch, preloadVerbTable, replyEnvelopeSelfCheck } from './dispatch.js'
 import { runDevSync } from './dev-sync.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { runningBundle } from './bundle-drift.js'
@@ -244,7 +244,8 @@ const COMMANDS = {
         console.log(JSON.stringify(report, null, 2))
         return 0
     },
-    'self-check': () => {
+    'self-check': async () => {
+        await preloadVerbTable()
         const envelopes = replyEnvelopeSelfCheck()
         console.log(JSON.stringify(envelopes, null, 2))
         return Object.values(envelopes).some((reply) => reply.diagnostics_failed !== undefined) ? 1 : 0
@@ -425,6 +426,7 @@ if (command && COMMANDS[command]) {
     }
 }
 
+const { main } = await import('./index.js')
 main().catch((e) => {
     console.error(e)
     const dispatchNote = e?.dispatch_id ? ` dispatch_id=${e.dispatch_id}` : ''

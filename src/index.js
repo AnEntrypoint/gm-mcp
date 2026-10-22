@@ -16,7 +16,7 @@ import { installSpoolPort } from './spool-port.js'
 import { flagValue } from './argv.js'
 import { setServingTransport } from './bundle-drift.js'
 import { nodeSpoolPort } from './spool-port-node.js'
-import { inflightDispatchCount } from './dispatch.js'
+import { inflightDispatchCount, preloadVerbTable } from './dispatch.js'
 import { takeFastTransport } from './fast-stdio.js'
 
 installSpoolPort(nodeSpoolPort)
@@ -99,6 +99,7 @@ function exitIdleStaleRelay(state) {
 }
 
 export async function main() {
+    await preloadVerbTable()
     if (wantsHttpTransport()) {
         setServingTransport('http')
         const { host, port } = httpListenOptions()
