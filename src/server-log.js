@@ -119,7 +119,7 @@ export function appendDiagnostic(event, fields = {}) {
             }
             return record
         }
-        mkdirSync(path.dirname(file), { recursive: true })
+        mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
         const summary = admission.suppressed > 0
             ? `${JSON.stringify({ ts, pid: process.pid, event: 'repeat-suppressed', of: event, count: admission.suppressed, window_ms: REPEAT_WINDOW_MS, ...(admission.dispatch_id !== undefined ? { dispatch_id: admission.dispatch_id } : {}) })}
 `

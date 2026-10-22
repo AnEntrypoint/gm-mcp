@@ -88,7 +88,7 @@ export function recordChild({ root = null, pid, kind = 'child', verb = null, dis
     }
     const file = root ? projectLedgerPath(root) : globalLedgerPath()
     try {
-        mkdirSync(path.dirname(file), { recursive: true })
+        mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
     } catch (error) {
         appendDiagnostic('ledger-mkdir-failed', { file, error: describeError(error) })
     }

@@ -45,7 +45,7 @@ function parseStamps(text) {
 function writeStampsIfChanged(stamps, previousText) {
     const next = JSON.stringify(stamps)
     if (next === previousText) return
-    mkdirSync(path.dirname(stampPath()), { recursive: true })
+    mkdirSync(path.dirname(stampPath()), { recursive: true, mode: 0o700 })
     writeFileSync(stampPath(), next, 'utf8')
 }
 
@@ -96,7 +96,7 @@ export function runDevSync(root) {
     })
     const report = { root, ts: Date.now(), results }
     try {
-        mkdirSync(path.dirname(logPath()), { recursive: true })
+        mkdirSync(path.dirname(logPath()), { recursive: true, mode: 0o700 })
         appendFileSync(logPath(), `${JSON.stringify(report)}\n`, 'utf8')
     } catch {
     }

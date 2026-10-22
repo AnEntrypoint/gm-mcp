@@ -88,7 +88,7 @@ export function pinLocalBuild(deployedPath = defaultDeployedPath()) {
         version: parseBundleVersion(bytes) || BUNDLE_VERSION,
         ts: new Date().toISOString(),
     }
-    mkdirSync(path.dirname(pinPath), { recursive: true })
+    mkdirSync(path.dirname(pinPath), { recursive: true, mode: 0o700 })
     writeFileSync(pinPath, `${JSON.stringify(pin, null, 2)}\n`, 'utf8')
     return pin
 }

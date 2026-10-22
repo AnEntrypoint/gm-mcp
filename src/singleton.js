@@ -96,7 +96,7 @@ function readStateFile(filePath, port = null) {
 
 function writeStateFile(filePath, state) {
     try {
-        mkdirSync(path.dirname(filePath), { recursive: true })
+        mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 })
         const tempPath = `${filePath}.${process.pid}.tmp`
         writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
         renameSync(tempPath, filePath)
@@ -165,7 +165,7 @@ export async function waitForHealth(port, timeoutMs, excludePid = null) {
 function childStdio() {
     try {
         const file = logFilePath()
-        mkdirSync(path.dirname(file), { recursive: true })
+        mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
         const fd = openSync(file, 'a')
         return { stdio: ['ignore', fd, fd], fd }
     } catch {
@@ -746,7 +746,7 @@ function spawnClaimPath(name, port) {
 
 export function claimSpawn(name, port) {
     const file = spawnClaimPath(name, port)
-    mkdirSync(agentplugDir(), { recursive: true })
+    mkdirSync(agentplugDir(), { recursive: true, mode: 0o700 })
     for (let attempt = 0; attempt < 2; attempt++) {
         try {
             writeFileSync(file, String(Date.now()), { flag: EXCLUSIVE_CREATE_FLAG })
