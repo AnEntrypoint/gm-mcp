@@ -83,3 +83,8 @@ jobs:
 
       - name: verb registry contract
         run: node scripts/verbs-witness.mjs
+
+      - name: windows reap spawn witness (powershell.exe spawns per reap pass)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: node scripts/witness-reap-spawns.mjs
