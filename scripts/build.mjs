@@ -31,16 +31,40 @@ export function bundleDepManifest(root) {
     return out
 }
 
+// The served file is a small cold-start entry (src/fast-entry.js) that embeds the full CLI bundle as a
+// string and imports it as a data: module only when a request needs the SDK. Parsing the full bundle
+// as a script cost ~50 ms of every cold start; the string literal costs almost nothing to scan.
 export async function buildBundle(write = false, root = repoRoot) {
     const esbuild = await import('esbuild')
-    return esbuild.build({
+    const versionVars = `var BUNDLE_VERSION = ${JSON.stringify(bundleVersion(root))};\nvar BUNDLE_SRC_SHA256 = ${JSON.stringify(srcSha256(root))};\nvar BUNDLE_DEPS = ${JSON.stringify(bundleDepManifest(root))};`
+    const full = await esbuild.build({
         entryPoints: [path.join(root, 'src', 'cli.js')],
         bundle: true,
         minify: true,
         platform: 'node',
         format: 'esm',
         external: ['node:*'],
-        banner: { js: `#!/usr/bin/env node\nvar BUNDLE_VERSION = ${JSON.stringify(bundleVersion(root))};\nvar BUNDLE_SRC_SHA256 = ${JSON.stringify(srcSha256(root))};\nvar BUNDLE_DEPS = ${JSON.stringify(bundleDepManifest(root))};` },
+        define: { 'import.meta.url': 'globalThis.__gmBundleUrl' },
+        banner: { js: versionVars },
+        write: false,
+    })
+    const fullSource = full.outputFiles[0].text
+    const fullPlugin = {
+        name: 'gm-full-bundle',
+        setup(build) {
+            build.onResolve({ filter: /^gm:full-bundle$/ }, () => ({ path: 'gm:full-bundle', namespace: 'gm-full' }))
+            build.onLoad({ filter: /.*/, namespace: 'gm-full' }, () => ({ contents: `export default ${JSON.stringify(fullSource)}`, loader: 'js' }))
+        },
+    }
+    return esbuild.build({
+        entryPoints: [path.join(root, 'src', 'fast-entry.js')],
+        bundle: true,
+        minify: true,
+        platform: 'node',
+        format: 'esm',
+        external: ['node:*'],
+        plugins: [fullPlugin],
+        banner: { js: `#!/usr/bin/env node\n${versionVars}` },
         preserveSymlinks: true,
         outfile: path.join(root, 'bin', 'gm-mcp-server.js'),
         write,

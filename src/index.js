@@ -17,6 +17,7 @@ import { flagValue } from './argv.js'
 import { setServingTransport } from './bundle-drift.js'
 import { nodeSpoolPort } from './spool-port-node.js'
 import { inflightDispatchCount } from './dispatch.js'
+import { takeFastTransport } from './fast-stdio.js'
 
 installSpoolPort(nodeSpoolPort)
 
@@ -126,7 +127,7 @@ export async function main() {
     }
     appendDiagnostic('stdio-standalone-start', { pid: process.pid })
     const server = createServer()
-    const transport = new StdioServerTransport()
+    const transport = takeFastTransport() ?? new StdioServerTransport()
 
     const keepAlive = setInterval(() => {}, 1 << 30)
 
@@ -139,4 +140,4 @@ export async function main() {
     runReleaseBridgeInBackground()
 }
 
-export { flagValue }
+export { flagValue }
