@@ -64,6 +64,10 @@ const DISPATCH_VALUE_FLAGS = new Set(['body', 'raw', 'cwd', 'session-id', 'timeo
 
 const NO_IGNORE_VERBS = new Set(['grep', 'rg', 'codesearch', 'code_search'])
 
+// The awaited dispatch seed's own bound: short enough that a held spawn claim cannot stall a dispatch,
+// long enough that a server already binding the port answers /health.
+const DISPATCH_SEED_WAIT_MS = 250
+
 function flagNameOf(arg) {
     const name = arg.slice(2)
     const eq = name.indexOf('=')
@@ -183,10 +187,6 @@ function parseDispatchArgv(argv) {
 }
 
 async function dispatchCommand() {
-    await ensureHttpSingleton({ port: defaultHttpPort(), wait: false }).catch((error) => {
-        appendDiagnostic('dispatch-singleton-failed', { error: describeError(error) })
-    })
-
     const argv = process.argv.slice(3)
     if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
         console.log(DISPATCH_USAGE)
@@ -200,6 +200,15 @@ async function dispatchCommand() {
         console.error(`${parsed.usageError} usage_id=${usageId} log=${logFilePath()}`)
         return 2
     }
+
+    // Seeded after argv parsing: --help and a usage error run no dispatch and serve no MCP client, so
+    // seeding there only pays its cost for a command that ends without one. Every dispatch that does run
+    // still awaits one seeding with wait: false before gmDispatch, as AGENTS.md documents. The seed caps
+    // its own wait: it exists so a LATER MCP client finds a server on the port, and a dispatch gains
+    // nothing from sitting behind another starter's spawn claim for the full startup wait (20 s).
+    await ensureHttpSingleton({ port: defaultHttpPort(), wait: false, timeoutMs: DISPATCH_SEED_WAIT_MS }).catch((error) => {
+        appendDiagnostic('dispatch-singleton-failed', { error: describeError(error) })
+    })
 
     const text = await gmDispatch(parsed.args)
     process.stdout.write(text.endsWith('\n') ? text : `${text}\n`)
