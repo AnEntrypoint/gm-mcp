@@ -389,25 +389,16 @@ export function netstatEstablishedLocalPorts(text, win) {
     return locals.length === 0 ? null : locals
 }
 
-// Windows parent pids come from one process-table snapshot shared by a reap pass (TTL 5 s), not one
-// PowerShell Get-CimInstance cold start per pid: N candidates cost one powershell.exe spawn, not N.
-const WINDOWS_PARENT_SNAPSHOT_TTL_MS = 5_000
-let windowsParentSnapshot = null
-
-async function windowsParentPidOf(wanted) {
-    const now = Date.now()
-    if (windowsParentSnapshot === null || now - windowsParentSnapshot.at > WINDOWS_PARENT_SNAPSHOT_TTL_MS) {
-        windowsParentSnapshot = { at: now, rows: await readProcessTableAsync() }
-    }
-    const row = windowsParentSnapshot.rows.find((entry) => Number(entry.pid) === wanted)
-    const parsed = Number(row?.ppid)
-    return Number.isInteger(parsed) && parsed > 0 ? parsed : null
-}
-
+// Windows parent pids come from the shared process-table read (readProcessTableAsync), not one PowerShell
+// Get-CimInstance cold start per pid: a reap pass costs one powershell.exe spawn however many candidates it has.
 export async function parentPidOf(pid) {
     const wanted = Number(pid)
     if (!Number.isInteger(wanted) || wanted <= 0) return null
-    if (process.platform === 'win32') return windowsParentPidOf(wanted)
+    if (process.platform === 'win32') {
+        const row = (await readProcessTableAsync()).find((entry) => Number(entry.pid) === wanted)
+        const parsed = Number(row?.ppid)
+        return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+    }
     const text = await execFileText('ps', ['-o', 'ppid=', '-p', String(wanted)], {
         windowsHide: true,
         timeout: 10_000,

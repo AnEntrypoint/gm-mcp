@@ -137,12 +137,33 @@ async function windowsRowsAsync(exec = null) {
     return parseWindows(text)
 }
 
+// On win32 every table read is one powershell.exe cold start. Reads inside WINDOWS_TABLE_TTL_MS share one promise, so a reap
+// pass (reapReport's table, commandLineOf, parentPidOf) spawns powershell once, and concurrent callers share that spawn.
+const WINDOWS_TABLE_TTL_MS = 5_000
+let windowsTable = null
+let windowsTableSpawns = 0
+
+export function windowsTableSpawnCount() {
+    return windowsTableSpawns
+}
+
+function sharedWindowsRows() {
+    const now = Date.now()
+    if (windowsTable === null || now - windowsTable.at > WINDOWS_TABLE_TTL_MS) {
+        windowsTableSpawns += 1
+        windowsTable = { at: now, rows: windowsRowsAsync() }
+    }
+    return windowsTable.rows
+}
+
 // The same rows as readProcessTable, read through async child processes: callers on the event loop (leak-reaper) use this
 // so a slow ps or powershell never blocks heartbeats or dispatches.
 export async function readProcessTableAsync({ platform = process.platform, exec = null } = {}) {
     lastError = null
     try {
-        return platform === 'win32' ? await windowsRowsAsync(exec) : await posixRowsAsync(exec)
+        if (platform !== 'win32') return await posixRowsAsync(exec)
+        if (exec !== null) return await windowsRowsAsync(exec)
+        return (await sharedWindowsRows()).slice()
     } catch (error) {
         lastError = failureReason(error)
         return []

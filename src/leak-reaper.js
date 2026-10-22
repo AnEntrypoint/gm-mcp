@@ -7,7 +7,7 @@ import { attributePid, attributeRows } from './child-ledger.js'
 import { pidAlive } from './dispatch.js'
 import { classifyGmServerCommand } from './gm-cmdline.js'
 import { listeningPidOf, portAcceptsConnection } from './ports.js'
-import { readProcessTableAsync } from './process-table.js'
+import { readProcessTableAsync, windowsTableSpawnCount } from './process-table.js'
 import {
     establishedConnectionCount,
     instanceFilePath,
@@ -73,15 +73,9 @@ function pruneFirstSeenParents(livePids) {
     for (const pid of firstSeenParent.keys()) if (!live.has(pid)) firstSeenParent.delete(pid)
 }
 
-const WINDOWS_SNAPSHOT_TTL_MS = 5_000
-let windowsSnapshot = null
-
+// The shared win32 process-table read (process-table.js) answers this, so a reap pass spawns powershell once.
 async function windowsCommandByPid() {
-    const now = Date.now()
-    if (windowsSnapshot === null || now - windowsSnapshot.at > WINDOWS_SNAPSHOT_TTL_MS) {
-        windowsSnapshot = { at: now, byPid: new Map((await readProcessTableAsync()).map((row) => [Number(row.pid), row.command])) }
-    }
-    return windowsSnapshot.byPid
+    return new Map((await readProcessTableAsync()).map((row) => [Number(row.pid), row.command]))
 }
 
 const execFileAsync = promisify(execFile)
@@ -418,6 +412,8 @@ function removeFile(filePath) {
 }
 
 export async function reapReport({ roots = [], apply = false, liveSessionIds = null, kinds = DEFAULT_LEAK_KINDS, now = Date.now(), unattributed = unattributedScanEnabled() } = {}) {
+    const started = Date.now()
+    const tableSpawnsBefore = windowsTableSpawnCount()
     const unattributedEnabled = unattributed !== false && unattributed !== null
     const table = Array.isArray(unattributed) ? unattributed : (unattributedEnabled ? await readProcessTableAsync() : [])
     const findings = [
@@ -447,6 +443,8 @@ export async function reapReport({ roots = [], apply = false, liveSessionIds = n
         counts,
         unattributed_scan: { enabled: unattributedEnabled, scanned: table.length },
         generated_at: new Date(now).toISOString(),
+        elapsed_ms: Date.now() - started,
+        windows_table_spawns: windowsTableSpawnCount() - tableSpawnsBefore,
     }
 }
 
