@@ -727,7 +727,7 @@ function publishSpoolRequest(inDir, inPath, task, body) {
         const tempPath = path.join(inDir, `.${task}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`)
         const longest = Math.max(inPath.length, tempPath.length)
         if (process.platform === 'win32' && longest > WINDOWS_MAX_PATH) {
-            throw new Error(`spool request path would be ${longest} characters, over the Windows MAX_PATH limit of ${WINDOWS_MAX_PATH}; move the project to a shorter root`)
+            return { ok: false, error_code: 'path_too_long', wrote_no_new_dispatch: true, error: `spool request path would be ${longest} characters, over the Windows MAX_PATH limit of ${WINDOWS_MAX_PATH}; no request was published, so no dispatch was made -- move the project to a shorter root` }
         }
         try {
             fs.mkdirSync(inDir, { recursive: true, mode: SPOOL_DIR_MODE })
@@ -2454,7 +2454,7 @@ function withDispatchWait(out, waitedMs, claimedAtMs, daemonSpanMs) {
     const admitted = Number(starved ? out.waited_ms : out.admission_waited_ms)
     const admissionMs = Number.isFinite(admitted) && admitted > 0 ? Math.min(admitted, waitedMs) : 0
     const lane = admissionStarved
-        ? { admission_kind: out.admission_kind, admission_in_flight: out.admission_in_flight, admission_limit: out.admission_limit, admission_holders: out.admission_holders }
+        ? { admission_kind: out.admission_kind, admission_in_flight: out.admission_in_flight, admission_limit: out.admission_limit, admission_holders: out.admission_holders, admission_holders_detail: out.admission_holders_detail, admission_queue_depth: out.admission_queue_depth, lane_queue_depth: out.lane_queue_depth }
         : laneStarved
             ? { lane_waiters: out.lane_waiters, lane_position: out.lane_position, lane_holder_task: out.lane_holder_task, lane_holder_verb: out.lane_holder_verb, lane_holder_held_ms: out.lane_holder_held_ms }
             : {}
