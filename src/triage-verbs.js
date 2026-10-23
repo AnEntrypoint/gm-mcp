@@ -634,7 +634,8 @@ function diskLine(target) {
     const avail = stats.bavail * stats.bsize
     const size = stats.blocks * stats.bsize
     const pct = used + avail > 0 ? Math.ceil((used * 100) / (used + avail)) : 0
-    return `disk ${target} used ${mb(used)}M of ${mb(size)}M (${pct}%)`
+    // statfs reports bytes; mb() takes kilobytes (meminfo's unit), so divide by 1 MiB here.
+    return `disk ${target} used ${Math.trunc(used / 1048576)}M of ${Math.trunc(size / 1048576)}M (${pct}%)`
 }
 
 // Process groups as the script's awk counted them: the executable is the first word's basename; the last matching rule names the group.
