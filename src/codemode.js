@@ -169,6 +169,21 @@ function proseFieldFor(verb) {
     return 'description' in schema.fields ? 'description' : 'body'
 }
 
+// The envelope key `body` and a payload key of the same name collide: a caller that nests the fields writes
+// body:{id, subject, body}, where the inner `body` is row prose, not a verb field. A top-level prose `body`
+// already lands on the verb's prose field, so the nested one hoists to it unless that field is already taken.
+// Only a string hoists: an object there is a second dispatch body, which the refusal names instead.
+function withoutNestedBodyKey(verb, folded) {
+    const body = folded?.body
+    if (!isPlainObject(body) || !('body' in body)) return folded
+    const schema = verbBodySchema(verb)
+    if (!schema.declared || 'body' in schema.fields) return folded
+    const proseField = proseFieldFor(verb)
+    if (proseField === 'body' || body[proseField] !== undefined || typeof body.body !== 'string') return folded
+    const { body: prose, ...rest } = body
+    return { ...folded, body: { ...rest, [proseField]: prose } }
+}
+
 function canonicalFsReadArgs(verb, folded) {
     if (verb !== 'fs_read' || !isPlainObject(folded?.body)) return folded
     return { ...folded, body: fsReadRangeCanonicalBody(verb, folded.body) }
@@ -196,8 +211,8 @@ export function foldVerbArgs(tool, args) {
         const prose = extra?.[proseField] !== undefined ? [extra[proseField], named].join('\n\n') : named
         return { ...envelope, body: { ...extra, [proseField]: prose } }
     }
-    if (extra === null) return args
-    if (named === undefined) return { ...envelope, body: extra }
+    if (extra === null) return withoutNestedBodyKey(tool.verb, args)
+    if (named === undefined) return withoutNestedBodyKey(tool.verb, { ...envelope, body: extra })
     let body = named
     if (typeof body === 'string') {
         try {
@@ -207,7 +222,7 @@ export function foldVerbArgs(tool, args) {
         }
     }
     if (!isPlainObject(body)) return envelope
-    return { ...envelope, body: { ...extra, ...body } }
+    return withoutNestedBodyKey(tool.verb, { ...envelope, body: { ...extra, ...body } })
 }
 
 function withoutEchoedSession(args, sessionId) {
@@ -242,9 +257,14 @@ export function refuseUndeclaredBodyKeys(name, verb, folded) {
     const cwdHint = verb === 'git_pull' ? ' -- git_pull has no path key: name the checkout with cwd=<directory> (a submodule directory works)' : ''
     const prdHint = verb === 'prd-list' ? ' -- prd-list has no text search (no query key): filter by id, status, limit, offset, full or brief, then match subject client-side' : ''
     const outputHint = verb === 'grep' && unknown.includes('output') ? ' -- grep spells this key output_mode (content|files_with_matches|count), not output' : ''
+    const shape = canonical.slice(0, 3).map((field) => `${field}:"..."`).join(', ')
+    // A payload key named after the envelope key: name the shape that works instead of leaving the caller to guess.
+    const bodyKeyHint = unknown.includes('body') && !('body' in schema.fields)
+        ? ` -- "body" inside body is the dispatch envelope key, not a ${verb} field: send ${shape} flat or as one body object (body:{${shape}})${proseFieldFor(verb) === 'body' ? '' : `, and put long prose in ${proseFieldFor(verb)} (a top-level body:"<text>" is already accepted as ${proseFieldFor(verb)})`}`
+        : ''
     const aliasSpellings = Object.entries(schema.fields).flatMap(([field, spec]) => (spec.aliases ?? []).map((alias) => `${alias}=${field}`))
     const aliasClause = aliasSpellings.length > 0 ? ` -- alias spellings: ${aliasSpellings.join(', ')}` : ''
-    throw new Error(`${name} body has undeclared key ${unknown.join(', ')} -- declared body fields: ${canonical.join(', ')}${aliasClause}${hint}${outputHint}${cwdHint}${prdHint}`)
+    throw new Error(`${name} body has undeclared key ${unknown.join(', ')} -- declared body fields: ${canonical.join(', ')}${aliasClause}${hint}${outputHint}${bodyKeyHint}${cwdHint}${prdHint}`)
 }
 
 export function refuseMissingRequiredBodyKeys(name, verb, folded) {
