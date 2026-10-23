@@ -778,6 +778,12 @@ async function resourcesVerb(args) {
     return flagged > 0 ? refused('gm_listener_non_loopback', result, [], lines) : ok(result, [], lines)
 }
 
+// Called by gm-mcp after it respawns a project's runner. The runner that owned those requests is gone, so each request it
+// left in flight has no live owner. spoolOrphans still checks liveness and never moves a live request.
+export function sweepOrphansAfterRespawn(root) {
+    return spoolOrphans({ roots: [root], dry_run: false })
+}
+
 // ---------------------------------------------------------------- registry
 
 export const TRIAGE_VERBS = [

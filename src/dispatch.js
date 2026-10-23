@@ -13,6 +13,7 @@ import { bundleDrift, bundleStalenessAnnouncement } from './bundle-drift.js'
 import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuationReserveFor, continuedReply, setContinuationStopped } from './continuation.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel, runGit } from './git-adapter.js'
+import { sweepOrphansAfterRespawn } from './triage-verbs.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { execFile } from './process-port.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withCodesearchCompleteness, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING, VERBATIM_TEXT_MARKER } from './response-compact.js'
@@ -1773,7 +1774,13 @@ function ensureSpoolRunnerRunning(root) {
     const now = Date.now()
     if (!ensureSpoolDecision(root, now)) return
     const child = spawnRunnerDetached(root, now)
-    if (child) trackRunnerEnsureChild(root, child, now)
+    if (!child) return
+    trackRunnerEnsureChild(root, child, now)
+    // Background: the sweep reads the process table, and a dispatch must not wait for it.
+    sweepOrphansAfterRespawn(root).then(
+        (answer) => appendDiagnostic('spool-orphans-swept', { root, exit: answer.exit, lines: (answer.lines ?? []).slice(0, 20) }),
+        (error) => appendDiagnostic('spool-orphans-sweep-failed', { root, error: String(error?.message ?? error) }),
+    )
 }
 
 export function recordRunnerEnsureInflight(root, entry) {
