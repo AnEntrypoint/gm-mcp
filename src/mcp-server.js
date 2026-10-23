@@ -9,6 +9,7 @@ import { RUNNER_REGISTRY_VERBS, editDistance, verbToolName } from './verbs.js'
 import { VERB_TABLE, runnerVerb, tableRow, verbDescriptionLead, wireVerb } from './verb-table.js'
 import { registerCodeMode } from './codemode.js'
 import { renderBodyHint, bodyShapeLine } from './verb-bodies.js'
+import { TRIAGE_VERBS } from './triage-verbs.js'
 
 const numberLike = z.union([z.number(), z.string()])
 
@@ -239,6 +240,8 @@ export function createServer() {
             verb
         )
     }
+
+    for (const triage of TRIAGE_VERBS) define(triage.name, { description: triage.description, inputSchema: triage.inputSchema }, triage.handler)
 
     server.registerResource(
         'browser-api',
