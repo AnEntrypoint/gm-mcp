@@ -2069,9 +2069,6 @@ function heartbeatAgeMs(spoolDir) {
     return timestampAgeMs(status?.ts)
 }
 
-function daemonRestartCommand(root) {
-    return `"${RUNNER_PATH}" spool   (run with cwd ${path.resolve(root)}; the launcher detaches agentplug-runner daemon for this project)`
-}
 
 function coldProjectLiveness() {
     const shared = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
@@ -2129,7 +2126,7 @@ export function readDaemonLiveness(spoolDir) {
             ? `no live daemon heartbeat for this project and the agentplug-runner binary is not installed at ${RUNNER_PATH} -- nothing can claim this dispatch until the runner is installed`
             : pidAliveFlag === false
                 ? `the daemon process that last swept this project (pid ${pid}) is gone -- the daemon recycles itself on idle/memory pressure and on a runner version handoff, and is restarted on demand; this call already asked for a replacement, so a dispatch submitted now waits for its cold start (wasm compile, tens of seconds) instead of for a queue`
-                : `daemon heartbeat is ${heartbeatAgeMs} ms stale (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) -- it is down, hung, or has not registered this project; its own log is ${GLOBAL_DAEMON_LOG_PATH} (this project's spool log is ${path.join(spoolDir, '.watcher.log')}) and it restarts with ${daemonRestartCommand(projectRootOfSpool(spoolDir))}; this is not necessarily this dispatch's fault`
+                : `daemon heartbeat is ${heartbeatAgeMs} ms stale (alive means under ${DAEMON_HEARTBEAT_STALE_MS} ms) -- it is down, hung, or has not registered this project; its own log is ${GLOBAL_DAEMON_LOG_PATH} (this project's spool log is ${path.join(spoolDir, '.watcher.log')}) and gm-mcp starts it on the next dispatch; this is not necessarily this dispatch's fault`
         : busy
             ? 'daemon is alive and still actively working on this project'
             : staleProjectHeartbeat && pidAliveFlag !== true
@@ -2157,9 +2154,6 @@ export function readDaemonLiveness(spoolDir) {
     }
     const stuck = stuckQueueReport(spoolDir)
     if (stuck) Object.assign(liveness, stuck)
-    // Its own short field: `note` is prose that the 400-char inline budget cuts, and the cut used to land
-    // inside this clause, so the one command that clears a stale daemon was the part that got dropped.
-    liveness.restart_command = daemonRestartCommand(projectRootOfSpool(spoolDir))
     return liveness
 }
 
@@ -2253,7 +2247,7 @@ export async function daemonNotRunning(root, spoolDir, signal, budgetMs = Infini
         daemon_log: GLOBAL_DAEMON_LOG_PATH,
         spool_log: path.join(spoolDir, '.watcher.log'),
         ...(stuck ?? {}),
-        note: `no daemon process exists on this machine: it did not come back within ${graceMs} ms of asking for a runner (a cold start compiles the plugin wasm, so it is given ${DAEMON_COLD_START_GRACE_MS} ms), so no dispatch was written -- it would sit queued_not_yet_claimed and only fail at the poll timeout. Restart it and dispatch again: ${daemonRestartCommand(root)}`,
+        note: `no daemon process exists on this machine: it did not come back within ${graceMs} ms of asking for a runner (a cold start compiles the plugin wasm, so it is given ${DAEMON_COLD_START_GRACE_MS} ms), so no dispatch was written -- it would sit queued_not_yet_claimed and only fail at the poll timeout. gm-mcp starts it on the next dispatch, so dispatch again.`,
     }
 }
 
