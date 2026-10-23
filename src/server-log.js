@@ -137,7 +137,15 @@ export function appendDiagnostic(event, fields = {}) {
     return record
 }
 
+const DESCRIBE_ERROR_MAX_CHARS = 8000
+const DATA_URL_PAYLOAD = /data:[^,\s'"`)]*;base64,[A-Za-z0-9+/=]+/g
+
 export function describeError(error) {
-    if (error instanceof Error) return error.stack || `${error.name}: ${error.message}`
-    return String(error)
+    const text = error instanceof Error ? (error.stack || `${error.name}: ${error.message}`) : String(error)
+    // The bundle runs as a data: module, so each stack frame embeds the whole bundle as base64: one throw makes a stack of megabytes, and the reply path that scans it then overflows.
+    const collapsed = text.includes(';base64,')
+        ? text.replace(DATA_URL_PAYLOAD, (match) => `${match.slice(0, match.indexOf(',') + 1)}<${match.length} chars omitted>`)
+        : text
+    if (collapsed.length <= DESCRIBE_ERROR_MAX_CHARS) return collapsed
+    return `${collapsed.slice(0, DESCRIBE_ERROR_MAX_CHARS)}\n... ${collapsed.length - DESCRIBE_ERROR_MAX_CHARS} more char(s) omitted`
 }
