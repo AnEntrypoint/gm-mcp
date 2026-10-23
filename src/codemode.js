@@ -359,22 +359,13 @@ function listSummary(row, maxDesc) {
 function capCodemodeText(text, cap, reserve = 0) {
     const room = Math.max(1, cap - reserve)
     if (text.length <= room) return text
-    // Every scan below is bounded: a multi-megabyte text would backtrack the spool pattern quadratically and overflow the regexp stack.
     const scope = scanScope(text)
-    const lastBefore = (pattern, group) => {
-        let found = null
-        for (const m of scope.matchAll(pattern)) {
-            if (m.index >= room) break
-            found = m[group]
-        }
-        return found
-    }
     // An array or object return is JSON text: a reply header there follows a literal backslash-n, a quote or a comma rather than a line break.
     const dispatchHits = [...scope.matchAll(/(?:^|\\n|["\[,\s])[ \t-]*dispatch_id: ([\w-]+)|--- partial [^\n]*? dispatch_id: ([\w-]+)/gm)].filter((m) => m.index < room)
     const lastHit = dispatchHits.at(-1)
     const dispatchId = lastHit ? (lastHit[1] ?? lastHit[2]) : null
     // A spool path that sits past the cut (a cut partial section's spill notice, for one) is still the path the caller needs, so fall back to the full text.
-    const spoolFile = lastBefore(new RegExp(SPOOL_FILE_PATTERN.source, 'g'), 0) ?? scope.match(SPOOL_FILE_PATTERN)?.[0] ?? null
+    const spoolFile = spoolFileAt(scope, room) ?? spoolFileAt(scope, scope.length, false) ?? null
     const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${cap}\ndispatch_id: ${dispatchId ?? 'not reported'}\nspool_file: ${spoolFile ?? 'not reported'}\n`
     const flagged = text.replace(/^(\s*)truncated: false$/gm, "$1truncated: true")
     return `${flagged.slice(0, Math.max(0, room - notice.length))}${notice}`
@@ -387,7 +378,36 @@ function capWithContinuation(session_id, text, cap) {
 const PARTIAL_REPLY_MIN_CHARS = 200
 const PARTIAL_BLOCK_OVERHEAD_CHARS = 256
 const SCAN_SCOPE_MAX_CHARS = 262144
-const SPOOL_FILE_PATTERN = /[^\s'"`()[\]]*\.gm\/exec-spool\/out\/[^\s'"`()[\]]+/
+const SPOOL_PATH_LITERAL = '.gm/exec-spool/out/'
+const SPOOL_PATH_DELIMITER = /[\s'"`()[\]]/
+
+// The spool path of a reply, found in one linear pass. The regexp this replaced opened with
+// [^\s'"`()[\]]*, so every start position backtracked a whole unbroken token: a reply carrying one
+// long token scanned quadratically and held an MCP session at 100% CPU for hours with no reply and
+// no I/O, which reads to the client as a tool call that never returns. indexOf plus a delimiter walk
+// finds the same token -- delimiters to delimiters around the literal -- in time linear in the scope.
+function spoolFileAt(text, limit, last = true) {
+    const head = limit >= text.length ? text : text.slice(0, limit)
+    const hits = []
+    for (let at = head.indexOf(SPOOL_PATH_LITERAL); at >= 0; at = head.indexOf(SPOOL_PATH_LITERAL, at + 1)) hits.push(at)
+    if (last) hits.reverse()
+    for (const at of hits) {
+        const token = spoolTokenAt(text, at)
+        if (token !== null) return token
+    }
+    return null
+}
+
+// Delimiters to delimiters around one literal occurrence: the same span the old pattern's leading and
+// trailing [^\s'"`()[\]] runs produced. Null when the literal ends the token, which carried no path.
+function spoolTokenAt(text, at) {
+    let end = at + SPOOL_PATH_LITERAL.length
+    if (end >= text.length || SPOOL_PATH_DELIMITER.test(text[end])) return null
+    let start = at
+    while (start > 0 && !SPOOL_PATH_DELIMITER.test(text[start - 1])) start -= 1
+    while (end < text.length && !SPOOL_PATH_DELIMITER.test(text[end])) end += 1
+    return text.slice(start, end)
+}
 
 function scanScope(text) {
     return text.length <= SCAN_SCOPE_MAX_CHARS ? text : text.slice(0, SCAN_SCOPE_MAX_CHARS)
@@ -410,7 +430,8 @@ function spillPartialReply(root, diagnosticId, index, text) {
 
 function completedReplyText(text, budget, spill = () => null) {
     if (text.length <= budget) return text
-    const spool = scanScope(text).match(SPOOL_FILE_PATTERN)?.[0] ?? spill() ?? 'not reported'
+    const scope = scanScope(text)
+    const spool = spoolFileAt(scope, scope.length, false) ?? spill() ?? 'not reported'
     const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${budget}\nspool_file: ${spool}\n`
     return `${text.slice(0, Math.max(0, budget - notice.length))}${notice}`
 }
