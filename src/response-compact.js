@@ -138,7 +138,7 @@ export function withSearchIncompleteness(out) {
             ...out,
         }
     }
-    const reasons = incompleteScanReasons(source)
+    const reasons = verb === 'codesearch' ? codesearchIncompleteReasons(out) : incompleteScanReasons(source)
     if (!reasons.length || !searchShowsNoHits(source)) return out
     return {
         [SEARCH_UNPROVEN_KEY]: `unproven_zero: scan INCOMPLETE (${reasons.join(', ')}); this zero is NOT a finding; see gm.help`,
