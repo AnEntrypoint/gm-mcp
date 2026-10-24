@@ -12,6 +12,7 @@ import { appendDiagnostic, describeError } from './server-log.js'
 
 // One budget for each live read. The status, git and next-row reads each get it, and they run together.
 export const LIVE_BUDGET_MS = 1500
+const BOOTSTRAP_BUDGET_MS = 4000
 export const NO_PROJECT_ROOT_TEXT = 'no project root given; pass cwd to include live state'
 const UNKNOWN_RUNNER = { alive: null, heartbeat_age_ms: null, heartbeat_stale: null }
 
@@ -20,7 +21,7 @@ function clipText(value) {
     return flat.length > BOOTSTRAP_ERROR_CHARS ? `${flat.slice(0, BOOTSTRAP_ERROR_CHARS - 3)}...` : flat
 }
 
-const timedOut = (what) => `${what} did not answer within ${LIVE_BUDGET_MS} ms`
+const timedOut = (what, ms = LIVE_BUDGET_MS) => `${what} did not answer within ${ms} ms`
 
 // {ok, data} with the reply's data field (or the document itself), or {ok: false, error} for a non-document or a failure.
 function payloadOf(text) {
@@ -48,22 +49,27 @@ function runnerOf(text) {
 }
 
 // {ok, runner} from one status read under the live budget. A read that misses the budget or fails is not ok.
-async function statusRead(dispatch, { cwd, session_id }) {
+async function statusRead(dispatch, { cwd, session_id, budgetMs = LIVE_BUDGET_MS }) {
     const lookup = dispatch({ verb: 'status', body: {}, cwd, session_id, prd_feed: true })
-    const reply = await withinBudget(lookup, LIVE_BUDGET_MS, null)
-    if (reply === null) return { ok: false, error: timedOut('status read') }
+    const reply = await withinBudget(lookup, budgetMs, null)
+    if (reply === null) return { ok: false, error: timedOut('status read', budgetMs) }
     return runnerOf(reply)
 }
 
 
 // {count, next, error} from a next-row lookup. count prefers the lookup's pending total, then the reply's own count.
-function pendingOf(found, pendingRows) {
+function pendingOf(found, pendingRows, budgetMs = LIVE_BUDGET_MS) {
     const count = found.pending_total ?? pendingRows ?? null
-    if (found.next_prd === undefined) return { count, next: null, error: timedOut('next pending row lookup') }
+    if (found.next_prd === undefined) return { count, next: null, error: timedOut('next pending row lookup', budgetMs) }
     return { count, next: found.next_prd, error: null }
 }
 
-// The bootstrap block for cwd. A feed result is reused when given, so the next-row lookup runs at most once. Never throws.
+async function bootstrapNextRow(dispatch, { cwd, session_id, feed }) {
+    if (feed?.next_prd !== undefined) return feed
+    return nextPrdFor(dispatch, { cwd, session_id, budgetMs: BOOTSTRAP_BUDGET_MS })
+}
+
+// The bootstrap block for cwd. A feed result that answered is reused; a missed or absent one is read again under BOOTSTRAP_BUDGET_MS. Never throws.
 async function bootstrapBlock(dispatch, { cwd, session_id, feed, pendingRows }) {
     const base = {
         server: { version: BUNDLE_VERSION, transport: servingTransportKind() },
@@ -74,10 +80,10 @@ async function bootstrapBlock(dispatch, { cwd, session_id, feed, pendingRows }) 
     }
     try {
         const [status, found] = await Promise.all([
-            statusRead(dispatch, { cwd, session_id }),
-            feed !== undefined ? feed : nextPrdFor(dispatch, { cwd, session_id }),
+            statusRead(dispatch, { cwd, session_id, budgetMs: BOOTSTRAP_BUDGET_MS }),
+            bootstrapNextRow(dispatch, { cwd, session_id, feed }),
         ])
-        const pending = pendingOf(found, pendingRows)
+        const pending = pendingOf(found, pendingRows, BOOTSTRAP_BUDGET_MS)
         const errors = [status.ok ? null : `runner: ${status.error}`, pending.error ? `pending: ${pending.error}` : null].filter(Boolean)
         return {
             ...base,
