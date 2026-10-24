@@ -423,7 +423,7 @@ function gitlinkOf(result) {
     return found === null ? null : found[1]
 }
 
-async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [] }) {
+async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [], retried = false }) {
     const plain = (gitArgs, extra = {}) => run('git', gitArgs, { cwd: repo, ...extra })
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'index') }
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
@@ -502,7 +502,13 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     if (dryRun) return ok(`dry run: built ${sha} on origin/main, secrets check passed, not pushed`, [['commit', sha]], stat)
 
     const pushed = await plain(['push', '-q', 'origin', `${sha}:refs/heads/main`], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
-    if (pushed.status !== 0) return refused('push_refused', 'push refused; nothing landed', [['commit', sha]])
+    if (pushed.status !== 0) {
+        // origin moved between the build and the push: rebase onto the new tip and retry once, keeping the original merge base.
+        if (retried) return refused('push_refused', 'push refused twice; nothing landed', [['commit', sha]])
+        const refetched = await plain(['fetch', '-q', 'origin', 'main'], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
+        if (refetched.status !== 0) return refused('push_refused', 'push refused and refetch failed; nothing landed', [['commit', sha]])
+        return publishLane({ repo, row, message, paths, givenBase: base, dryRun, checker, work, trailers, retried: true })
+    }
     await plain(['fetch', '-q', 'origin', 'main'], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
     const landed = await plain(['merge-base', '--is-ancestor', sha, 'origin/main'])
     if (landed.status === 0) return ok(`published ${sha} on origin/main`, [['commit', sha]], stat)
