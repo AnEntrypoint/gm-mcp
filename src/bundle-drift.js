@@ -123,17 +123,15 @@ export function servingTransportKind() {
     return normalizeTransport(servingTransport)
 }
 
-// The transport arrives from three places (setServingTransport, GM_MCP_TRANSPORT, a caller) in whatever case or
-// padding they carry. It is compared against HANDOVER_TRANSPORTS by exact string, so an untrimmed or upper-case
-// value -- or an empty GM_MCP_TRANSPORT, which `??` does not treat as absent -- would be reported `no-handover`
-// for a transport that does have one, telling the operator a restart is required for a reload that will happen.
+// The transport arrives from setServingTransport or a caller, in any case or padding. It is compared against
+// HANDOVER_TRANSPORTS by exact string, so it is normalised first; an unset value is stdio.
 function normalizeTransport(value) {
     const raw = (typeof value === 'string' ? value : '').trim().toLowerCase()
     return raw === '' ? 'stdio' : raw
 }
 
 export function bundleDrift({ transport } = {}) {
-    const kind = normalizeTransport(transport ?? servingTransport ?? process.env.GM_MCP_TRANSPORT)
+    const kind = normalizeTransport(transport ?? servingTransport)
     const runningState = runningBundle()
     const installedState = installedBundle()
     const base = {
