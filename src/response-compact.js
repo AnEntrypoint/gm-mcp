@@ -661,6 +661,10 @@ export function renderVerbatimFileText(out, toYaml) {
         const { data, ...rest } = out
         return `${toYaml(rest)}${VERBATIM_TEXT_MARKER}\n${data}`
     }
+    if (out.verb === 'fs_read' && isPlainObject(out.data) && typeof out.data.content === 'string') {
+        const { data: { content, ...fields }, ...rest } = out
+        return `${toYaml({ ...rest, data: fields })}${VERBATIM_TEXT_MARKER}\n${content}`
+    }
     if (out.verb === 'fs_read' && typeof out.content === 'string') {
         const { content, ...rest } = out
         return `${toYaml(rest)}${VERBATIM_TEXT_MARKER}\n${content}`
