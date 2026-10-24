@@ -22,7 +22,6 @@ const NETWORK_TIMEOUT_MS = 180_000
 const MAX_OUTPUT_BYTES = 256 * 1024 * 1024
 const EMPTY = Buffer.alloc(0)
 const NO_PROMPT = { GIT_TERMINAL_PROMPT: '0' }
-const COAUTHOR = 'Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>'
 const SAFE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/
 const LINE_UNSAFE = /[\t\r\n\0]/
 const WRITE_COMMAND = /git (?:add|commit|push|pull|merge|rebase|reset|checkout)/
@@ -469,7 +468,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
 
     const tree = await indexed(['write-tree'])
     if (tree.status !== 0) return refused('write_tree_failed', 'write-tree failed; nothing pushed')
-    const committed = await plain(['commit-tree', utf8(tree.stdout).trim(), '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`, '-m', COAUTHOR])
+    const committed = await plain(['commit-tree', utf8(tree.stdout).trim(), '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`])
     const sha = utf8(committed.stdout).trim()
     if (committed.status !== 0 || sha === '') return refused('commit_failed', 'commit-tree failed; nothing pushed')
 
