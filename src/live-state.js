@@ -47,6 +47,14 @@ function runnerOf(text) {
     return { ok: true, runner: { alive: age !== null && !stale, heartbeat_age_ms: age, heartbeat_stale: stale } }
 }
 
+// {ok, runner} from one status read under the live budget. A read that misses the budget or fails is not ok.
+async function statusRead(dispatch, { cwd, session_id }) {
+    const lookup = dispatch({ verb: 'status', body: {}, cwd, session_id, prd_feed: true })
+    const reply = await withinBudget(lookup, LIVE_BUDGET_MS, null)
+    if (reply === null) return { ok: false, error: timedOut('status read') }
+    return runnerOf(reply)
+}
+
 
 // {count, next, error} from a next-row lookup. count prefers the lookup's pending total, then the reply's own count.
 function pendingOf(found, pendingRows) {
