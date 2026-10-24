@@ -224,6 +224,7 @@ const PRD_ADD_BODY = {
         owner: { type: 'string', description: 'Accountable lane or session that must act on the finding. Defaults to the filer session_id.' },
         disposition: { type: 'string', enum: ['open', 'accepted', 'rejected', 'deferred'], description: 'Inspection disposition of the finding; a reason belongs in description.' },
         recheck_by: { type: 'string', description: 'Session that re-checks the finding; must differ from owner.' },
+        origin: { type: 'string', description: 'Filing origin of the row. traversal marks a node-traversal filing, which prd-add refuses while 20 or more rows are pending.' },
     },
 }
 const PRD_ADD_TYPES = {
@@ -239,8 +240,9 @@ const PRD_ADD_TYPES = {
     owner: z.string(),
     disposition: z.enum(['open', 'accepted', 'rejected', 'deferred']),
     recheck_by: z.string(),
+    origin: z.string(),
 }
-const PRD_ADD_KEYS = ['id', 'subject', 'description', 'acceptance_criteria', 'witness_plan', 'status', 'blockedBy', 'overwrite', 'repair', 'owner', 'disposition', 'recheck_by']
+const PRD_ADD_KEYS = ['id', 'subject', 'description', 'acceptance_criteria', 'witness_plan', 'status', 'blockedBy', 'overwrite', 'repair', 'owner', 'disposition', 'recheck_by', 'origin']
 const PRD_ADD_FIELDS = aliasFields('prd_add', PRD_ADD_TYPES, PRD_ADD_KEYS)
 const PRD_ADD_DESCRIPTION = ` ${PRD_ADD_KEYS.join(', ')} are accepted at the top level and folded into body, so {"subject":"<row intent>","description":"<row prose>"} and body:{"subject":"...","description":"..."} are the same call; a key named in both takes its value from body. description is the row prose: it is persisted on the row as description, never as the dispatch body. Without an id or any subject/title/name/task/goal/description/notes text the row is refused.`
 const PRD_RESOLVE_BODY = {
