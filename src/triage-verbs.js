@@ -1378,7 +1378,7 @@ export const TRIAGE_VERBS = [
             repo_dir: z.string().describe('Checkout whose files are published: an absolute path, or relative to cwd.'),
             row: z.string().describe('Row id, written into the commit as "Row: <row>".'),
             message: z.string().describe('Commit subject and body.'),
-            paths: z.array(z.string()).min(1).describe('Repository-relative paths the lane edited. Each must exist as a file (published), be a submodule pin in the lane's index or HEAD (published as that commit sha at mode 160000), or be absent (removed from the index unless origin/main pins it as a submodule, which is then left alone).'),
+            paths: z.array(z.string()).min(1).describe('Repository-relative paths the lane edited. Each must exist as a file (published), be a submodule pin in the index or HEAD of the lane (published as that commit sha at mode 160000), or be absent (removed from the index unless origin/main pins it as a submodule, which is then left alone).'),
             publish_base: z.string().optional().describe('Base ref for the three-way merge. Use origin/main when the lane rewrote a file whose history it does not share.'),
             dry_run: z.boolean().optional().describe('Build and check the commit, then stop before the push.'),
             cwd: z.string().optional().describe('gm checkout root: the secrets checker is read from <cwd>/scripts. Required.'),
