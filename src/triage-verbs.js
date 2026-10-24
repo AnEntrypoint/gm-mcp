@@ -403,6 +403,11 @@ async function publishOnOrigin(args) {
     }
 }
 
+function gitlinkOf(result) {
+    const found = /^160000 (?:commit )?([0-9a-f]{40,64})\b/m.exec(utf8(result.stdout))
+    return found === null ? null : found[1]
+}
+
 async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work }) {
     const plain = (gitArgs, extra = {}) => run('git', gitArgs, { cwd: repo, ...extra })
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'index') }
@@ -418,6 +423,15 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
 
     for (const [index, p] of paths.entries()) {
         const full = path.join(repo, p)
+        const lanePin = gitlinkOf(await plain(['ls-files', '-s', '--', p])) ?? gitlinkOf(await plain(['ls-tree', 'HEAD', '--', p]))
+        const basePin = gitlinkOf(await plain(['ls-tree', base, '--', p]))
+        const originPin = gitlinkOf(await indexed(['ls-files', '-s', '--', p]))
+        if (lanePin !== null) {
+            if (lanePin === basePin || lanePin === originPin) continue
+            if (originPin !== null && originPin !== basePin) return refused('merge_conflict', `submodule ${p} moved on origin/main to ${originPin}; the lane pins ${lanePin}; nothing pushed`)
+            if ((await indexed(['update-index', '--add', '--cacheinfo', `160000,${lanePin},${p}`])).status !== 0) return refused('index_failed', `update-index failed for ${p}; nothing pushed`)
+            continue
+        }
         if (isFile(full)) {
             // The lane's change is its working-tree file merged three-way onto origin/main, so newer origin content survives.
             const from = await plain(['show', `${base}:${p}`])
@@ -433,8 +447,8 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
             if (blob === null) return refused('hash_failed', `empty blob sha for ${p}; nothing pushed`)
             const mode = isExecutable(full) ? '100755' : '100644'
             if ((await indexed(['update-index', '--add', '--cacheinfo', `${mode},${blob},${p}`])).status !== 0) return refused('index_failed', `update-index failed for ${p}; nothing pushed`)
-        } else if ((await indexed(['update-index', '--force-remove', p])).status !== 0) {
-            return refused('index_failed', `update-index failed for ${p}; nothing pushed`)
+        } else if (originPin === null && !isDirectory(full)) {
+            if ((await indexed(['update-index', '--force-remove', p])).status !== 0) return refused('index_failed', `update-index failed for ${p}; nothing pushed`)
         }
     }
 
