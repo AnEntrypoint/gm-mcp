@@ -45,11 +45,12 @@ export function pageOf(text) {
     if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return { ok: false, error: String(text).trim().slice(0, 300) || 'empty prd-list reply' }
     const failure = failureOf(doc)
     if (failure !== null) return { ok: false, error: failure }
-    const data = Array.isArray(doc.items) ? doc : doc.data && typeof doc.data === 'object' && Array.isArray(doc.data.items) ? doc.data : null
-    if (data === null) return { ok: false, error: 'prd-list reply has no items' }
+    const data = Array.isArray(doc.items) || !(doc.data && typeof doc.data === 'object') ? doc : doc.data
+    const items = Array.isArray(data.items) ? data.items : data.pending_total === 0 ? [] : null
+    if (items === null) return { ok: false, error: 'prd-list reply has no items' }
     return {
         ok: true,
-        items: data.items.filter((row) => row && typeof row === 'object' && !Array.isArray(row)).map(briefRow),
+        items: items.filter((row) => row && typeof row === 'object' && !Array.isArray(row)).map(briefRow),
         pending_total: typeof data.pending_total === 'number' ? data.pending_total : null,
     }
 }
@@ -86,16 +87,16 @@ export function withinBudget(promise, ms, fallback) {
     return Promise.race([promise.catch(() => fallback), budget]).finally(() => clearTimeout(timer))
 }
 
-// {next_prd, pending_total} with the first pending row (null when none), or {} when the lookup failed or missed NEXT_PRD_BUDGET_MS.
+// {next_prd, pending_total} with the first pending row (null when none), or {} when the lookup failed or missed budgetMs (NEXT_PRD_BUDGET_MS by default).
 // A lookup that finishes late still updates the push state.
-export function nextPrdFor(dispatch, { cwd, session_id } = {}) {
+export function nextPrdFor(dispatch, { cwd, session_id, budgetMs = NEXT_PRD_BUDGET_MS } = {}) {
     const lookup = readPendingPage(dispatch, { limit: 1, cwd, session_id }).then((page) => {
         if (!page.ok) return {}
         const row = page.items[0] ?? null
         noteNextRow(row)
         return { next_prd: row, pending_total: page.pending_total }
     })
-    return withinBudget(lookup, NEXT_PRD_BUDGET_MS, {})
+    return withinBudget(lookup, budgetMs, {})
 }
 
 // The continuation feed for one reply: undefined when the reply moves no PRD state, otherwise nextPrdFor's result.
