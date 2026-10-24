@@ -12,7 +12,7 @@ import { appendDiagnostic, describeError } from './server-log.js'
 
 // One budget for each live read. The status, git and next-row reads each get it, and they run together.
 export const LIVE_BUDGET_MS = 1500
-const BOOTSTRAP_BUDGET_MS = 4000
+const BOOTSTRAP_BUDGET_MS = 8000
 export const NO_PROJECT_ROOT_TEXT = 'no project root given; pass cwd to include live state'
 const UNKNOWN_RUNNER = { alive: null, heartbeat_age_ms: null, heartbeat_stale: null }
 
