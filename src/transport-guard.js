@@ -117,6 +117,7 @@ function surviveClientGone() {
         appendDiagnostic('stdin-ended', { note: 'client disconnected -- server stays up for one recheck unless dispatches are in flight' })
         exitWhenIdle('client-gone')
     })
+    if (process.stdin.readableEnded) exitWhenIdle('client-gone')
 }
 
 export function installStdioGuards() {
