@@ -53,23 +53,90 @@ const usage = (message) => new VerbFault('usage', message)
 const ok = (result, fields = [], lines = []) => ({ exit: 0, result, fields, lines })
 const refused = (code, result, fields = [], lines = []) => ({ exit: 1, code, result, fields, lines })
 
-function answer({ exit, code = null, error = null, result = null, fields = [], lines = [] }) {
+const LEDGER_BODY_MAX = 2000
+
+function answer({ exit, code = null, error = null, result = null, dispatchId = null, fields = [], lines = [] }) {
     const head = [`ok: ${exit === 0}`]
     if (code !== null) head.push(`error_code: ${code}`)
     if (error !== null) head.push(`error: ${error}`)
     head.push(`exit_code: ${exit}`)
+    if (dispatchId !== null) head.push(`dispatch_id: ${dispatchId}`)
     if (result !== null) head.push(`result: ${result}`)
     return [...head, ...fields.map(([key, value]) => `${key}: ${value}`), ...lines].join('\n')
 }
 
+// A dispatch id in the runner's shape (<ms>-<pid>-<hex>), so prd-resolve reads it like any runner dispatch.
+const newDispatchId = () => `${Date.now()}-${process.pid}-${randomBytes(8).toString('hex')}`
+
+function callerRoot(args) {
+    try {
+        return rootOf(args)
+    } catch {
+        return null
+    }
+}
+
+// True when the ledger does not end with a newline, so the next append must start a new line first.
+function needsNewline(file) {
+    const size = statOf(file)?.size ?? 0
+    if (size === 0) return false
+    const fd = fs.openSync(file, 'r')
+    try {
+        const last = Buffer.alloc(1)
+        fs.readSync(fd, last, 0, 1, size - 1)
+        return last[0] !== 0x0a
+    } finally {
+        fs.closeSync(fd)
+    }
+}
+
+// Appends the two lines a runner dispatch leaves in .gm/exec-spool/.dispatch-ledger.json (rs-plugkit dispatch_ledger.rs
+// record): the entry, then its reply_sha256. prd-resolve attributes a witness only through these lines. Returns the
+// failure text, or null when both lines were appended.
+function recordTriageDispatch(root, { dispatchId, verb, sessionId, exit, args, text }) {
+    try {
+        const request = JSON.stringify(args)
+        const file = path.join(root, '.gm', 'exec-spool', '.dispatch-ledger.json')
+        const entry = {
+            cwd: root,
+            dispatch_id: dispatchId,
+            exit_code: exit,
+            fingerprint: createHash('sha256').update(`${verb}\n${request}`).digest('hex').slice(0, 16),
+            output_bytes: Buffer.byteLength(text),
+            request_body: request.slice(0, LEDGER_BODY_MAX),
+            request_body_truncated: request.length > LEDGER_BODY_MAX,
+            session_id: sessionId,
+            ts: Date.now(),
+            verb,
+        }
+        const reply = { dispatch_id: dispatchId, reply_sha256: createHash('sha256').update(text).digest('hex') }
+        fs.mkdirSync(path.dirname(file), { recursive: true })
+        fs.appendFileSync(file, `${needsNewline(file) ? '\n' : ''}${JSON.stringify(entry)}\n${JSON.stringify(reply)}\n`)
+        return null
+    } catch (error) {
+        return error instanceof Error ? error.message : String(error)
+    }
+}
+
 // Wraps a verb body: a returned object is the reply (exit 0 or 1); a thrown error is a usage or input error (exit 2).
-function toolReply(body) {
+// Each reply carries its dispatch_id, and the dispatch is recorded in the project ledger under the caller's session.
+function toolReply(verb, body) {
     return async (args = {}) => {
+        const dispatchId = newDispatchId()
+        let reply
         try {
-            return { content: [{ type: 'text', text: answer(await body(args)) }] }
+            reply = await body(args)
         } catch (error) {
             const fault = error instanceof VerbFault ? error : new VerbFault('internal', error instanceof Error ? error.message : String(error))
-            return { content: [{ type: 'text', text: answer({ exit: 2, code: fault.code, error: fault.message }) }], isError: true }
+            reply = { exit: 2, code: fault.code, error: fault.message, isError: true }
+        }
+        const text = answer({ ...reply, dispatchId })
+        const root = callerRoot(args)
+        const sessionId = [args.session_id, args.session].find((value) => typeof value === 'string' && value !== '') ?? null
+        const ledgerError = root === null ? null : recordTriageDispatch(root, { dispatchId, verb, sessionId, exit: reply.exit, args, text })
+        return {
+            content: [{ type: 'text', text: ledgerError === null ? text : `${text}\nledger_error: ${ledgerError}` }],
+            ...(reply.isError === true ? { isError: true } : {}),
         }
     }
 }
@@ -168,7 +235,7 @@ async function writerLock(args) {
     const lock = path.join(dir, `${repo}.writer`)
 
     if (action === 'take') {
-        const session = singleLine(args.session, 'session')
+        const session = singleLine(args.session ?? args.session_id, 'session')
         const tmp = tempBeside(lock)
         fs.writeFileSync(tmp, `${session}\n`)
         try {
@@ -184,7 +251,7 @@ async function writerLock(args) {
     }
 
     if (action === 'release') {
-        const session = singleLine(args.session, 'session')
+        const session = singleLine(args.session ?? args.session_id, 'session')
         if (readHolder(lock) !== session) return refused('not_holder', `not the holder of ${repo}`)
         fs.rmSync(lock, { force: true })
         return ok(`released ${repo}`, [['repo', repo]])
@@ -1408,7 +1475,7 @@ export const TRIAGE_VERBS = [
             session: z.string().optional().describe('Session id that takes or releases the lock. Required by take and release.'),
             cwd: z.string().optional().describe('gm checkout root that holds .gm/. Required: the verb never guesses a root.'),
         },
-        handler: toolReply(writerLock),
+        handler: toolReply('writer_lock', writerLock),
     },
     {
         name: 'write_queue',
@@ -1420,7 +1487,7 @@ export const TRIAGE_VERBS = [
             note: z.string().optional().describe('What the edit is (add only). Tabs and newlines become spaces.'),
             cwd: z.string().optional().describe('gm checkout root that holds .gm/. Required.'),
         },
-        handler: toolReply(writeQueue),
+        handler: toolReply('write_queue', writeQueue),
     },
     {
         name: 'shards',
@@ -1429,7 +1496,7 @@ export const TRIAGE_VERBS = [
             out_dir: z.string().optional().describe('New directory for the shard files. Relative paths resolve against cwd. Default: a dated directory under .gm/drain-shards.'),
             cwd: z.string().optional().describe('gm checkout root that holds .gm/. Required.'),
         },
-        handler: toolReply(shardsVerb),
+        handler: toolReply('shards', shardsVerb),
     },
     {
         name: 'publish_on_origin',
@@ -1445,7 +1512,7 @@ export const TRIAGE_VERBS = [
             status: z.enum(['resolved', 'stale']).optional().describe('Status the closing commit records. Required with witness.'),
             cwd: z.string().optional().describe('gm checkout root: the secrets checker is read from <cwd>/scripts, and the witness ledger from <cwd>/.gm. Required.'),
         },
-        handler: toolReply(publishOnOrigin),
+        handler: toolReply('publish_on_origin', publishOnOrigin),
     },
     {
         name: 'spool_orphans',
@@ -1456,7 +1523,7 @@ export const TRIAGE_VERBS = [
             unserved: z.number().min(0).optional().describe('Also move .txt requests in spool subdirectories older than this many minutes.'),
             cwd: z.string().optional().describe('Base for relative roots. Required when a root is relative.'),
         },
-        handler: toolReply(spoolOrphans),
+        handler: toolReply('spool_orphans', spoolOrphans),
     },
     {
         name: 'resources',
@@ -1466,7 +1533,7 @@ export const TRIAGE_VERBS = [
             interval_seconds: z.number().min(1).max(300).optional().describe('Seconds between snapshots (default 5).'),
             disk_paths: z.array(z.string()).optional().describe('Paths whose filesystem is reported (default ["/", "/workspace"]); a missing path is skipped.'),
         },
-        handler: toolReply(resourcesVerb),
+        handler: toolReply('resources', resourcesVerb),
     },
     {
         name: 'housekeep',
@@ -1476,6 +1543,11 @@ export const TRIAGE_VERBS = [
             root: z.string().optional().describe('Project root holding .gm/. A relative path resolves against cwd. Default: cwd.'),
             cwd: z.string().optional().describe('Project root when root is omitted. Required.'),
         },
-        handler: toolReply(housekeepVerb),
+        handler: toolReply('housekeep', housekeepVerb),
     },
 ]
+
+// Every triage schema takes the session_id that a gm call supplies (codemode fills it in when the schema declares it),
+// so the ledger line names the caller's session.
+const SESSION_ID_FIELD = z.string().optional().describe('Caller session recorded in the dispatch ledger. A gm call supplies its own session when this is omitted.')
+for (const triage of TRIAGE_VERBS) triage.inputSchema.session_id = SESSION_ID_FIELD
