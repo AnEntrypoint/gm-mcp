@@ -320,16 +320,17 @@ function fsReadUnrangedPage(out, inlineMax) {
 
 function fsReadFitReply(out, replyCap, toYaml) {
     if (!isPlainObject(out) || out.verb !== 'fs_read') return out
-    const key = typeof out.data === 'string' ? 'data' : typeof out.content === 'string' ? 'content' : null
+    const nested = isPlainObject(out.data) && typeof out.data.content === 'string'
+    const key = nested ? 'content' : typeof out.data === 'string' ? 'data' : typeof out.content === 'string' ? 'content' : null
     if (key === null || renderVerbatimFileText(out, toYaml).length <= replyCap) return out
-    const lines = out[key].length === 0 ? [] : out[key].replace(/\n$/, '').split('\n')
+    const body = nested ? out.data : out
+    const lines = body[key].length === 0 ? [] : body[key].replace(/\n$/, '').split('\n')
     if (lines.length === 0) return out
-    const start = Number.isFinite(Number(out.start_line)) ? Number(out.start_line) : 1
-    const total = Number.isFinite(Number(out.total_lines)) ? Number(out.total_lines) : start - 1 + lines.length
+    const start = Number.isFinite(Number(body.start_line)) ? Number(body.start_line) : 1
+    const total = Number.isFinite(Number(body.total_lines)) ? Number(body.total_lines) : start - 1 + lines.length
     const cutAt = (count) => {
         const cut = count < lines.length
-        return {
-            ...out,
+        const fields = {
             [key]: lines.slice(0, count).join('\n'),
             start_line: start,
             end_line: start + count - 1,
@@ -337,9 +338,13 @@ function fsReadFitReply(out, replyCap, toYaml) {
             total_lines: total,
             has_more_lines: cut,
             truncated_at_bytes: cut,
+            ...(cut ? { next_start_line: start + count } : {}),
+        }
+        return {
+            ...out,
+            ...(nested ? { data: { ...body, ...fields } } : fields),
             truncated: cut || out.truncated === true,
             ...(isPlainObject(out.returned_range) ? { returned_range: { start_line: start, end_line: start + count - 1 } } : {}),
-            ...(cut ? { next_start_line: start + count } : {}),
         }
     }
     let low = 1
@@ -405,10 +410,11 @@ function applyFsReadRangeFallbackRaw(verb, body, out, inlineMax) {
 
 export function fsReadSpillNote(out, text) {
     if (!isPlainObject(out)) return ''
-    const total = Number(out.total_lines)
-    const start = Number(out.start_line)
-    const end = Number(out.end_line)
-    const returned = Number(out.returned_lines)
+    const fields = isPlainObject(out.data) ? out.data : out
+    const total = Number(fields.total_lines)
+    const start = Number(fields.start_line)
+    const end = Number(fields.end_line)
+    const returned = Number(fields.returned_lines)
     if (Number.isFinite(start) && Number.isFinite(end) && Number.isFinite(total)) {
         const lines = Number.isFinite(returned) ? returned : (text.length === 0 ? 0 : text.split('\n').length)
         const note = [`spill_range: lines ${start}-${end} of ${total} (1-based, inclusive)`, `spill_lines: ${lines}`]
