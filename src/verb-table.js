@@ -77,7 +77,7 @@ const GIT_FINALIZE_FIELDS = aliasFields('git_finalize', GIT_COMMIT_TYPES, GIT_CO
 const GIT_COMMIT_VERB_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'untrack', 'author_name', 'author_email', 'claim_only', 'patch', 'hunks']
 const GIT_COMMIT_FIELDS = aliasFields('git_commit', GIT_COMMIT_TYPES, GIT_COMMIT_VERB_KEYS)
 const GIT_SINGLE_SHAPE = (verb, keys, sample) => ` ${keys.join(', ')} ${keys.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${sample}":...} and body:{"${sample}":...} are the same call (one accepted shape for ${verb}); a key named in both takes its value from body.`
-const GIT_COMMIT_DESCRIPTION = GIT_SINGLE_SHAPE('git_commit', GIT_COMMIT_VERB_KEYS, 'message') + ` The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit. claim_only:true only claims paths in .gm/lane-claims.json for SESSION_ID (needs a non-empty paths array) and does not commit or publish.`
+const GIT_COMMIT_DESCRIPTION = GIT_SINGLE_SHAPE('git_commit', GIT_COMMIT_VERB_KEYS, 'message') + ` The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit. author_name and author_email must match the configured git identity; any other author is refused before the commit runs. claim_only:true only claims paths in .gm/lane-claims.json for SESSION_ID (needs a non-empty paths array) and does not commit or publish.`
 const GIT_FINALIZE_DESCRIPTION = ` ${GIT_COMMIT_KEYS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body. The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit. .agentplug* paths are runtime state: add and modify are refused with a reason; untrack:true with only tracked .agentplug* paths commits their index removal (files stay on disk).`
 
 const GIT_PUSH_KEYS = ['rev', 'sha']
@@ -155,7 +155,7 @@ function scopedGitRow(verb) {
         description: verb === 'git_reset'
             ? description + ' hard:true is the boolean form of mode:"hard" and rev is an alias of ref; paths scope the index only, so hard:true together with paths is refused. mode accepts soft|mixed|hard and hard must be a boolean -- anything else is refused with error_code invalid_args, never coerced to a default. Every ok reply carries mode, hard, reset_to and scope, so the operation that ran is readable without re-reading the repo.'
             : verb === 'git_log'
-            ? description + ' When several count keys are sent, limit wins, then max_count.'
+            ? description + ' The count key is limit; max_count is accepted too, and when both are sent limit wins. n is not a git_log key and is refused.'
             : description,
     }
 }
