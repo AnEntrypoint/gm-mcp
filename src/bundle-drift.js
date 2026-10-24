@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { compareVersions, parseBundleVersion } from './self-update.js'
 import { launchedEntryPath, serverEntryPath } from './singleton.js'
@@ -174,17 +174,9 @@ function handoverRefusalFor(installedSha256) {
     return { code: handoverRefusal.code, reason: handoverRefusal.reason }
 }
 
-function resolvedInstalledPath(path) {
-    try {
-        return realpathSync(path)
-    } catch {
-        return path
-    }
-}
-
 export function bundleStalenessLine(state = bundleDrift()) {
     if (!state?.stale) return null
-    const installedPath = state.installed_path ? resolvedInstalledPath(state.installed_path) : state.path
+    const installedPath = state.installed_path ?? state.path
     const installed = `${state.installed_version ?? 'unknown version'} (sha ${shortHash(state.installed_sha256)})`
     const running = `${state.running_version} (sha ${shortHash(state.running_sha256)})`
     const action = state.reloadable
