@@ -423,7 +423,41 @@ function gitlinkOf(result) {
     return found === null ? null : found[1]
 }
 
-async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [], retried = false }) {
+// Replays the one commit built on the old origin/main onto the current tip with git's three-way merge (merge-tree --write-tree).
+// Only that commit's change moves; the lane's edits are not re-run. A conflict is refused with its paths and nothing is pushed.
+async function rebaseCommitOntoTip({ repo, commit, row, message, paths, checker, work, trailers }) {
+    const plain = (gitArgs, extra = {}) => run('git', gitArgs, { cwd: repo, ...extra })
+    const indexEnv = { GIT_INDEX_FILE: path.join(work, 'rebase-index') }
+    const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
+    const tip = utf8((await plain(['rev-parse', '--verify', 'origin/main^{commit}'])).stdout).trim()
+    const merged = await plain(['merge-tree', '--write-tree', '--name-only', tip, commit])
+    if (merged.status !== 0 && merged.status !== 1) {
+        return { refusal: refused('rebase_failed', `git merge-tree --write-tree could not replay ${commit} onto ${tip} (git 2.38 or newer is required); nothing pushed`, [['commit', commit]]) }
+    }
+    const lines = utf8(merged.stdout).split('\n')
+    if (merged.status === 1) {
+        const conflicted = []
+        for (const line of lines.slice(1)) {
+            if (line === '') break
+            conflicted.push(line)
+        }
+        return { refusal: refused('rebase_conflict', `replaying ${commit} onto ${tip} conflicts; nothing pushed`, [['commit', commit], ['onto', tip]], conflicted) }
+    }
+    const tree = lines[0].trim()
+    if ((await indexed(['read-tree', tree])).status !== 0) return { refusal: refused('read_tree_failed', 'read-tree failed on the rebased tree; nothing pushed') }
+    const committed = await plain(['commit-tree', tree, '-p', tip, '-m', message, '-m', `Row: ${row}`, ...trailers])
+    const sha = utf8(committed.stdout).trim()
+    if (committed.status !== 0 || sha === '') return { refusal: refused('commit_failed', 'commit-tree failed for the rebased commit; nothing pushed') }
+    const changed = utf8((await plain(['diff', '--name-only', '--no-renames', '-z', tip, sha])).stdout).split('\0').filter((name) => name !== '')
+    const unintended = changed.filter((name) => !paths.includes(name) && name !== 'skills/manifest.sha256')
+    if (unintended.length > 0) return { refusal: refused('unintended_paths', 'rebased commit changes paths outside the list; nothing pushed', [['commit', sha]], unintended) }
+    const scan = await run(process.execPath, [checker], { cwd: repo, env: indexEnv })
+    if (scan.status !== 0) return { refusal: refused('secrets_check_failed', 'secrets check failed on the rebased commit; nothing pushed', [['commit', sha]]) }
+    const stat = utf8((await plain(['diff', '--stat', tip, sha])).stdout).split('\n').filter((line) => line !== '').slice(-3)
+    return { sha, stat }
+}
+
+async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [] }) {
     const plain = (gitArgs, extra = {}) => run('git', gitArgs, { cwd: repo, ...extra })
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'index') }
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
@@ -488,7 +522,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     const sha = utf8(committed.stdout).trim()
     if (committed.status !== 0 || sha === '') return refused('commit_failed', 'commit-tree failed; nothing pushed')
 
-    const stat = utf8((await plain(['diff', '--stat', 'origin/main', sha])).stdout).split('\n').filter((line) => line !== '').slice(-3)
+    let stat = utf8((await plain(['diff', '--stat', 'origin/main', sha])).stdout).split('\n').filter((line) => line !== '').slice(-3)
     const changed = utf8((await plain(['diff', '--name-only', '--no-renames', '-z', 'origin/main', sha])).stdout).split('\0').filter((name) => name !== '')
     const unintended = changed.filter((name) => !paths.includes(name) && name !== 'skills/manifest.sha256')
     if (unintended.length > 0) return refused('unintended_paths', 'commit changes paths outside the list; nothing pushed', [['commit', sha]], unintended)
@@ -501,18 +535,23 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
 
     if (dryRun) return ok(`dry run: built ${sha} on origin/main, secrets check passed, not pushed`, [['commit', sha]], stat)
 
+    let landedSha = sha
     const pushed = await plain(['push', '-q', 'origin', `${sha}:refs/heads/main`], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
     if (pushed.status !== 0) {
-        // origin moved between the build and the push: rebase onto the new tip and retry once, keeping the original merge base.
-        if (retried) return refused('push_refused', 'push refused twice; nothing landed', [['commit', sha]])
+        // origin moved between the build and the push: replay this one commit onto the new tip and push it once more; the lane's edits are not re-run.
         const refetched = await plain(['fetch', '-q', 'origin', 'main'], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
         if (refetched.status !== 0) return refused('push_refused', 'push refused and refetch failed; nothing landed', [['commit', sha]])
-        return publishLane({ repo, row, message, paths, givenBase: base, dryRun, checker, work, trailers, retried: true })
+        const rebased = await rebaseCommitOntoTip({ repo, commit: sha, row, message, paths, checker, work, trailers })
+        if (rebased.refusal) return rebased.refusal
+        landedSha = rebased.sha
+        stat = rebased.stat
+        const retry = await plain(['push', '-q', 'origin', `${landedSha}:refs/heads/main`], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
+        if (retry.status !== 0) return refused('push_refused', 'push refused again after one rebase; nothing landed', [['commit', landedSha]])
     }
     await plain(['fetch', '-q', 'origin', 'main'], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
-    const landed = await plain(['merge-base', '--is-ancestor', sha, 'origin/main'])
-    if (landed.status === 0) return ok(`published ${sha} on origin/main`, [['commit', sha]], stat)
-    return refused('not_on_origin', `push reported success but ${sha} is not on origin/main`, [['commit', sha]])
+    const landed = await plain(['merge-base', '--is-ancestor', landedSha, 'origin/main'])
+    if (landed.status === 0) return ok(`published ${landedSha} on origin/main`, [['commit', landedSha]], stat)
+    return refused('not_on_origin', `push reported success but ${landedSha} is not on origin/main`, [['commit', landedSha]])
 }
 
 // ---------------------------------------------------------------- spool_orphans (spool-orphans.sh)
