@@ -947,11 +947,12 @@ async function findBackups(gmDir, now, plan) {
 
 async function planHousekeep(gmDir, entries, processes, now) {
     const old = (ms) => now - ms > DAY_MS
-    const plan = { processes, lanes: [], laneKept: [], outFiles: [], baks: [], bakKept: [], shelved: [], shelvedKept: [] }
+    const lanesChecked = processes.status === 'checked'
+    const plan = { processes, lanesChecked, lanes: [], laneKept: [], outFiles: [], baks: [], bakKept: [], shelved: [], shelvedKept: [] }
+    // lane-build needs the live-process check. Where that check cannot run (non-Linux, /proc unreadable), no lane is pruned.
     for (const entry of entries) {
-        if (!entry.rel.startsWith('lane-build/') || !entry.isDir || path.basename(entry.full).startsWith('cargo-home') || !old(entry.newest)) continue
-        if (processes.status === 'unmeasured') plan.laneKept.push({ rel: entry.rel, reason: processes.note })
-        else if (processes.status === 'checked' && isLiveCwd(processes, entry.full)) plan.laneKept.push({ rel: entry.rel, reason: 'live process cwd' })
+        if (!lanesChecked || !entry.rel.startsWith('lane-build/') || !entry.isDir || path.basename(entry.full).startsWith('cargo-home') || !old(entry.newest)) continue
+        if (isLiveCwd(processes, entry.full)) plan.laneKept.push({ rel: entry.rel, reason: 'live process cwd' })
         else plan.lanes.push(entry)
     }
     for (const file of await treeFiles(path.join(gmDir, 'exec-spool', 'out'))) {
@@ -1015,8 +1016,9 @@ async function executeHousekeep(gmDir, plan) {
     const done = []
     const fresh = processCheck()
     for (const lane of plan.lanes) {
-        if (fresh.status === 'unmeasured' || (fresh.status === 'checked' && isLiveCwd(fresh, lane.full))) {
-            done.push({ cls: 'a', rel: lane.rel, outcome: 'kept', detail: 'live process cwd' })
+        if (fresh.status !== 'checked' || isLiveCwd(fresh, lane.full)) {
+            const detail = fresh.status === 'checked' ? 'live process cwd' : 'no live-process check'
+            done.push({ cls: 'a', rel: lane.rel, outcome: 'kept', detail })
             continue
         }
         try {
@@ -1038,7 +1040,7 @@ async function executeHousekeep(gmDir, plan) {
             done.push({ cls: 'b', rel: file.rel, outcome: 'failed', detail: error.message })
         }
     }
-    done.push({ cls: 'b', rel: 'exec-spool/out', outcome: 'pruned', count: removed, bytes: removedBytes })
+    if (removed > 0) done.push({ cls: 'b', rel: 'exec-spool/out', outcome: 'pruned', count: removed, bytes: removedBytes })
 
     const shelved = path.join(gmDir, 'shelved')
     if (plan.baks.length > 0 || plan.shelved.length > 0) fs.mkdirSync(shelved, { recursive: true })
@@ -1084,14 +1086,25 @@ function writeStamp(gmDir, fields) {
 }
 
 
-async function housekeepRun(root, apply) {
-    const gmDir = path.join(root, '.gm')
+async function scanHousekeep(gmDir) {
     const before = await measureGm(gmDir)
     const processes = processCheck()
     const plan = await planHousekeep(gmDir, before.entries, processes, Date.now())
-    if (apply) writeStamp(gmDir, { state: 'running' })
-    const done = apply ? await executeHousekeep(gmDir, plan) : []
-    const after = apply ? await measureGm(gmDir) : before
+    return { before, processes, plan }
+}
+
+
+// An apply pass with nothing to prune writes nothing: no stamp, no lock, no archive.
+const hasWork = (plan) => plan.lanes.length + plan.outFiles.length + plan.baks.length + plan.shelved.length > 0
+
+
+async function housekeepRun(root, apply, scan = null) {
+    const gmDir = path.join(root, '.gm')
+    const { before, processes, plan } = scan ?? (await scanHousekeep(gmDir))
+    const writes = apply && hasWork(plan)
+    if (writes) writeStamp(gmDir, { state: 'running' })
+    const done = writes ? await executeHousekeep(gmDir, plan) : []
+    const after = writes ? await measureGm(gmDir) : before
 
     const counts = { a: 0, b: 0, c: 0, d: 0, failed: 0 }
     for (const item of done) {
@@ -1107,6 +1120,7 @@ async function housekeepRun(root, apply) {
     const plannedTotal = [...prunable.values()].reduce((sum, bytes) => sum + bytes, 0)
 
     const lines = [`process ${processes.status}${processes.note ? `: ${processes.note}` : ''}`]
+    if (!plan.lanesChecked) lines.push('lane-build: skipped, no live-process check')
     for (const area of HOUSEKEEP_AREAS) {
         const tail = apply ? '' : `, prunable ${sizeText(prunable.get(area))}`
         lines.push(`area ${area} before ${sizeText(before.areas.get(area))} after ${sizeText(after.areas.get(area))}${tail}`)
@@ -1132,7 +1146,7 @@ async function housekeepRun(root, apply) {
     lines.push(`counts a=${counts.a} b=${counts.b} c=${counts.c} d=${counts.d} failed=${counts.failed}`)
 
     const summary = { before_bytes: before.total, after_bytes: after.total, pruned: counts }
-    if (apply) writeStamp(gmDir, { state: 'done', ...summary })
+    if (writes) writeStamp(gmDir, { state: 'done', ...summary })
     const result = apply
         ? `housekeep applied: ${sizeText(before.total)} to ${sizeText(after.total)}, freed ${sizeText(before.total - after.total)}`
         : `housekeep dry-run: ${sizeText(before.total)}, prunable ${sizeText(plannedTotal)}`
@@ -1187,6 +1201,9 @@ function acquireHousekeepLock(gmDir) {
 async function housekeepAutomatic(root) {
     const gmDir = path.join(root, '.gm')
     if (!isDirectory(gmDir) || !housekeepDue(gmDir)) return
+    // Read-only scan first: a project with nothing to prune gets no lock file and no stamp.
+    const scan = await scanHousekeep(gmDir)
+    if (!hasWork(scan.plan)) return
     const lock = acquireHousekeepLock(gmDir)
     if (lock === null) return
     try {
@@ -1281,7 +1298,7 @@ export const TRIAGE_VERBS = [
     },
     {
         name: 'housekeep',
-        description: 'Reports and prunes runtime data under <root>/.gm. Reply: ok, exit_code, result, root, then one "area <name> before <size> after <size>" line per area, the five largest entries ("top <rel> <size>"), kept and would or pruned action lines, and counts. apply false (default) changes nothing. apply true prunes only: (a) lane-build/<lane> directories whose newest entry is older than 24 hours, with no live process cwd (Linux scans /proc; other platforms skip that check and say so); cargo-home* is never pruned; (b) exec-spool/out files older than 24 hours; (c) *.bak files older than 24 hours, each moved into shelved/ as a .tar.xz archive (listing verified) and then deleted; durable ledger and log copies and *-migrated.json run-once markers are kept; (d) shelved/<dir> directories with no <dir>.tar.xz yet and nothing written in 24 hours, compressed to <dir>.tar.xz (listing verified) and then deleted. gm.db, browser-lease, prd logs, unknowns, receipts and witness logs are never pruned. error_code no_gm_state when <root>/.gm is absent.',
+        description: 'Reports and prunes runtime data under <root>/.gm. Reply: ok, exit_code, result, root, then one "area <name> before <size> after <size>" line per area, the five largest entries ("top <rel> <size>"), kept and would or pruned action lines, and counts. apply false (default) changes nothing. apply true prunes only: (a) lane-build/<lane> directories whose newest entry is older than 24 hours, with no live process cwd (checked through /proc on Linux only; where that check cannot run, lane-build is skipped and the reply says "lane-build: skipped, no live-process check"); cargo-home* is never pruned; (b) exec-spool/out files older than 24 hours; (c) *.bak files older than 24 hours, each moved into shelved/ as a .tar.xz archive (listing verified) and then deleted; durable ledger and log copies and *-migrated.json run-once markers are kept; (d) shelved/<dir> directories with no <dir>.tar.xz yet and nothing written in 24 hours, compressed to <dir>.tar.xz (listing verified) and then deleted. gm.db, browser-lease, prd logs, unknowns, receipts and witness logs are never pruned. error_code no_gm_state when <root>/.gm is absent.',
         inputSchema: {
             apply: z.boolean().optional().describe('Prune the classes listed above. Default false: report only.'),
             root: z.string().optional().describe('Project root holding .gm/. A relative path resolves against cwd. Default: cwd.'),
