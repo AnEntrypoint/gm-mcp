@@ -3,7 +3,7 @@ import { agentplugDir } from './paths.js'
 import { execFile } from './process-port.js'
 import { classifyGmServerCommand } from './gm-cmdline.js'
 import { readProcessTableAsync } from './process-table.js'
-import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -45,12 +45,21 @@ export function launchedEntryPath() {
     return fileURLToPath(import.meta.url)
 }
 
+// Symlinked installs (~/.gm-tools -> a cache dir) name one file by two paths; comparing the realpath keeps drift reports on one spelling.
+export function canonicalEntryPath(entry) {
+    try {
+        return realpathSync(entry)
+    } catch {
+        return entry
+    }
+}
+
 // The installed bundle entry: the deployed release-channel copy when it exists, else the entry this process runs from.
 // bundle-drift.js hashes it to detect a stale running bundle. Nothing is spawned from it.
 export function serverEntryPath() {
     const deployed = path.join(homedir(), '.gm-tools', 'gm-mcp-server.mjs')
-    if (existsSync(deployed)) return deployed
-    return launchedEntryPath()
+    if (existsSync(deployed)) return canonicalEntryPath(deployed)
+    return canonicalEntryPath(launchedEntryPath())
 }
 
 function readStateFile(filePath, port = null) {

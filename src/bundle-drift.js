@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { compareVersions, parseBundleVersion } from './self-update.js'
-import { launchedEntryPath, serverEntryPath } from './singleton.js'
+import { canonicalEntryPath, launchedEntryPath, serverEntryPath } from './singleton.js'
 import { appendDiagnostic } from './server-log.js'
 
 const DEFAULT_INTERVAL_MS = 30_000
@@ -34,7 +34,7 @@ function isBundle(bytes) {
 }
 
 export function bundleEntryPath() {
-    return launchedEntryPath()
+    return canonicalEntryPath(launchedEntryPath())
 }
 
 let running = null
