@@ -182,7 +182,7 @@ const LANG_BODY = {
 const EXEC_JS_BODY = {
     required: ['code'],
     fields: {
-        code: { type: 'string', aliases: ['body'], description: 'JavaScript body, run as nodejs. Pass it as the top-level raw_body argument: a JSON object body is refused. A leading "timeoutMs=<ms>" line sets the budget (floor 100, ceiling 900000).' },
+        code: { type: 'string', aliases: ['body'], description: 'JavaScript body, run as nodejs. Send it as the top-level raw_body string; body may also be the string, or an object whose code field holds it. A leading "timeoutMs=<ms>" line sets the budget (floor 100, ceiling 900000).' },
         timeoutMs: { type: 'integer', description: 'Wall-clock budget for the child in milliseconds (floor 100, ceiling 900000, default 300000). Sent as a leading timeoutMs= line of the raw body. Above 600000 the caller wait stops at the 600000 ms poll ceiling (timeout_seconds max 600): the timed-out reply then carries exec_limit_ms (the child budget) and poll_timeout_ceiling_ms (the wait) as separate fields, and resume_task keeps waiting on the same dispatch.' },
         cwd: { type: 'string', description: 'Directory the script runs in.' },
     },
