@@ -19,8 +19,8 @@ const LOCAL_INIT_ID = 'gm-relay-local-init'
 const RELAY_BUDGET_MS = (Number(process.env.GM_CODEMODE_TIMEOUT_MS) > 0 ? Number(process.env.GM_CODEMODE_TIMEOUT_MS) : DEFAULT_CODEMODE_TIMEOUT_MS) + 5000
 const HEALTH_PROBE_MS = 1500
 const RESTART_BUDGET_MS = 8000
-// After a failed singleton restart, calls in this window skip the health probe and the respawn and are served in-process.
-// A singleton that comes back inside the window is picked up once it expires (find9-relay-restart-probe-latency).
+// After a failed relay restart (a re-probe for an HTTP server a human started with --http), calls in this window skip the
+// health probe and are served in-process. A server that comes back inside the window is picked up once it expires (find9-relay-restart-probe-latency).
 const RESTART_COOLDOWN_MS = 30_000
 const LOCAL_START_BUDGET_MS = 15000
 
@@ -272,7 +272,7 @@ async function deliverLocal(state, request, expectsReply, relayFailure = null, d
     } catch (error) {
         const diagnosticId = randomUUID()
         appendDiagnostic('stdio-relay-local-failed', { diagnostic_id: diagnosticId, method: request?.method ?? null, error: describeError(error) })
-        if (expectsReply) writeFrame(errorFrame(request.id, RELAY_ERROR_CODE, `gm-mcp relay failed at two layers. Layer 1, relay gm-mcp-stdio-relay to HTTP singleton ${state.url} (port ${portOf(state.url)}): unreachable (${describeError(relayFailure)}) after ${RETRY_DELAYS_MS.length} retries and one restart. Layer 2, in-process fallback: ${describeError(error)}. Diagnostic id ${diagnosticId} (log ${logFilePath()}, event stdio-relay-local-failed). Next step: run \`gm-mcp ensure-http\` (or \`node <toolsDir>/gm-mcp-server.mjs self-update-status\`), then re-dispatch; reads answered empty during this window were not searched.`))
+        if (expectsReply) writeFrame(errorFrame(request.id, RELAY_ERROR_CODE, `gm-mcp relay failed at two layers. gm-mcp runs over stdio, and this session opens no listening port. Layer 1, relay to the HTTP server at ${state.url} (port ${portOf(state.url)}): unreachable (${describeError(relayFailure)}) after ${RETRY_DELAYS_MS.length} retries and one restart. Layer 2, in-process fallback: ${describeError(error)}. Diagnostic id ${diagnosticId} (log ${logFilePath()}, event stdio-relay-local-failed). Next step: relaunch the session to pick up a new bundle, then re-dispatch; reads answered empty during this window were not searched.`))
     }
 }
 

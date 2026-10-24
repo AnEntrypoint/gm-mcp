@@ -118,6 +118,11 @@ export function setServingTransport(kind) {
     servingTransport = kind
 }
 
+// The transport this process serves: 'stdio' unless index.js started the HTTP server.
+export function servingTransportKind() {
+    return normalizeTransport(servingTransport)
+}
+
 // The transport arrives from three places (setServingTransport, GM_MCP_TRANSPORT, a caller) in whatever case or
 // padding they carry. It is compared against HANDOVER_TRANSPORTS by exact string, so an untrimmed or upper-case
 // value -- or an empty GM_MCP_TRANSPORT, which `??` does not treat as absent -- would be reported `no-handover`

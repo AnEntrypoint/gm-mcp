@@ -78,6 +78,10 @@ carries the line; the stderr announcement keeps its once-per-bundle dedupe as `b
 Measured before on 0.2.39 served with `GM_MCP_BUNDLE_DRIFT_RELOAD=0` and 0.2.40 installed: the reply had
 `bundle_stale: true` and no restart text. A current server's reply has no staleness fields.
 
+## Unreleased - the server starts no HTTP listener, supervisor, registry or boot entry on its own
+
+gm-mcp no longer starts an HTTP listener, supervisor, instance registry or boot entry automatically. Stdio is the default and opens no port. `--http` is explicit only: a human types it to open a listening port. The `ensure-http`, `http-supervise` and `install-autostart` commands and the `scripts/install-autostart.mjs` script are removed, and the singleton, supervisor and instance-registry spawn helpers in `src/singleton.js` are deleted. `GM_MCP_RELAY` and `GM_MCP_TRANSPORT` no longer select a transport. Skills are served as prompts and resources.
+
 ## Unreleased - the initialize reply names the served surface
 
 A session that connected before the single `gm_codemode` surface kept its cached per-verb tool

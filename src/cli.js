@@ -4,14 +4,12 @@ import { flagValue } from './argv.js'
 import { gmDispatch, preloadVerbTable, replyEnvelopeSelfCheck } from './dispatch.js'
 import { runDevSync } from './dev-sync.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
-import { runningBundle } from './bundle-drift.js'
-import { recordRunningImage } from './running-images.js'
 import { clearLocalBuildPin, deployedBundleVersion, describeSelfUpdateOutcome, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, refreshDeployedBundleNow, selfUpdateStatus } from './self-update.js'
-import { defaultHttpPort, ensureHttpSingleton, ensureHttpSupervisor, holderIsOwn, httpMcpUrl, probeHealth, runHttpSupervisor, supervisorIntervalMs, sweepHttpInstances, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
+import { defaultHttpPort, httpMcpUrl, probeHealth, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
 import { reapReport, formatFindings } from './leak-reaper.js'
 import { formatLeakWatchLine, formatOrphanLine, formatOrphanTreeLine, leakWatchReport } from './leak-watch.js'
 import { attributePid, globalLedgerPath } from './child-ledger.js'
-import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
+import { appendDiagnostic, logFilePath } from './server-log.js'
 
 function repeatedFlag(name) {
     const values = []
@@ -63,10 +61,6 @@ examples:
 const DISPATCH_VALUE_FLAGS = new Set(['body', 'raw', 'cwd', 'session-id', 'timeout', 'poll', 'max-chars', 'resume'])
 
 const NO_IGNORE_VERBS = new Set(['grep', 'rg', 'codesearch', 'code_search'])
-
-// The awaited dispatch seed's own bound: short enough that a held spawn claim cannot stall a dispatch,
-// long enough that a server already binding the port answers /health.
-const DISPATCH_SEED_WAIT_MS = 250
 
 function flagNameOf(arg) {
     const name = arg.slice(2)
@@ -201,15 +195,6 @@ async function dispatchCommand() {
         return 2
     }
 
-    // Seeded after argv parsing: --help and a usage error run no dispatch and serve no MCP client, so
-    // seeding there only pays its cost for a command that ends without one. Every dispatch that does run
-    // still awaits one seeding with wait: false before gmDispatch, as AGENTS.md documents. The seed caps
-    // its own wait: it exists so a LATER MCP client finds a server on the port, and a dispatch gains
-    // nothing from sitting behind another starter's spawn claim for the full startup wait (20 s).
-    await ensureHttpSingleton({ port: defaultHttpPort(), wait: false, timeoutMs: DISPATCH_SEED_WAIT_MS }).catch((error) => {
-        appendDiagnostic('dispatch-singleton-failed', { error: describeError(error) })
-    })
-
     const text = await gmDispatch(parsed.args)
     process.stdout.write(text.endsWith('\n') ? text : `${text}\n`)
     return text.trimStart().startsWith('error:') ? 1 : 0
@@ -258,34 +243,6 @@ const COMMANDS = {
         const envelopes = replyEnvelopeSelfCheck()
         console.log(JSON.stringify(envelopes, null, 2))
         return Object.values(envelopes).some((reply) => reply.diagnostics_failed !== undefined) ? 1 : 0
-    },
-    'ensure-http': async () => {
-        const port = defaultHttpPort()
-        await sweepHttpInstances()
-        const result = await ensureHttpSingleton({ port })
-        if (!result.url) {
-            console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.error} port=${port} pid=${result.pid ?? 'none'} log=${logFilePath()}`)
-            return 1
-        }
-        console.log(`gm-mcp ${BUNDLE_VERSION}: ${result.reused ? 'reusing' : 'started'} the shared HTTP server (pid ${result.pid}) -- ${result.url}`)
-        const ours = !result.reused || await holderIsOwn(port, result.pid)
-        const supervision = ours ? ensureHttpSupervisor({ port }) : { started: false, reason: 'foreign-holder-not-supervised' }
-        if (supervision.started) {
-            console.log(`gm-mcp ${BUNDLE_VERSION}: armed the http supervisor (pid ${supervision.pid}, probing every ${Math.round(supervisorIntervalMs() / 1000)}s) -- it restarts ${result.url} when /health stops answering`)
-        } else {
-            console.log(`gm-mcp ${BUNDLE_VERSION}: supervisor ${supervision.reason}${supervision.pid ? ` (pid ${supervision.pid})` : ''}`)
-        }
-        return 0
-    },
-    'http-supervise': async () => {
-        const portFlag = Number(flagValue('port'))
-        const port = Number.isInteger(portFlag) && portFlag > 0 ? portFlag : defaultHttpPort()
-        const seconds = Number(flagValue('interval'))
-        const intervalMs = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : supervisorIntervalMs()
-        recordRunningImage('supervisor', runningBundle())
-        const result = await runHttpSupervisor({ port, intervalMs })
-        console.error(`gm-mcp ${BUNDLE_VERSION}: ${result.reason} port=${port} pid=${process.pid} log=${logFilePath()}`)
-        return result.supervised === false ? 1 : 0
     },
     call: async () => {
         const source = process.argv[3]
@@ -388,11 +345,7 @@ usage:
   gm-mcp-server.js --http [--port N] [--host H]
                                    serve MCP streamable HTTP on http://127.0.0.1:N/mcp
                                    (stateless, so a dropped client is just another request)
-  gm-mcp-server.js ensure-http     start the shared HTTP server if none is listening and print its url
-  gm-mcp-server.js http-status     report whether the shared HTTP server is answering
-  gm-mcp-server.js http-supervise [--port N] [--interval S]
-                                   watch the shared HTTP server forever and restart it when
-                                   /health stops answering (ensure-http arms one for you)
+  gm-mcp-server.js http-status     report whether a manually started HTTP server is answering (read-only)
   gm-mcp-server.js dispatch <verb> [--body <json>] [--raw <text>] [--cwd <dir>] [--no-ignore] [--help]
                                    run a gm dispatch from the shell and print its reply,
                                    with no MCP client involved
@@ -418,8 +371,8 @@ usage:
   gm-mcp-server.js self-update-now          check the release channel NOW, ignoring the hourly stamp (safe beside a
                                    running server: it starts none, binds no port and signals no process)
 
-register the durable transport instead of stdio with:
-  claude mcp remove gm -s user && claude mcp add --transport http gm ${'http://127.0.0.1:'}${defaultHttpPort()}${'/mcp'} -s user
+stdio is the default and opens no listening port. To serve HTTP, start it by hand and register it:
+  gm-mcp-server.js --http   (then: claude mcp add --transport http gm ${'http://127.0.0.1:'}${defaultHttpPort()}${'/mcp'} -s user)
 
 suppress self-update without a pin by setting ${'GM_MCP_NO_SELF_UPDATE'}=1 or creating ${noSelfUpdateFilePath()}`)
     process.exit(0)

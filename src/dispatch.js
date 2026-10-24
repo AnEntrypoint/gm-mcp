@@ -11,6 +11,8 @@ import { appendDiagnostic } from './server-log.js'
 import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessAnnouncement } from './bundle-drift.js'
 import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuationReserveFor, continuedReply, setContinuationStopped } from './continuation.js'
+import { prdFeedFor } from './prd-feed.js'
+import { bootstrapReply } from './live-state.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel, runGit } from './git-adapter.js'
 import { sweepOrphansAfterRespawn } from './triage-verbs.js'
@@ -2854,7 +2856,11 @@ export async function gmDispatch(args, signal, responseValueObserver) {
         const reply = withStaleBundleNotice(args?.verb, waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver), sessionId)
         if (typeof reply === 'string') replyDispatchId = /^dispatch_id: (\S+)/m.exec(reply)?.[1] ?? null
         if (VERBATIM_REPLY_VERBS.has(args?.verb)) return reply
-        return continuedReply(continuationKeyOf(args), reply)
+        const key = continuationKeyOf(args)
+        // prd_feed marks the server's own reads (the feed's prd-list lookups, the bootstrap and prompt reads): they get no feed and no bootstrap.
+        const feed = args?.prd_feed === true ? undefined : await prdFeedFor(key, args?.verb, reply, gmDispatch, args)
+        const continued = continuedReply(key, reply, Date.now(), feed !== undefined, feed)
+        return await bootstrapReply(gmDispatch, key, continued, { reply, args, feed })
     } catch (error) {
         appendDiagnostic('dispatch-error', { call_id: callId, session_id: sessionId, verb: args?.verb ?? null, error: error?.message ? String(error.message) : String(error), stack: error?.stack ? String(error.stack) : null })
         throw error

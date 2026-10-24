@@ -39,6 +39,10 @@ jobs:
           cache: npm
       - name: install
         run: npm ci
+      - name: embed the skills from the parent repo
+        run: node scripts/embed-skills.mjs
+      - name: regenerate the fast manifest from the tool surface
+        run: node scripts/build-fast-manifest.mjs
       - name: build the bundle from src/
         run: node scripts/build.mjs
       - name: drift gate on the rebuilt bundle
@@ -52,12 +56,14 @@ jobs:
           for attempt in 1 2 3 4 5; do
             git fetch -q origin main
             git reset -q --hard origin/main
+            node scripts/embed-skills.mjs
+            node scripts/build-fast-manifest.mjs
             node scripts/build.mjs
-            if git diff --quiet -- bin/gm-mcp-server.js; then
-              echo "bin/gm-mcp-server.js already matches src/"
+            if git diff --quiet -- bin/gm-mcp-server.js src/fast-manifest.js src/skills-snapshot.js; then
+              echo "bin/gm-mcp-server.js, src/fast-manifest.js and src/skills-snapshot.js already match src/"
               exit 0
             fi
-            git add bin/gm-mcp-server.js
+            git add bin/gm-mcp-server.js src/fast-manifest.js src/skills-snapshot.js
             git commit -m "bundle: rebuild gm-mcp-server.js"
             if git push origin HEAD:main; then
               # A push made with GITHUB_TOKEN starts no workflow run, so build-verify never

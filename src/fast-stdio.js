@@ -115,11 +115,10 @@ class FastStdioTransport {
     }
 }
 
-// Starts the cold path when the process was launched with no arguments and no relay or HTTP mode.
-// Returns false when the full CLI must run first.
+// Starts the cold path when the process was launched with no arguments. Returns false when the full CLI must run first.
+// No environment variable selects a transport: HTTP runs only when --http is typed (index.js wantsHttpTransport).
 export function startFastStdio({ onNeedFull }) {
     if (process.argv.length > 2) return false
-    if (process.env.GM_MCP_RELAY || (process.env.GM_MCP_TRANSPORT || '').trim().toLowerCase() === 'http') return false
     const transport = new FastStdioTransport(process.stdin, process.stdout, onNeedFull)
     transport.listen()
     globalThis[SHARED] = transport
