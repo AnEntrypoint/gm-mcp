@@ -2860,7 +2860,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
         // prd_feed marks the server's own reads (the feed's prd-list lookups, the bootstrap and prompt reads): they get no feed and no bootstrap.
         const feed = args?.prd_feed === true ? undefined : await prdFeedFor(key, args?.verb, reply, gmDispatch, args)
         const continued = continuedReply(key, reply, Date.now(), feed !== undefined, feed)
-        return await bootstrapReply(gmDispatch, key, continued, { reply, args, feed })
+        return bundleDrift().stale ? await bootstrapReply(gmDispatch, key, continued, { reply, args, feed }) : continued
     } catch (error) {
         appendDiagnostic('dispatch-error', { call_id: callId, session_id: sessionId, verb: args?.verb ?? null, error: error?.message ? String(error.message) : String(error), stack: error?.stack ? String(error.stack) : null })
         throw error
