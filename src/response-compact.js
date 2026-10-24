@@ -170,12 +170,14 @@ export const CODESEARCH_COMPLETE_REASON_KEY = 'complete_reason'
 
 export function withCodesearchCompleteness(verb, out) {
     if (verb !== 'codesearch' || !out || typeof out !== 'object' || Array.isArray(out)) return out
+    const { [CODESEARCH_COMPLETE_KEY]: _complete, [CODESEARCH_COMPLETE_REASON_KEY]: _reason, ...rest } = out
     const reasons = codesearchIncompleteReasons(out)
-    if (!reasons.length) return { ...out, [CODESEARCH_COMPLETE_KEY]: true }
+    if (!reasons.length) return { [CODESEARCH_COMPLETE_KEY]: true, ...rest }
+    const ordered = reasons.includes('stale_tree') ? ['stale_tree', ...reasons.filter(reason => reason !== 'stale_tree')] : reasons
     return {
-        ...out,
         [CODESEARCH_COMPLETE_KEY]: false,
-        [CODESEARCH_COMPLETE_REASON_KEY]: reasons.join(', '),
+        [CODESEARCH_COMPLETE_REASON_KEY]: ordered.join(', '),
+        ...rest,
     }
 }
 
