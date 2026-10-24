@@ -804,6 +804,13 @@ const HOUSEKEEP_LIST = 20
 
 const HOUSEKEEP_TOP = 5
 
+const TARGET_AGE_MS = 7 * DAY_MS
+
+const WATCHER_ROTATED = ['.watcher.log.1', '.child-pids.jsonl.1']
+
+// Comm names of build processes that keep a target/ directory in use (cargo, rustc and their prefixed variants).
+const BUILD_COMM = /^(cargo|rustc)/
+
 const HOUSEKEEP_AREAS = ['lane-build', 'exec-spool', 'shelved', 'browser-lease', 'gm.db', 'prd', 'unknowns', 'receipts', 'other']
 
 // Top-level directories whose children are the entries the report ranks.
@@ -1072,6 +1079,30 @@ async function executeHousekeep(gmDir, plan) {
             done.push({ cls: 'd', rel: entry.rel, outcome: 'failed', detail: error.message })
         }
     }
+
+    const target = plan.target
+    if (target?.state === 'candidate') {
+        const build = buildProcessCheck()
+        const stillIdle = build.status === 'checked' && build.running.length === 0 && !(await hasRecentFile(target.full, Date.now() - TARGET_AGE_MS))
+        if (!stillIdle) {
+            done.push({ cls: 'e', rel: 'target', outcome: 'kept', detail: 'became busy or recent before pruning' })
+        } else {
+            try {
+                await fs.promises.rm(target.full, { recursive: true, force: true })
+                done.push({ cls: 'e', rel: 'target', outcome: 'pruned', bytes: target.bytes })
+            } catch (error) {
+                done.push({ cls: 'e', rel: 'target', outcome: 'failed', detail: error.message })
+            }
+        }
+    }
+    for (const file of plan.watcherLogs) {
+        try {
+            await fs.promises.rm(file.full, { force: true })
+            done.push({ cls: 'f', rel: file.rel, outcome: 'pruned', bytes: file.bytes })
+        } catch (error) {
+            done.push({ cls: 'f', rel: file.rel, outcome: 'failed', detail: error.message })
+        }
+    }
     return done
 }
 
@@ -1086,27 +1117,84 @@ function writeStamp(gmDir, fields) {
 }
 
 
-async function scanHousekeep(gmDir) {
+// Build processes by comm name, read from /proc. Off Linux, or where /proc cannot be read, the target class is skipped.
+function buildProcessCheck() {
+    if (process.platform !== 'linux') return { status: 'skipped', running: [] }
+    let pids = []
+    try {
+        pids = fs.readdirSync(PROC).filter((name) => /^\d+$/.test(name))
+    } catch {
+        return { status: 'unmeasured', running: [] }
+    }
+    const running = pids.filter((pid) => BUILD_COMM.test(readText(`${PROC}/${pid}/comm`)?.trim() ?? ''))
+    return { status: 'checked', running }
+}
+
+
+// True when some file under dir is modified at or after cutoff. Stops at the first such file.
+async function hasRecentFile(dir, cutoff) {
+    for (const name of await readdirOrEmpty(dir)) {
+        const full = path.join(dir, name)
+        const info = await lstatOrNull(full)
+        if (info === null) continue
+        if (info.isDirectory() ? await hasRecentFile(full, cutoff) : info.mtimeMs >= cutoff) return true
+    }
+    return false
+}
+
+
+// The repo's own target/ directory (Cargo output). Never any other directory. State: absent, skipped, kept or candidate.
+async function planTarget(root, now, build, sized) {
+    const full = path.join(root, 'target')
+    const info = await lstatOrNull(full)
+    if (info === null || !info.isDirectory()) return { state: 'absent' }
+    if (build.status !== 'checked') return { state: 'skipped', full }
+    let reason = null
+    if (build.running.length > 0) reason = `cargo or rustc running (${build.running.length} process(es))`
+    else if (await hasRecentFile(full, now - TARGET_AGE_MS)) reason = 'newest file within 7 days'
+    if (reason === null) return { state: 'candidate', full, rel: 'target', bytes: (await measure(full)).bytes }
+    return { state: 'kept', full, reason, bytes: sized ? (await measure(full)).bytes : null }
+}
+
+
+// Rotated watcher logs older than a day. The live .watcher.log and .child-pids.jsonl are never named here.
+async function planWatcherLogs(gmDir, now) {
+    const found = []
+    for (const name of WATCHER_ROTATED) {
+        const full = path.join(gmDir, 'exec-spool', name)
+        const info = await lstatOrNull(full)
+        if (info !== null && info.isFile() && now - info.mtimeMs > DAY_MS) found.push({ rel: `exec-spool/${name}`, full, bytes: info.size })
+    }
+    return found
+}
+
+
+// sized: measure a kept target/ for the report. The automatic gate scans unsized, so an idle project costs no target walk.
+async function scanHousekeep(root, sized = true) {
+    const gmDir = path.join(root, '.gm')
     const before = await measureGm(gmDir)
     const processes = processCheck()
-    const plan = await planHousekeep(gmDir, before.entries, processes, Date.now())
+    const now = Date.now()
+    const plan = await planHousekeep(gmDir, before.entries, processes, now)
+    plan.target = await planTarget(root, now, buildProcessCheck(), sized)
+    plan.watcherLogs = await planWatcherLogs(gmDir, now)
     return { before, processes, plan }
 }
 
 
 // An apply pass with nothing to prune writes nothing: no stamp, no lock, no archive.
-const hasWork = (plan) => plan.lanes.length + plan.outFiles.length + plan.baks.length + plan.shelved.length > 0
+const hasWork = (plan) => plan.lanes.length + plan.outFiles.length + plan.baks.length + plan.shelved.length + plan.watcherLogs.length + (plan.target?.state === 'candidate' ? 1 : 0) > 0
 
 
 async function housekeepRun(root, apply, scan = null) {
     const gmDir = path.join(root, '.gm')
-    const { before, processes, plan } = scan ?? (await scanHousekeep(gmDir))
+    const { before, processes, plan } = scan ?? (await scanHousekeep(root))
     const writes = apply && hasWork(plan)
     if (writes) writeStamp(gmDir, { state: 'running' })
     const done = writes ? await executeHousekeep(gmDir, plan) : []
     const after = writes ? await measureGm(gmDir) : before
 
-    const counts = { a: 0, b: 0, c: 0, d: 0, failed: 0 }
+    const counts = { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, failed: 0 }
     for (const item of done) {
         if (item.outcome === 'failed') counts.failed += 1
         else if (item.outcome === 'pruned' || item.outcome === 'archived') counts[item.cls] += item.count ?? 1
@@ -1117,10 +1205,16 @@ async function housekeepRun(root, apply, scan = null) {
     for (const file of plan.outFiles) bump('exec-spool', file.bytes)
     for (const file of plan.baks) bump(housekeepArea(file.rel.split('/')[0]), file.bytes)
     for (const entry of plan.shelved) bump('shelved', entry.bytes)
-    const plannedTotal = [...prunable.values()].reduce((sum, bytes) => sum + bytes, 0)
+    for (const file of plan.watcherLogs) bump('exec-spool', file.bytes)
+    const targetBytes = plan.target?.state === 'candidate' ? plan.target.bytes : 0
+    const plannedTotal = [...prunable.values()].reduce((sum, bytes) => sum + bytes, 0) + targetBytes
 
     const lines = [`process ${processes.status}${processes.note ? `: ${processes.note}` : ''}`]
     if (!plan.lanesChecked) lines.push('lane-build: skipped, no live-process check')
+    const target = plan.target
+    if (target.state === 'absent') lines.push('target: no target directory')
+    else if (target.state === 'skipped') lines.push('target: skipped, no live-process check')
+    else if (target.state === 'kept') lines.push(`target: kept, ${target.reason}${target.bytes === null ? '' : ` (${sizeText(target.bytes)})`}`)
     for (const area of HOUSEKEEP_AREAS) {
         const tail = apply ? '' : `, prunable ${sizeText(prunable.get(area))}`
         lines.push(`area ${area} before ${sizeText(before.areas.get(area))} after ${sizeText(after.areas.get(area))}${tail}`)
@@ -1140,10 +1234,12 @@ async function housekeepRun(root, apply, scan = null) {
         if (plan.outFiles.length > 0) actions.push(`would b exec-spool/out ${plan.outFiles.length} file(s) ${sizeText(plan.outFiles.reduce((sum, file) => sum + file.bytes, 0))}`)
         for (const file of plan.baks) actions.push(`would c ${file.rel} ${sizeText(file.bytes)}`)
         for (const entry of plan.shelved) actions.push(`would d ${entry.rel} ${sizeText(entry.bytes)}`)
+        if (target.state === 'candidate') actions.push(`would e target ${sizeText(target.bytes)}`)
+        for (const file of plan.watcherLogs) actions.push(`would f ${file.rel} ${sizeText(file.bytes)}`)
     }
     const shown = actions.length > HOUSEKEEP_LIST ? [...actions.slice(0, HOUSEKEEP_LIST), `... ${actions.length - HOUSEKEEP_LIST} more`] : actions
     lines.push(...shown)
-    lines.push(`counts a=${counts.a} b=${counts.b} c=${counts.c} d=${counts.d} failed=${counts.failed}`)
+    lines.push(`counts a=${counts.a} b=${counts.b} c=${counts.c} d=${counts.d} e=${counts.e} f=${counts.f} failed=${counts.failed}`)
 
     const summary = { before_bytes: before.total, after_bytes: after.total, pruned: counts }
     if (writes) writeStamp(gmDir, { state: 'done', ...summary })
@@ -1202,7 +1298,7 @@ async function housekeepAutomatic(root) {
     const gmDir = path.join(root, '.gm')
     if (!isDirectory(gmDir) || !housekeepDue(gmDir)) return
     // Read-only scan first: a project with nothing to prune gets no lock file and no stamp.
-    const scan = await scanHousekeep(gmDir)
+    const scan = await scanHousekeep(root, false)
     if (!hasWork(scan.plan)) return
     const lock = acquireHousekeepLock(gmDir)
     if (lock === null) return
@@ -1298,7 +1394,7 @@ export const TRIAGE_VERBS = [
     },
     {
         name: 'housekeep',
-        description: 'Reports and prunes runtime data under <root>/.gm. Reply: ok, exit_code, result, root, then one "area <name> before <size> after <size>" line per area, the five largest entries ("top <rel> <size>"), kept and would or pruned action lines, and counts. apply false (default) changes nothing. apply true prunes only: (a) lane-build/<lane> directories whose newest entry is older than 24 hours, with no live process cwd (checked through /proc on Linux only; where that check cannot run, lane-build is skipped and the reply says "lane-build: skipped, no live-process check"); cargo-home* is never pruned; (b) exec-spool/out files older than 24 hours; (c) *.bak files older than 24 hours, each moved into shelved/ as a .tar.xz archive (listing verified) and then deleted; durable ledger and log copies and *-migrated.json run-once markers are kept; (d) shelved/<dir> directories with no <dir>.tar.xz yet and nothing written in 24 hours, compressed to <dir>.tar.xz (listing verified) and then deleted. gm.db, browser-lease, prd logs, unknowns, receipts and witness logs are never pruned. error_code no_gm_state when <root>/.gm is absent.',
+        description: 'Reports and prunes runtime data under <root>/.gm. Reply: ok, exit_code, result, root, then one "area <name> before <size> after <size>" line per area, the five largest entries ("top <rel> <size>"), kept and would or pruned action lines, and counts. apply false (default) changes nothing. apply true prunes only: (a) lane-build/<lane> directories whose newest entry is older than 24 hours, with no live process cwd (checked through /proc on Linux only; where that check cannot run, lane-build is skipped and the reply says "lane-build: skipped, no live-process check"); cargo-home* is never pruned; (b) exec-spool/out files older than 24 hours; (c) *.bak files older than 24 hours, each moved into shelved/ as a .tar.xz archive (listing verified) and then deleted; durable ledger and log copies and *-migrated.json run-once markers are kept; (d) shelved/<dir> directories with no <dir>.tar.xz yet and nothing written in 24 hours, compressed to <dir>.tar.xz (listing verified) and then deleted; (e) target/ at the repo root (Cargo output) when no cargo or rustc process runs and no file in it is newer than 7 days (checked through /proc on Linux only; elsewhere the reply says "target: skipped, no live-process check"); (f) exec-spool/.watcher.log.1 and exec-spool/.child-pids.jsonl.1 older than 24 hours (the live .watcher.log and .child-pids.jsonl are never touched). gm.db, browser-lease, prd logs, unknowns, receipts and witness logs are never pruned. error_code no_gm_state when <root>/.gm is absent.',
         inputSchema: {
             apply: z.boolean().optional().describe('Prune the classes listed above. Default false: report only.'),
             root: z.string().optional().describe('Project root holding .gm/. A relative path resolves against cwd. Default: cwd.'),
