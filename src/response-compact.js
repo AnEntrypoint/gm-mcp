@@ -1,4 +1,5 @@
 import { isPlainObject } from './plain-object.js';
+import * as yaml from 'js-yaml'
 const NOISE_KEYS = new Set(['request_fingerprint'])
 
 function envPositiveInt(name, fallback) {
@@ -565,7 +566,7 @@ function codesearchEnvelopeDuplicates(response, data) {
     return dropped
 }
 
-export function compactWireResponse(response, outPath, receiptVerb = response?.verb) {
+function compactWireFields(response, outPath, receiptVerb = response?.verb) {
     if (!isPlainObject(response)) return response
     const gitReceiptContext = WIRE_GIT_COMMIT_VERBS.has(receiptVerb)
         && gitReceiptCarriesNoFailure(response)
@@ -610,7 +611,7 @@ export function compactWireResponse(response, outPath, receiptVerb = response?.v
             }
         }
         if (key === 'data' && isPlainObject(next)) {
-            const inner = compactWireResponse(next, outPath, gitReceiptContext ? receiptVerb : null)
+            const inner = compactWireFields(next, outPath, gitReceiptContext ? receiptVerb : null)
             if (inner !== next) {
                 const { wire_compacted: innerWire, ...innerRest } = inner
                 if (innerWire?.omitted) omitted.push(`data.${innerWire.omitted}`)
@@ -637,6 +638,19 @@ export function compactWireResponse(response, outPath, receiptVerb = response?.v
         full_payload_via: WIRE_FULL_PAYLOAD_VIA,
     })
     return out
+}
+
+export function compactWireResponse(response, outPath, receiptVerb = response?.verb) {
+    const compacted = compactWireFields(response, outPath, receiptVerb)
+    if (compacted === response) return response
+    return wireTextBytes(compacted) < wireTextBytes(response) ? compacted : response
+}
+
+const toYaml = value => yaml.dump(value, { lineWidth: 100 })
+
+function wireTextBytes(value) {
+    const text = (value.verb === 'fs_read' ? renderVerbatimFileText(value, toYaml) : undefined) ?? toYaml(value)
+    return Buffer.byteLength(text, 'utf8')
 }
 
 export const VERBATIM_TEXT_MARKER = '--- data (verbatim, no indentation added) ---'
