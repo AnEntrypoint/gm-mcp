@@ -1,6 +1,6 @@
 {
   "name": "gm-mcp",
-  "version": "0.2.272",
+  "version": "0.2.273",
   "description": "MCP server exposing gm's spool dispatch cycle (write, poll, cleaned response) to any MCP client",
   "type": "module",
   "main": "src/index.js",
@@ -14,7 +14,6 @@
   "scripts": {
     "build": "node scripts/build-fast-manifest.mjs && node scripts/build.mjs && node scripts/session-invariance-witness.mjs",
     "verify-build": "node scripts/check-bin-drift.mjs",
-    "install-autostart": "node scripts/install-autostart.mjs",
     "postinstall": "node scripts/install-hooks.mjs"
   },
   "dependencies": {},

@@ -112,6 +112,10 @@ export function unsubscribeFeed(uri) {
     subscribed.delete(uri)
 }
 
+export function isSubscribed(uri) {
+    return subscribed.has(uri)
+}
+
 // The newest spool for a session across the projects this server has watched, or the newest on disk when none is watched.
 export function readFeedText(session) {
     const watched = [...feeds.values()].filter((state) => state.session === session).sort((a, b) => b.deadline - a.deadline)[0]

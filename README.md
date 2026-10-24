@@ -115,29 +115,25 @@ sha256 only when that moved:
   exception: their replies are file content handed back byte for byte, and a
   line appended there is not a note, it is a different file.
 
-An HTTP server then replaces itself: it spawns the new bundle with an IPC
-channel, sends it the listening socket, and stops accepting only once the
-child answers `gm-mcp-handover-ready`. Both processes hold the socket through
-the handover, so nothing is refused -- measured over 50s of continuous probing
-across one handover: 42056 requests, 0 refused, one transition
-`0.2.34/36660 -> 0.2.35/32508`. If the child never answers, the old
-close-then-bind shape runs instead, and if the replacement never answers
-`/health` the old process takes the port back.
+An HTTP server started by hand with `--http` does not replace itself. It keeps
+serving the bundle it loaded, reports the mismatch on `/health` and in each
+dispatch reply, and picks up the installed bundle only when a human restarts it.
+Nothing spawns the newer bundle, hands it the listening socket or takes its port.
 
-A reload never cuts work. It does not start while any dispatch is in flight
-(`bundle-handover-deferred`, retried on the next tick), and the outgoing
-process waits for the in-flight count to reach 0 before exiting, so a reply
-already being written is finished rather than truncated. Measured with a 40s
-dispatch: the newer bundle is installed 4s in, `/health` goes `stale: true`
-while the pid stayed put, the dispatch came back complete at 42.3s carrying the
-notice, and the server moved to the new bundle only afterwards.
+A stdio handover does not start while a dispatch is in flight
+(`bundle-handover-stdio-deferred`, retried on the next tick). It waits up to
+120 s for the in-flight count to reach 0, then proceeds
+(`bundle-handover-stdio-deferral-expired`).
 
 Refusals report staleness and stay on the old bundle: `no-downgrade`,
 `installed-version-unknown` and `running-not-a-bundle` (a dev checkout would
-otherwise restart on every edit). A stdio server is not exempt -- it stays the
-client's process and relays the client's frames to a child running the installed
-bundle (`gm-mcp: stdio handed to pid <n>` on stderr), so the session is never
-detached and no reconnect is needed; see AGENTS.md. Env: `GM_MCP_BUNDLE_DRIFT_INTERVAL_SECONDS` overrides the
+otherwise restart on every edit). A stdio server is not exempt. It stays the
+client's process. When a server started by hand answers on the default port, the
+stdio session relays the client's frames to it (`bundle-handover-stdio`, and
+`gm: this stdio session now relays to the installed bundle at <url>` on stderr),
+so the session is never detached and no reconnect is needed. When none answers,
+it announces the staleness and keeps serving its loaded bundle until the client
+relaunches; see AGENTS.md. Env: `GM_MCP_BUNDLE_DRIFT_INTERVAL_SECONDS` overrides the
 30s watch, `GM_MCP_BUNDLE_DRIFT_RELOAD=0` turns every reload off and keeps the
 reporting.
 
@@ -202,7 +198,9 @@ Every dispatch reply ends with a `continuation` block: `state` (`running` or `st
 
 `continuation-stop` (dispatched through `gm` with `verb: "continuation-stop"`, or on the session body) marks the session stopped. The next `instruction` dispatch with a non-empty `prompt` resumes it.
 
-Push is stdio only, and the server declares `logging`. When pending rows exist and no reply has arrived for `GM_MCP_IDLE_NOTIFY_MS` (default 300000), a `notifications/message` at level `warning` with logger `gm.continuation` carries the same object as `data`, once per idle period. A standalone stdio server emits it through its SDK server. The default stdio registration relays to the singleton and emits from the relay, which observes the continuation blocks in the replies it forwards. Streamable HTTP cannot push, so HTTP clients read `continuation` from the reply.
+The first successful reply of a session that names a `cwd` also carries a `bootstrap` block: `server` (version and transport), `runner` (`alive`, `heartbeat_age_ms`, `heartbeat_stale` from the `status` verb), `pending` (`count` and the first pending row as `next`), `checklist_uri` and `bootstrap_complete`. Its status and next-row reads share one 1500 ms budget. A read that misses it, or fails, is recorded in `bootstrap_error` and the reply is not held back. Refused and error replies, and JSON array replies, leave the bootstrap for a later reply. The skill prompts and `gm-completion` take an optional `cwd` argument that adds the same live state as text.
+
+Push is stdio only, and the server declares `logging`. When pending rows exist and no reply has arrived for `GM_MCP_IDLE_NOTIFY_MS` (default 300000), a `notifications/message` at level `warning` with logger `gm.continuation` carries the same object as `data`, once per idle period. A standalone stdio server emits it through its SDK server. A stdio session that relays to a server started by hand emits from the relay, which observes the continuation blocks in the replies it forwards. Streamable HTTP cannot push, so HTTP clients read `continuation` from the reply.
 
 ## Transport: stdio (default) and streamable HTTP
 
@@ -212,31 +210,40 @@ Push is stdio only, and the server declares `logging`. When pending rows exist a
 { "mcpServers": { "gm": { "command": "node", "args": ["C:\\Users\\user\\.gm-tools\\gm-mcp-server.mjs"] } } }
 ```
 
-That is a **stdio** server: the client owns the child process on a pipe. When
-that one connection drops, the tool is gone for the rest of the session and
-nothing can re-attach it -- the server cannot reconnect itself and the client
-will not re-spawn it. It surfaces as `No such tool available: mcp__gm__gm. Its
-MCP server 'gm' has disconnected`, and the only cure is `/mcp` -> gm ->
-Reconnect, or restarting the session.
+That is a **stdio** server, and stdio is the default: no flag selects it, and
+the server opens no listening port. The client owns the child process on a
+pipe. When that one connection drops, the tool is gone for the rest of the
+session and nothing can re-attach it. The server cannot reconnect itself, and
+the client will not re-spawn it. It surfaces as `No such tool available:
+mcp__gm__gm. Its MCP server 'gm' has disconnected`, and the only cure is `/mcp`,
+then gm, then Reconnect, or restarting the session.
 
-Both transports ship in the same bundle, so the durable one is a one-line
-registration change:
+A stdio start serves the session in-process over the spool: `main` in
+`src/index.js` runs `createServer` on stdio, and each dispatch is published to
+`.gm/exec-spool` by `dispatch.js`, so no port and no admin rights are needed on
+Windows, macOS or Linux. The stdio path starts no HTTP server, singleton,
+supervisor, instance registry or boot entry.
+
+The streamable HTTP transport runs only when a human starts it by hand with
+`--http` on the command line. `--port N` and `--host H` are optional (defaults
+8787 and 127.0.0.1). No environment variable or default enables it, and nothing
+starts it for you:
+
+```
+node ~/.gm-tools/gm-mcp-server.mjs --http --port 8787   # foreground; serves http://127.0.0.1:8787/mcp until stopped
+```
+
+The HTTP side is **stateless** (no session id, one request per call), so a
+client that disappears and comes back is just another request, and it binds
+`127.0.0.1` only. To register a server you started, run:
 
 ```
 claude mcp remove gm -s user && claude mcp add --transport http gm http://127.0.0.1:8787/mcp -s user
 ```
 
-The HTTP side is **stateless** (no session id, one request per call), so a
-client that disappears and comes back is just another request, and it binds
-`127.0.0.1` only. Manage it with (`gm-mcp-server.mjs` is the deployed copy under `~/.gm-tools`; the tree ships `gm-mcp/bin/gm-mcp-server.js`):
-
-```
-node C:\Users\user\.gm-tools\gm-mcp-server.mjs ensure-http          # start if nothing answers, arm the supervisor, print the url
-node C:\Users\user\.gm-tools\gm-mcp-server.mjs http-status          # is it answering
-node C:\Users\user\.gm-tools\gm-mcp-server.mjs --http --port 8787   # run it in the foreground
-```
-
-A stdio start serves the session in-process over the spool and starts no watchers and no HTTP server: `main` in `src/index.js` runs `createServer` on stdio, and each dispatch is published to `.gm/exec-spool` by `dispatch.js`, so no port and no admin rights are needed on Windows, macOS or Linux. Set `GM_MCP_RELAY=http` to make a stdio start relay each MCP frame to the shared HTTP server instead (`serveStdioRelay`, `src/stdio-relay.js`). A relay whose singleton stops answering restarts it once (8 s budget), answers the call in-process over the spool when the restart does not answer in time, and probes `/health` before each later call. Each relayed call is bounded by `GM_CODEMODE_TIMEOUT_MS` (default 600000) plus 5 s; an error names the failing layer. Because no state is carried between requests, a restart of the HTTP server never loses an in-flight dispatch.
+`gm-mcp-server.mjs` is the deployed copy under `~/.gm-tools` (the tree ships
+`gm-mcp/bin/gm-mcp-server.js`). `http-status` reports whether a server answers
+on the default port and starts nothing.
 
 The HTTP transport has its own stranding failure: if the port is empty when a
 session's client connects, that client answers `MCP server "gm" is not
@@ -247,66 +254,13 @@ reconnect or a restart.
 A stdio server never exits to pick up a newer bundle, because its client holds the pipe. `node ~/.gm-tools/gm-mcp-server.mjs self-update-status` lists each such process under `running_images` with `stale: true` and the version it runs.
 Operator action: relaunch the session that owns the process (`/mcp` then gm then Reconnect, or restart the session). The listing clears on relaunch. Killing the pid by hand also clears it, but the owning session loses its gm tools until it reconnects.
 
-### Across a reboot
+### No supervisor, no boot entry
 
-Nothing starts the HTTP server at login, so after a reboot the registration points at a dead port until something runs it. `ensure-http` is that something, and it is idempotent: it health-probes the port, starts the shared server only when nothing answers, arms the supervisor, and prints the url either way. Put it wherever your OS runs things at login -- Startup folder, Task Scheduler, a launchd agent, a systemd user unit:
-
-```bash
-node ~/.gm-tools/gm-mcp-server.mjs ensure-http                     # Unix
-node C:\Users\you\.gm-tools\gm-mcp-server.mjs ensure-http          # Windows
-```
-
-The supervisor is the part that has to survive, not the server. It is a detached `http-supervise` sibling that probes `/health` every 15 s (`GM_MCP_HTTP_SUPERVISOR_INTERVAL_SECONDS` moves it) and runs the same start path when the answer stops coming. `ensure-http` arms it on every run, including a run that found the server already up, so a supervisor that is killed comes back on the next `ensure-http` instead of leaving the durable transport unwatched. A `--http` server arms one for itself on start, and `GM_MCP_HTTP_SUPERVISOR=0` opts out of both -- `ensure-http` then prints `supervisor disabled`.
-
-Run the supervisor directly instead when you would rather supervise than probe once:
-
-```bash
-node ~/.gm-tools/gm-mcp-server.mjs http-supervise [--port N] [--interval S]
-```
-
-It is the same loop in the foreground, so it is also what a service manager wants as its command. Two supervisors never share a port: a second one finds the first one's pid in the state file and exits with `another supervisor owns this port`.
-
-State, both under `~/.agentplug` (`$AGENTPLUG_HOME` moves it): `gm-mcp-http.json` holds the server's pid and url, `gm-mcp-http-supervisor-<port>.json` the supervisor's. The health probe is the authority, so a stale file naming a dead pid never blocks a fresh start.
-
-### Instances are registered, and the registry is swept
-
-A `--http` server also registers itself as `gm-mcp-http-instance-<port>.json`
-(pid, bundle version, entry path, supervisor pid). The port is the instance
-identity, so a second `GM_MCP_HTTP_PORT`/`--port` is a legitimate second
-instance and keeps its own supervisor; the registry is what stops instances from
-piling up. `ensure-http` and every supervisor pass sweep it, and:
-
-- a port whose server no longer answers loses all three of its files, so that
-  number is reusable instead of the next launch walking to a new one;
-- an instance serving a bundle older than the installed one is **replaced in
-  place** -- the old server and its supervisor are stopped and a fresh server is
-  started on the *same* port, so an attached session reconnects to current code
-  instead of losing the port;
-- an instance with no live supervisor, a provably dead parent and zero
-  established connections is stopped outright. A client still attached is never
-  killed, and a parent that cannot be determined is left alone.
-
-`GM_MCP_HTTP_SUPERVISOR=0` still opts an instance out of supervision, and an
-instance registered that way is never swept as an orphan.
-
-### Installing that boot hook from the repo
-
-`scripts/install-autostart.mjs` writes the `ensure-http` call into the places this
-repository cannot hold itself -- the login/boot hook and the user crontab -- and
-then starts the server so the port is live immediately:
-
-```bash
-node scripts/install-autostart.mjs          # install, refresh, and ensure one is listening
-node scripts/install-autostart.mjs --check  # show what would change
-node scripts/install-autostart.mjs --uninstall
-```
-
-It is idempotent: every line it writes sits inside a marker block that a later
-run replaces wholesale, and it never starts a second server (the `ensure-http`
-health probe is the authority). `--hook`, `--cron-file`, `--log` and `--entry`
-move the targets; `--no-hook` or `--no-cron` skips one. The crontab it installs
-carries a `@reboot` entry and a five-minute entry, so a server that dies between
-invocations is back within five minutes even when nothing else runs gm.
+gm starts no supervisor, login or boot hook, crontab entry or service, and no
+install script writes one. A server started with `--http` runs until that
+process exits, and nothing brings it back after a reboot or a crash. If HTTP
+must survive a reboot, define that with your own service manager and have it run
+`gm-mcp-server.mjs --http`; gm does not write that definition.
 
 ## Leak watch: gm defends itself at runtime
 

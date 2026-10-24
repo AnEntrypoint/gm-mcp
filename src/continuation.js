@@ -1,12 +1,27 @@
 import * as yaml from 'js-yaml'
+import { BUNDLE_VERSION } from './bundle-version.js'
 
 export const CONTINUATION_STOP_VERB = 'continuation-stop'
 export const CONTINUATION_LOGGER = 'gm.continuation'
+export const CHECKLIST_URI = 'gm://workflow/completion-checklist'
+export const NEXT_PRD_URI = 'gm://prd/next'
+export const CONTINUATION_URI = 'gm://continuation'
+// Longest id or title a next_prd carries. The worst-case block is built from it, so the reserve covers it.
+export const NEXT_PRD_FIELD_CHARS = 160
+// Longest bootstrap_error text. Like NEXT_PRD_FIELD_CHARS, the worst-case block is built from it.
+export const BOOTSTRAP_ERROR_CHARS = 160
 const MAX_WORKERS = 4
-const GM_CONTINUE_REMINDER = 'gm walk not complete, run the gm-continue skill before ending this turn so remaining rows are searched for and drained'
-const WORST_CASE_CONTINUATION_BLOCK = { continuation: { state: 'stopped', pending_rows: 999999, idle_ms: 9999999999999, action: 'continue', max_concurrency: 4, reminder: GM_CONTINUE_REMINDER } }
+const GM_CONTINUE_REMINDER = 'gm walk not complete: read gm://prd/next and gm://workflow/completion-checklist, then take the next row before ending the turn'
+const PRD_STATE_VERBS = new Set(['prd-resolve', 'prd-add', 'prd-defer'])
+const WORST_FIELD = 'w '.repeat(NEXT_PRD_FIELD_CHARS / 2).trimEnd()
+const WORST_ERROR = 'e '.repeat(BOOTSTRAP_ERROR_CHARS / 2).trimEnd()
+// The reserve covers the continuation block and the once-per-session bootstrap block, which can arrive on the same reply.
+const WORST_CASE_CONTINUATION_BLOCK = {
+    continuation: { state: 'stopped', pending_rows: 999999, idle_ms: 9999999999999, action: 'continue', max_concurrency: 4, reminder: GM_CONTINUE_REMINDER, next_prd: { id: WORST_FIELD, status: 'pending', title: WORST_FIELD }, checklist_uri: CHECKLIST_URI },
+    bootstrap: { server: { version: BUNDLE_VERSION, transport: 'stdio' }, runner: { alive: false, heartbeat_age_ms: 9999999999999, heartbeat_stale: true }, pending: { count: 999999, next: { id: WORST_FIELD, status: 'pending', title: WORST_FIELD } }, checklist_uri: CHECKLIST_URI, bootstrap_complete: true, bootstrap_error: WORST_ERROR },
+}
 export const CONTINUATION_RESERVE_CHARS = yaml.dump(WORST_CASE_CONTINUATION_BLOCK, { lineWidth: 100 }).length + 1
-const DEFAULT_IDLE_NOTIFY_MS = 300000
+const DEFAULT_IDLE_NOTIFY_MS = 60000
 const MONITOR_TICK_MS = 15000
 const RELAY_KEY = 'relay'
 const PENDING_LINE = /^\s*prd_pending_count:\s*(\d+)\s*$/m
@@ -21,7 +36,7 @@ const entries = new Map()
 function entryFor(key) {
     let entry = entries.get(key)
     if (!entry) {
-        entry = { pending_rows: null, last_ms: Date.now(), stopped: false, notified_for: null, emitted: null }
+        entry = { pending_rows: null, last_ms: Date.now(), stopped: false, notified_for: null, emitted: null, bootstrapped: false }
         entries.set(key, entry)
     }
     return entry
@@ -47,6 +62,15 @@ export function continuationSnapshot(key, now = Date.now(), done = false) {
     return snapshot
 }
 
+// The snapshot of the key touched most recently, or null when no reply has been seen.
+export function latestContinuationSnapshot(now = Date.now()) {
+    let latest = null
+    for (const [key, entry] of entries) {
+        if (latest === null || entry.last_ms > latest.entry.last_ms) latest = { key, entry }
+    }
+    return latest === null ? null : continuationSnapshot(latest.key, now)
+}
+
 export function setContinuationStopped(key, stopped) {
     entryFor(key).stopped = stopped
 }
@@ -60,6 +84,24 @@ function parsedJsonOf(text) {
     }
 }
 
+// The pending-row count a reply reports, or null when it reports none.
+function pendingCountOf(text, json) {
+    const jsonPrdList = json?.value?.verb === 'prd-list'
+    if (jsonPrdList && typeof json.value.pending_total === 'number') return json.value.pending_total
+    const seen = PENDING_LINE.exec(text) ?? (PRD_LIST_VERB.test(text) ? PRD_PENDING_TOTAL.exec(text) ?? PRD_LIST_TOTAL.exec(text) : null)
+    if (seen) return Number(seen[1])
+    if (jsonPrdList && typeof json.value.total === 'number') return json.value.total
+    return null
+}
+
+// True when a reply moves the PRD: a PRD-state verb, or a pending count that differs from the last one seen for this key.
+export function prdChangeOf(key, verb, text) {
+    if (typeof text !== 'string') return false
+    if (PRD_STATE_VERBS.has(verb)) return true
+    const counted = pendingCountOf(text, parsedJsonOf(text))
+    return counted !== null && entryFor(key).pending_rows !== counted
+}
+
 function textBeforeTrailingBlock(text) {
     const heads = [...text.matchAll(CONTINUATION_HEADS)]
     for (const head of heads.reverse()) {
@@ -69,21 +111,22 @@ function textBeforeTrailingBlock(text) {
     return text
 }
 
-export function continuedReply(key, text, now = Date.now(), force = false) {
+// prd is undefined when the reply moves no PRD state. Otherwise it is {next_prd} (next_prd is null when no row is pending)
+// or {} when the next-row lookup did not answer in time; either way the block carries checklist_uri.
+export function continuedReply(key, text, now = Date.now(), force = false, prd = undefined) {
     if (typeof text !== 'string') return text
     const entry = entryFor(key)
     const json = parsedJsonOf(text)
-    const jsonPending = json?.value?.verb === 'prd-list' && typeof json.value.pending_total === 'number' ? json.value.pending_total : null
-    const jsonPrdTotal = json?.value?.verb === 'prd-list' && typeof json.value.total === 'number' ? json.value.total : null
-    const isPrdList = PRD_LIST_VERB.test(text)
-    const seen = PENDING_LINE.exec(text) ?? (isPrdList ? PRD_PENDING_TOTAL.exec(text) ?? PRD_LIST_TOTAL.exec(text) : null)
-    if (jsonPending !== null) entry.pending_rows = jsonPending
-    else if (seen) entry.pending_rows = Number(seen[1])
-    else if (jsonPrdTotal !== null) entry.pending_rows = jsonPrdTotal
+    const counted = pendingCountOf(text, json)
+    if (counted !== null) entry.pending_rows = counted
     const done = json?.value?.complete === true || json?.value?.data?.complete === true || COMPLETE_LINE.test(text)
     const snapshot = continuationSnapshot(key, now, done)
     entry.last_ms = now
     if (snapshot.action === 'none') return text
+    if (prd !== undefined) {
+        if (prd.next_prd !== undefined) snapshot.next_prd = prd.next_prd
+        snapshot.checklist_uri = CHECKLIST_URI
+    }
     // idle_ms moves on every reply, so a block is repeated only when its state, pending rows, action or concurrency changed.
     const state = JSON.stringify([snapshot.state, snapshot.pending_rows, snapshot.action, snapshot.max_concurrency ?? null])
     if (!force && entry.emitted === state) return text
@@ -96,9 +139,32 @@ export function continuedReply(key, text, now = Date.now(), force = false) {
     return `${body}${separator}${block}`
 }
 
+// Reserved until the session's bootstrap is attached, so the bootstrap fits under max_chars on its reply.
 export function continuationReserveFor(key) {
     const entry = entryFor(key)
-    return entry.stopped || entry.pending_rows !== null ? CONTINUATION_RESERVE_CHARS : 0
+    return entry.stopped || entry.pending_rows !== null || !entry.bootstrapped ? CONTINUATION_RESERVE_CHARS : 0
+}
+
+// True for the first caller only, so a session gets one bootstrap block.
+export function claimBootstrap(key) {
+    const entry = entryFor(key)
+    if (entry.bootstrapped) return false
+    entry.bootstrapped = true
+    return true
+}
+
+export function pendingRowsOf(key) {
+    return entryFor(key).pending_rows
+}
+
+// Adds the bootstrap block to a reply: a field of a JSON object, or YAML placed before the trailing continuation block.
+export function withBootstrap(text, block) {
+    if (typeof text !== 'string') return text
+    const json = parsedJsonOf(text)
+    if (json) return json.value !== null && typeof json.value === 'object' && !Array.isArray(json.value) ? JSON.stringify({ ...json.value, bootstrap: block }) : text
+    const body = textBeforeTrailingBlock(text)
+    const separator = body === '' || body.endsWith('\n') ? '' : '\n'
+    return `${body}${separator}${yaml.dump({ bootstrap: block }, { lineWidth: 100 })}${text.slice(body.length)}`
 }
 
 export function continuedReplyWithin(key, text, cap, cut, now = Date.now()) {
@@ -134,7 +200,8 @@ export function observeRelayedReply(text) {
     return block
 }
 
-export function startContinuationMonitor(emit) {
+// nextPrd, when given, is called before each idle warning and resolves to {next_prd} or {} (see continuedReply).
+export function startContinuationMonitor(emit, nextPrd = null) {
     const threshold = idleNotifyMs()
     const tick = Math.max(1000, Math.min(MONITOR_TICK_MS, threshold))
     const timer = setInterval(() => {
@@ -143,7 +210,10 @@ export function startContinuationMonitor(emit) {
             if (entry.stopped || entry.pending_rows === null || entry.pending_rows === 0) continue
             if (now - entry.last_ms < threshold || entry.notified_for === entry.last_ms) continue
             entry.notified_for = entry.last_ms
-            emit({ level: 'warning', logger: CONTINUATION_LOGGER, data: continuationSnapshot(key, now) })
+            const snapshot = continuationSnapshot(key, now)
+            const warn = (extra) => emit({ level: 'warning', logger: CONTINUATION_LOGGER, data: { ...snapshot, ...extra, checklist_uri: CHECKLIST_URI } })
+            if (nextPrd === null) warn({})
+            else Promise.resolve().then(nextPrd).then((feed) => warn(feed && feed.next_prd !== undefined ? { next_prd: feed.next_prd } : {}), () => warn({}))
         }
     }, tick)
     timer.unref?.()
