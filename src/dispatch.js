@@ -449,7 +449,8 @@ function scanMatchesTotal(holder, sampleLength) {
     return Number.isFinite(declared) && declared > sampleLength ? declared : sampleLength
 }
 
-const SLIM_MATCH_HEADER_KEYS = ['dispatch_id', 'ok', 'verb', 'complete', 'complete_reason', 'exhaustive', 'count']
+// The verdict leads a slim reply: a stale or partial result must read before its matches (line 1 of every codesearch reply).
+const SLIM_MATCH_HEADER_KEYS = ['complete', 'complete_reason', 'dispatch_id', 'ok', 'verb', 'exhaustive', 'count']
 
 function renderMatchesKept(out, holder, kept, toYaml, slim = false) {
     const keptMatches = holder.matches.slice(0, kept)
@@ -497,10 +498,11 @@ function oneLineMatch(match) {
     return `${match.path}:${match.line}: ${clipped}`
 }
 
+const VERDICT_KEYS = ['complete', 'complete_reason']
 const OUTCOME_KEYS = ['dispatch_id', 'ok', 'error_code', 'error', 'verb', 'branch']
 
 function outcomeText(text) {
-    const lines = OUTCOME_KEYS.map((key) => text.match(new RegExp(`^${key}: .*$`, 'm'))?.[0])
+    const lines = [...VERDICT_KEYS, ...OUTCOME_KEYS].map((key) => text.match(new RegExp(`^${key}: .*$`, 'm'))?.[0])
     lines.push(text.match(/^\w*sha: .*$/m)?.[0])
     return lines.filter((line) => line !== undefined).map((line) => `${line}\n`).join('')
 }
