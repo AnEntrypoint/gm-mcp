@@ -48,7 +48,7 @@ if (srcPaths.length === 0) {
 
 const problems = []
 if (!paths.includes('src/bundle-version.js')) {
-    problems.push(`src/ changed (${srcPaths.join(', ')}) but src/bundle-version.js did not, so the deployed bundle self-update guard reads the candidate as not newer and never installs it`)
+    problems.push(`src/ changed (${srcPaths.join(', ')}) but src/bundle-version.js did not, so the new build reports the same BUNDLE_VERSION as the one it replaces and the version no longer identifies the build`)
 } else {
     const before = bundleVersionAt(baseRev)
     const after = bundleVersionAt(head)
