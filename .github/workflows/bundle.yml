@@ -46,7 +46,7 @@ jobs:
       - name: build the bundle from src/
         run: node scripts/build.mjs
       - name: drift gate on the rebuilt bundle
-        run: GM_MCP_BUILD_INCLUDE=bin/gm-mcp-server.js node scripts/check-bin-drift.mjs
+        run: GM_MCP_BUILD_INCLUDE=bin/gm-mcp-server.js,src/fast-manifest.js,src/skills-snapshot.js node scripts/check-bin-drift.mjs
       - name: commit the rebuilt bundle to main
         env:
           GH_TOKEN: ${{ github.token }}

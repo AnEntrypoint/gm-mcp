@@ -93,7 +93,7 @@ if (fresh !== null && !fresh.includes(`var BUNDLE_VERSION = ${JSON.stringify(BUN
 }
 
 if (recordedSrcSha !== currentSrcSha) {
-    console.error(`bin/gm-mcp-server.js records src sha256 ${recordedSrcSha ?? 'none'} but src/ hashes to ${currentSrcSha}: a src/ file changed after the bundle was built, so the bundle is stale. Commit the rebuilt bundle with the src/ change, or push src/ alone and let bundle.yml rebuild it.`)
+    console.error(`bin/gm-mcp-server.js records src sha256 ${recordedSrcSha ?? 'none'} but src/ hashes to ${currentSrcSha}: a src/ file changed after the bundle was built, so the bundle is stale. Commit the rebuilt bundle with the src/ change, in the same commit: bin/gm-mcp-server.js plus each src/ file the build regenerates (src/fast-manifest.js, src/skills-snapshot.js).`)
     process.exit(1)
 }
 
