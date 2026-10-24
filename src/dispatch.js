@@ -61,7 +61,7 @@ function rememberProjectRoot(root) {
     }
 }
 
-function lastProjectRoot() {
+export function lastProjectRoot() {
     try {
         const root = readFileSync(path.join(agentplugDir(), LAST_PROJECT_FILE), 'utf8').trim()
         return root && gitRootAt(root) === root ? root : null

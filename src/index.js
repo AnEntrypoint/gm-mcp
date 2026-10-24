@@ -10,12 +10,13 @@ import { recordRunningImage } from './running-images.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runLeakWatchPass } from './leak-watch.js'
 import { runReleaseBridgeInBackground } from './release-bridge.js'
+import { housekeepInBackground } from './triage-verbs.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { installSpoolPort } from './spool-port.js'
 import { flagValue } from './argv.js'
 import { setServingTransport } from './bundle-drift.js'
 import { nodeSpoolPort } from './spool-port-node.js'
-import { gmDispatch, preloadVerbTable } from './dispatch.js'
+import { gmDispatch, lastProjectRoot, preloadVerbTable } from './dispatch.js'
 import { takeFastTransport } from './fast-stdio.js'
 import { nextPrdFor, setPrdPushSink } from './prd-feed.js'
 
@@ -72,6 +73,7 @@ function watchForStaleBundle({ handOver = null, transportKind = 'stdio', settled
 
 export async function main() {
     await preloadVerbTable()
+    housekeepInBackground(lastProjectRoot())
     if (wantsHttpTransport()) {
         setServingTransport('http')
         const { host, port } = httpListenOptions()

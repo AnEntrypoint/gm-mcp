@@ -15,6 +15,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
 import { lastTableError, readProcessTableAsync } from './process-table.js'
+import { appendDiagnostic } from './server-log.js'
 
 const LOCAL_TIMEOUT_MS = 60_000
 const NETWORK_TIMEOUT_MS = 180_000
@@ -784,6 +785,430 @@ export function sweepOrphansAfterRespawn(root) {
     return spoolOrphans({ roots: [root], dry_run: false })
 }
 
+// ---------------------------------------------------------------- housekeep (runtime data under .gm)
+
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+const HOUSEKEEP_START_DELAY_MS = 1_500
+
+const HOUSEKEEP_LOCK_STALE_MS = 2 * 60 * 60 * 1000
+
+const HOUSEKEEP_STAMP = 'housekeep.json'
+
+const HOUSEKEEP_LOCK = 'housekeep.lock'
+
+const ARCHIVE_TIMEOUT_MS = 600_000
+
+const HOUSEKEEP_LIST = 20
+
+const HOUSEKEEP_TOP = 5
+
+const HOUSEKEEP_AREAS = ['lane-build', 'exec-spool', 'shelved', 'browser-lease', 'gm.db', 'prd', 'unknowns', 'receipts', 'other']
+
+// Top-level directories whose children are the entries the report ranks.
+const EXPANDED = new Set(['lane-build', 'exec-spool', 'shelved', 'browser-lease'])
+
+// Directories the migration-copy scan never enters: their contents are durable or already archived.
+const BAK_SKIP_DIRS = new Set(['prd', 'unknowns', 'receipts', 'browser-lease', 'shelved'])
+
+const BAK_NAME = /\.bak$/
+
+// Run-once migration markers that rs-plugkit's row store reads (dir_migration_marker, log_dir_marker). Moving one re-runs its migration, so they are kept.
+const MIGRATION_MARKER = /-migrated\.json$/
+
+// Ledgers and logs are never moved, even when a copy of one is named .bak: the copy is reported and kept.
+const DURABLE_NAME = /dispatch-ledger|prd-log|unknowns-log|witness-log/
+
+
+function housekeepArea(top) {
+    if (top === 'prd' || top.startsWith('prd-log') || top.startsWith('prd.log')) return 'prd'
+    if (top.startsWith('unknowns')) return 'unknowns'
+    if (top.startsWith('gm.db')) return 'gm.db'
+    return HOUSEKEEP_AREAS.includes(top) ? top : 'other'
+}
+
+
+function sizeText(bytes) {
+    if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(1)}M`
+    if (bytes >= 1024) return `${Math.round(bytes / 1024)}K`
+    return `${bytes}B`
+}
+
+
+const lstatOrNull = (file) => fs.promises.lstat(file).catch(() => null)
+
+const readdirOrEmpty = (dir) => fs.promises.readdir(dir).catch(() => [])
+
+const isLiveCwd = (processes, dir) => processes.cwds.some((cwd) => cwd === dir || cwd.startsWith(dir + path.sep))
+
+
+// Bytes and newest mtime under target, never following symlinks. Awaits each entry, so the event loop serves dispatches meanwhile.
+async function measure(target) {
+    const info = await lstatOrNull(target)
+    if (info === null) return { bytes: 0, newest: 0, isDir: false }
+    if (!info.isDirectory()) return { bytes: info.size, newest: info.mtimeMs, isDir: false }
+    let bytes = 0
+    let newest = info.mtimeMs
+    for (const name of await readdirOrEmpty(target)) {
+        const sub = await measure(path.join(target, name))
+        bytes += sub.bytes
+        newest = Math.max(newest, sub.newest)
+    }
+    return { bytes, newest, isDir: true }
+}
+
+
+async function measureGm(gmDir) {
+    const entries = []
+    const areas = new Map(HOUSEKEEP_AREAS.map((area) => [area, 0]))
+    const add = (rel, full, top, stat) => {
+        entries.push({ rel, full, top, isDir: stat.isDir, bytes: stat.bytes, newest: stat.newest })
+        const area = housekeepArea(top)
+        areas.set(area, areas.get(area) + stat.bytes)
+    }
+    for (const top of await readdirOrEmpty(gmDir)) {
+        const full = path.join(gmDir, top)
+        const info = await lstatOrNull(full)
+        if (info === null) continue
+        if (EXPANDED.has(top) && info.isDirectory()) {
+            for (const child of await readdirOrEmpty(full)) {
+                const childFull = path.join(full, child)
+                add(`${top}/${child}`, childFull, top, await measure(childFull))
+            }
+        } else {
+            add(top, full, top, await measure(full))
+        }
+    }
+    const total = [...areas.values()].reduce((sum, bytes) => sum + bytes, 0)
+    return { entries, areas, total }
+}
+
+
+async function treeFiles(dir, rel = '') {
+    const found = []
+    for (const name of await readdirOrEmpty(dir)) {
+        const full = path.join(dir, name)
+        const info = await lstatOrNull(full)
+        if (info === null) continue
+        const relName = rel === '' ? name : `${rel}/${name}`
+        if (info.isDirectory()) {
+            for (const file of await treeFiles(full, relName)) found.push(file)
+        } else if (info.isFile()) {
+            found.push({ full, rel: relName, bytes: info.size, mtimeMs: info.mtimeMs })
+        }
+    }
+    return found
+}
+
+
+// Live process cwds on Linux. Other platforms have no /proc scan here: the check is skipped and the report says so.
+function processCheck() {
+    if (process.platform !== 'linux') return { status: 'skipped', cwds: [], note: `process check skipped on ${process.platform}` }
+    let pids = []
+    try {
+        pids = fs.readdirSync(PROC).filter((name) => /^\d+$/.test(name))
+    } catch {
+        return { status: 'unmeasured', cwds: [], note: '/proc unreadable; lane-build kept' }
+    }
+    const cwds = []
+    let unreadable = 0
+    for (const pid of pids) {
+        try {
+            cwds.push(fs.readlinkSync(`${PROC}/${pid}/cwd`))
+        } catch (error) {
+            if (error.code === 'EACCES' || error.code === 'EPERM') unreadable += 1
+        }
+    }
+    return { status: 'checked', cwds, note: unreadable > 0 ? `${unreadable} process cwd unreadable (other user), not counted live` : null }
+}
+
+
+async function findBackups(gmDir, now, plan) {
+    const walk = async (dir, rel) => {
+        for (const name of await readdirOrEmpty(dir)) {
+            if (rel === '' && BAK_SKIP_DIRS.has(name)) continue
+            const full = path.join(dir, name)
+            const relName = rel === '' ? name : `${rel}/${name}`
+            const info = await lstatOrNull(full)
+            if (info === null) continue
+            if (info.isDirectory()) {
+                await walk(full, relName)
+            } else if (info.isFile() && (BAK_NAME.test(name) || MIGRATION_MARKER.test(name)) && now - info.mtimeMs > DAY_MS) {
+                if (DURABLE_NAME.test(name)) plan.bakKept.push({ rel: relName, reason: 'durable log or ledger copy' })
+                else if (MIGRATION_MARKER.test(name)) plan.bakKept.push({ rel: relName, reason: 'run-once migration marker read by rs-plugkit' })
+                else plan.baks.push({ full, rel: relName, bytes: info.size })
+            }
+        }
+    }
+    await walk(gmDir, '')
+}
+
+
+async function planHousekeep(gmDir, entries, processes, now) {
+    const old = (ms) => now - ms > DAY_MS
+    const plan = { processes, lanes: [], laneKept: [], outFiles: [], baks: [], bakKept: [], shelved: [], shelvedKept: [] }
+    for (const entry of entries) {
+        if (!entry.rel.startsWith('lane-build/') || !entry.isDir || path.basename(entry.full).startsWith('cargo-home') || !old(entry.newest)) continue
+        if (processes.status === 'unmeasured') plan.laneKept.push({ rel: entry.rel, reason: processes.note })
+        else if (processes.status === 'checked' && isLiveCwd(processes, entry.full)) plan.laneKept.push({ rel: entry.rel, reason: 'live process cwd' })
+        else plan.lanes.push(entry)
+    }
+    for (const file of await treeFiles(path.join(gmDir, 'exec-spool', 'out'))) {
+        if (old(file.mtimeMs)) plan.outFiles.push(file)
+    }
+    await findBackups(gmDir, now, plan)
+    const shelvedDir = path.join(gmDir, 'shelved')
+    for (const entry of entries) {
+        if (!entry.rel.startsWith('shelved/') || !entry.isDir) continue
+        const name = path.basename(entry.full)
+        if (fs.existsSync(path.join(shelvedDir, `${name}.tar.xz`))) plan.shelvedKept.push({ rel: entry.rel, reason: 'archive exists' })
+        else if (!old(entry.newest)) plan.shelvedKept.push({ rel: entry.rel, reason: 'written within 24h' })
+        else plan.shelved.push(entry)
+    }
+    return plan
+}
+
+
+// First free name under dir: <base>.tar.xz, then <base>-<stamp>[-n].tar.xz. An existing archive is never overwritten.
+async function freeArchiveName(dir, base) {
+    const stamp = utcStamp()
+    for (let n = 0; ; n += 1) {
+        const candidate = path.join(dir, n === 0 ? `${base}.tar.xz` : `${base}-${stamp}-${n}.tar.xz`)
+        if (!fs.existsSync(candidate)) return candidate
+    }
+}
+
+
+// Archives parent/name as an xz tar written beside the target, then lists it and checks every expected entry before the atomic rename.
+async function archiveEntry(parent, name, archive) {
+    const full = path.join(parent, name)
+    const info = await lstatOrNull(full)
+    if (info === null) return { ok: false, reason: 'missing' }
+    const expected = [name]
+    if (info.isDirectory()) {
+        for (const file of await treeFiles(full)) expected.push(`${name}/${file.rel}`)
+    }
+    const tmp = tempBeside(archive)
+    const made = await run('tar', ['-cJf', tmp, '-C', parent, name], { timeout: ARCHIVE_TIMEOUT_MS })
+    if (made.status !== 0) {
+        fs.rmSync(tmp, { force: true })
+        return { ok: false, reason: `tar: ${utf8(made.stderr).trim().slice(0, 160) || `exit ${made.status}`}` }
+    }
+    const listed = await run('tar', ['-tJf', tmp], { timeout: ARCHIVE_TIMEOUT_MS })
+    const listing = new Set(utf8(listed.stdout).split('\n').map((line) => line.replace(/\/$/, '')))
+    const missing = expected.find((entry) => !listing.has(entry))
+    if (listed.status !== 0 || missing !== undefined) {
+        fs.rmSync(tmp, { force: true })
+        return { ok: false, reason: listed.status !== 0 ? 'listing failed' : `archive lacks ${missing}` }
+    }
+    if (fs.existsSync(archive)) {
+        fs.rmSync(tmp, { force: true })
+        return { ok: false, reason: 'archive exists' }
+    }
+    fs.renameSync(tmp, archive)
+    return { ok: true, archive }
+}
+
+
+async function executeHousekeep(gmDir, plan) {
+    const done = []
+    const fresh = processCheck()
+    for (const lane of plan.lanes) {
+        if (fresh.status === 'unmeasured' || (fresh.status === 'checked' && isLiveCwd(fresh, lane.full))) {
+            done.push({ cls: 'a', rel: lane.rel, outcome: 'kept', detail: 'live process cwd' })
+            continue
+        }
+        try {
+            fs.rmSync(lane.full, { recursive: true, force: true })
+            done.push({ cls: 'a', rel: lane.rel, outcome: 'pruned', bytes: lane.bytes })
+        } catch (error) {
+            done.push({ cls: 'a', rel: lane.rel, outcome: 'failed', detail: error.message })
+        }
+    }
+
+    let removed = 0
+    let removedBytes = 0
+    for (const file of plan.outFiles) {
+        try {
+            await fs.promises.rm(file.full, { force: true })
+            removed += 1
+            removedBytes += file.bytes
+        } catch (error) {
+            done.push({ cls: 'b', rel: file.rel, outcome: 'failed', detail: error.message })
+        }
+    }
+    done.push({ cls: 'b', rel: 'exec-spool/out', outcome: 'pruned', count: removed, bytes: removedBytes })
+
+    const shelved = path.join(gmDir, 'shelved')
+    if (plan.baks.length > 0 || plan.shelved.length > 0) fs.mkdirSync(shelved, { recursive: true })
+    for (const file of plan.baks) {
+        const base = path.basename(file.full)
+        const made = await archiveEntry(path.dirname(file.full), base, await freeArchiveName(shelved, base))
+        if (!made.ok) {
+            done.push({ cls: 'c', rel: file.rel, outcome: 'kept', detail: made.reason })
+            continue
+        }
+        try {
+            fs.rmSync(file.full, { force: true })
+            done.push({ cls: 'c', rel: file.rel, outcome: 'archived', detail: path.relative(gmDir, made.archive), bytes: file.bytes })
+        } catch (error) {
+            done.push({ cls: 'c', rel: file.rel, outcome: 'failed', detail: `archived to ${path.relative(gmDir, made.archive)} but not deleted: ${error.message}` })
+        }
+    }
+    for (const entry of plan.shelved) {
+        const name = path.basename(entry.full)
+        const made = await archiveEntry(shelved, name, path.join(shelved, `${name}.tar.xz`))
+        if (!made.ok) {
+            done.push({ cls: 'd', rel: entry.rel, outcome: 'kept', detail: made.reason })
+            continue
+        }
+        try {
+            fs.rmSync(entry.full, { recursive: true, force: true })
+            done.push({ cls: 'd', rel: entry.rel, outcome: 'archived', detail: path.relative(gmDir, made.archive), bytes: entry.bytes })
+        } catch (error) {
+            done.push({ cls: 'd', rel: entry.rel, outcome: 'failed', detail: error.message })
+        }
+    }
+    return done
+}
+
+
+function writeStamp(gmDir, fields) {
+    try {
+        writeAtomic(path.join(gmDir, HOUSEKEEP_STAMP), `${JSON.stringify({ last_run_ms: Date.now(), last_run: new Date().toISOString(), ...fields }, null, 2)}\n`)
+        return true
+    } catch {
+        return false
+    }
+}
+
+
+async function housekeepRun(root, apply) {
+    const gmDir = path.join(root, '.gm')
+    const before = await measureGm(gmDir)
+    const processes = processCheck()
+    const plan = await planHousekeep(gmDir, before.entries, processes, Date.now())
+    if (apply) writeStamp(gmDir, { state: 'running' })
+    const done = apply ? await executeHousekeep(gmDir, plan) : []
+    const after = apply ? await measureGm(gmDir) : before
+
+    const counts = { a: 0, b: 0, c: 0, d: 0, failed: 0 }
+    for (const item of done) {
+        if (item.outcome === 'failed') counts.failed += 1
+        else if (item.outcome === 'pruned' || item.outcome === 'archived') counts[item.cls] += item.count ?? 1
+    }
+    const prunable = new Map(HOUSEKEEP_AREAS.map((area) => [area, 0]))
+    const bump = (area, bytes) => prunable.set(area, prunable.get(area) + bytes)
+    for (const lane of plan.lanes) bump('lane-build', lane.bytes)
+    for (const file of plan.outFiles) bump('exec-spool', file.bytes)
+    for (const file of plan.baks) bump(housekeepArea(file.rel.split('/')[0]), file.bytes)
+    for (const entry of plan.shelved) bump('shelved', entry.bytes)
+    const plannedTotal = [...prunable.values()].reduce((sum, bytes) => sum + bytes, 0)
+
+    const lines = [`process ${processes.status}${processes.note ? `: ${processes.note}` : ''}`]
+    for (const area of HOUSEKEEP_AREAS) {
+        const tail = apply ? '' : `, prunable ${sizeText(prunable.get(area))}`
+        lines.push(`area ${area} before ${sizeText(before.areas.get(area))} after ${sizeText(after.areas.get(area))}${tail}`)
+    }
+    for (const entry of [...after.entries].sort((x, y) => y.bytes - x.bytes).slice(0, HOUSEKEEP_TOP)) {
+        lines.push(`top ${entry.rel} ${sizeText(entry.bytes)}`)
+    }
+    const actions = []
+    for (const item of [...plan.laneKept, ...plan.bakKept, ...plan.shelvedKept]) actions.push(`kept ${item.rel}: ${item.reason}`)
+    if (apply) {
+        for (const item of done) {
+            if (item.cls === 'b') actions.push(`${item.outcome} b exec-spool/out ${item.count} file(s) ${sizeText(item.bytes)}`)
+            else actions.push(`${item.outcome} ${item.cls} ${item.rel}${item.detail ? ` (${item.detail})` : ''}${item.bytes !== undefined ? ` ${sizeText(item.bytes)}` : ''}`)
+        }
+    } else {
+        for (const lane of plan.lanes) actions.push(`would a ${lane.rel} ${sizeText(lane.bytes)}`)
+        if (plan.outFiles.length > 0) actions.push(`would b exec-spool/out ${plan.outFiles.length} file(s) ${sizeText(plan.outFiles.reduce((sum, file) => sum + file.bytes, 0))}`)
+        for (const file of plan.baks) actions.push(`would c ${file.rel} ${sizeText(file.bytes)}`)
+        for (const entry of plan.shelved) actions.push(`would d ${entry.rel} ${sizeText(entry.bytes)}`)
+    }
+    const shown = actions.length > HOUSEKEEP_LIST ? [...actions.slice(0, HOUSEKEEP_LIST), `... ${actions.length - HOUSEKEEP_LIST} more`] : actions
+    lines.push(...shown)
+    lines.push(`counts a=${counts.a} b=${counts.b} c=${counts.c} d=${counts.d} failed=${counts.failed}`)
+
+    const summary = { before_bytes: before.total, after_bytes: after.total, pruned: counts }
+    if (apply) writeStamp(gmDir, { state: 'done', ...summary })
+    const result = apply
+        ? `housekeep applied: ${sizeText(before.total)} to ${sizeText(after.total)}, freed ${sizeText(before.total - after.total)}`
+        : `housekeep dry-run: ${sizeText(before.total)}, prunable ${sizeText(plannedTotal)}`
+    return { result, lines, summary }
+}
+
+
+async function housekeepVerb(args) {
+    const base = rootOf(args)
+    const root = typeof args.root === 'string' && args.root.trim() !== '' ? path.resolve(base, args.root.trim()) : base
+    if (!isDirectory(path.join(root, '.gm'))) return refused('no_gm_state', `no .gm directory under ${root}`)
+    const pass = await housekeepRun(root, args.apply === true)
+    return ok(pass.result, [['root', root]], pass.lines)
+}
+
+
+function housekeepDue(gmDir) {
+    const text = readText(path.join(gmDir, HOUSEKEEP_STAMP))
+    if (text === null) return true
+    try {
+        const age = Date.now() - Number(JSON.parse(text).last_run_ms)
+        return !(age >= 0 && age < DAY_MS)
+    } catch {
+        return true
+    }
+}
+
+
+// Lock by atomic create (wx). A lock older than the stale bound is a dead run's and is reclaimed once.
+function acquireHousekeepLock(gmDir) {
+    const file = path.join(gmDir, HOUSEKEEP_LOCK)
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            const fd = fs.openSync(file, 'wx')
+            try {
+                fs.writeSync(fd, `${process.pid}\n`)
+            } finally {
+                fs.closeSync(fd)
+            }
+            return file
+        } catch (error) {
+            if (error.code !== 'EEXIST') return null
+            const found = statOf(file)
+            if (found === null || Date.now() - found.mtimeMs < HOUSEKEEP_LOCK_STALE_MS) return null
+            fs.rmSync(file, { force: true })
+        }
+    }
+    return null
+}
+
+
+async function housekeepAutomatic(root) {
+    const gmDir = path.join(root, '.gm')
+    if (!isDirectory(gmDir) || !housekeepDue(gmDir)) return
+    const lock = acquireHousekeepLock(gmDir)
+    if (lock === null) return
+    try {
+        if (!housekeepDue(gmDir)) return
+        const pass = await housekeepRun(root, true)
+        appendDiagnostic('housekeep-run', { root, ...pass.summary })
+    } finally {
+        fs.rmSync(lock, { force: true })
+    }
+}
+
+
+// Server-start entry: at most one apply pass per 24 hours per project. Runs after a short delay, detached, and never throws into the caller.
+export function housekeepInBackground(root) {
+    if (typeof root !== 'string' || root.trim() === '') return
+    const timer = setTimeout(() => {
+        housekeepAutomatic(path.resolve(root.trim())).catch((error) => appendDiagnostic('housekeep-failed', { root, error: String(error?.message ?? error) }))
+    }, HOUSEKEEP_START_DELAY_MS)
+    timer.unref?.()
+}
+
+
 // ---------------------------------------------------------------- registry
 
 export const TRIAGE_VERBS = [
@@ -853,5 +1278,15 @@ export const TRIAGE_VERBS = [
             disk_paths: z.array(z.string()).optional().describe('Paths whose filesystem is reported (default ["/", "/workspace"]); a missing path is skipped.'),
         },
         handler: toolReply(resourcesVerb),
+    },
+    {
+        name: 'housekeep',
+        description: 'Reports and prunes runtime data under <root>/.gm. Reply: ok, exit_code, result, root, then one "area <name> before <size> after <size>" line per area, the five largest entries ("top <rel> <size>"), kept and would or pruned action lines, and counts. apply false (default) changes nothing. apply true prunes only: (a) lane-build/<lane> directories whose newest entry is older than 24 hours, with no live process cwd (Linux scans /proc; other platforms skip that check and say so); cargo-home* is never pruned; (b) exec-spool/out files older than 24 hours; (c) *.bak files older than 24 hours, each moved into shelved/ as a .tar.xz archive (listing verified) and then deleted; durable ledger and log copies and *-migrated.json run-once markers are kept; (d) shelved/<dir> directories with no <dir>.tar.xz yet and nothing written in 24 hours, compressed to <dir>.tar.xz (listing verified) and then deleted. gm.db, browser-lease, prd logs, unknowns, receipts and witness logs are never pruned. error_code no_gm_state when <root>/.gm is absent.',
+        inputSchema: {
+            apply: z.boolean().optional().describe('Prune the classes listed above. Default false: report only.'),
+            root: z.string().optional().describe('Project root holding .gm/. A relative path resolves against cwd. Default: cwd.'),
+            cwd: z.string().optional().describe('Project root when root is omitted. Required.'),
+        },
+        handler: toolReply(housekeepVerb),
     },
 ]
