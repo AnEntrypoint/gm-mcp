@@ -9,7 +9,7 @@ const sourceVerbs = path.join(path.dirname(fileURLToPath(import.meta.url)), '..'
 const verbsFile = path.resolve(flags.module ?? sourceVerbs)
 
 const REQUIRED_VERBS = [
-    'instruction', 'phase-status', 'transition', 'prd-add', 'prd-list', 'prd-resolve',
+    'instruction', 'phase-status', 'transition', 'prd-add', 'prd-list', 'prd-resolve', 'prd-note', 'prd-close',
     'codesearch', 'codeinsight', 'codeinsight_index', 'exec_js', 'fs_read', 'fs_readdir',
     'git_status', 'git_log', 'git_diff', 'git_show', 'git_push', 'git_finalize',
     'task-spawn', 'task-list', 'wait', 'health', 'status',

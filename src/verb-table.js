@@ -262,6 +262,25 @@ const PRD_RESOLVE_BODY = {
         cwd: { type: 'string', description: 'Project root when it differs from the dispatch root.' },
     },
 }
+const PRD_NOTE_BODY = {
+    required: ['id', 'note'],
+    fields: {
+        id: { type: 'string', aliases: ['ids', 'row_id'], description: 'Open row id to annotate.' },
+        note: { type: 'string', description: 'Note text. Stored with its timestamp and session_id; the row prose and status are not rewritten.' },
+        field: { type: 'string', description: 'Name of the list the note appends to. Defaults to notes. Lowercase letters, digits and underscores; a reserved row field such as description, status or blockedBy is refused.' },
+    },
+}
+const PRD_CLOSE_BODY = {
+    required: ['id', 'status', 'resolution', 'witness_evidence', 'witness_dispatch_id'],
+    fields: {
+        id: { type: 'string', aliases: ['ids', 'row_id'], description: 'Open row id to close.' },
+        status: { type: 'string', enum: ['resolved', 'stale'], description: 'resolved when the work is done and witnessed; stale when the premise is refuted and witnessed.' },
+        resolution: { type: 'string', aliases: ['resolution_text'], description: 'Resolution note, logged as the closing note.' },
+        witness_evidence: { type: 'string', aliases: ['witness'], description: 'Observed output that closes the row (file:line, codesearch hit or exec output). Logged with the row.' },
+        witness_dispatch_id: { type: 'string', aliases: ['dispatch_id'], description: 'Dispatch id of a live run recorded in this project ledger, made under a session other than the closing session. Required for resolved and stale alike.' },
+        cwd: { type: 'string', description: 'Project root when it differs from the dispatch root.' },
+    },
+}
 const PRD_LIST_BODY = {
     required: [],
     fields: {
@@ -786,6 +805,8 @@ const REGISTRY_ROWS = [
     { canonical: 'prd_resolve', hyphen: true, body: PRD_RESOLVE_BODY },
     { canonical: 'prd_list', hyphen: true, aliases: PRD_LIST_KEYS, fields: PRD_LIST_FIELDS, description: PRD_LIST_DESCRIPTION, body: PRD_LIST_BODY },
     { canonical: 'prd_defer', hyphen: true },
+    { canonical: 'prd_note', hyphen: true, description: 'Append one note to an open PRD row. The row fields are not rewritten: the note lands on the named list (default notes) with its timestamp and session_id. Refused when the row is not open.', body: PRD_NOTE_BODY },
+    { canonical: 'prd_close', hyphen: true, description: 'Close an open PRD row as resolved or stale. Requires resolution, witness_evidence and the witness_dispatch_id of a live run from another session. Logs the row to .gm/prd-log.jsonl and deletes its open file under .gm/prd/.', body: PRD_CLOSE_BODY },
     { canonical: 'prd_witness_request', hyphen: true, description: 'Ask a separate verifier session to witness a PRD row: records the request on the row with the requesting session.', body: PRD_WITNESS_REQUEST_BODY },
     { canonical: 'expansion_audit', hyphen: true, description: 'Record one traversal sweep (scope, rows_added, unknowns_added) in .gm/expansion-audit.jsonl; both counts zero with no open rows or unknowns is the verifiable end state. {list:true} reads the log.', body: EXPANSION_AUDIT_BODY },
     { canonical: 'prd_repair', hyphen: true },
