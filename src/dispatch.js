@@ -2845,6 +2845,14 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     if (args?.verb === 'instruction' && typeof args?.body?.prompt === 'string' && args.body.prompt.trim() !== '') {
         setContinuationStopped(continuationKeyOf(args), false)
     }
+    if (args?.verb === 'status' && args?.prd_feed === true && typeof args?.cwd === 'string' && args.cwd.trim()) {
+        // A feed status read is a liveness probe: a fresh heartbeat answers it from the status file, not behind the daemon sweep.
+        const probed = resolveDispatchRoot(args.cwd)
+        const live = probed.error ? null : readDaemonLiveness(spoolDirOf(probed.root))
+        if (live?.alive === true && typeof live.heartbeat_age_ms === 'number') {
+            return JSON.stringify({ ok: true, verb: 'status', data: { daemon: { alive: true, heartbeat_age_ms: live.heartbeat_age_ms, heartbeat_stale: false, source: 'readDaemonLiveness' } } })
+        }
+    }
     inflightDispatches += 1
     const startedAtMs = Date.now()
     const sessionId = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : null) || null
