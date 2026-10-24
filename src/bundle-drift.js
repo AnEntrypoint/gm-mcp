@@ -147,9 +147,10 @@ export function bundleDrift({ transport } = {}) {
     const stale = runningState.sha256 !== installedState.sha256
     if (!stale) return { ...base, stale: false, reloadable: false, refusal: null }
     const refused = reloadRefusal(runningState, installedState)
-    const refusal = refused.code === null && !HANDOVER_TRANSPORTS.has(kind)
+    const unhanded = refused.code === null && !HANDOVER_TRANSPORTS.has(kind)
         ? { code: 'no-handover', reason: `a ${kind} server cannot replace itself without dropping its client, so a relaunch serves the installed bundle` }
         : refused
+    const refusal = (unhanded.code === null ? handoverRefusalFor(installedState.sha256) : null) ?? unhanded
     return {
         ...base,
         stale: true,
@@ -158,6 +159,19 @@ export function bundleDrift({ transport } = {}) {
         refusal_reason: refusal.reason,
         one_command: refusal.code === null ? null : `restart the gm MCP client (or reconnect the gm MCP server) so it relaunches from ${installedState.path}`,
     }
+}
+
+// The last handover attempt for one installed bundle. A failed or deferred handover did not reload, so drift must stop
+// reporting that bundle as reloadable until a later handover for the same bundle succeeds.
+let handoverRefusal = null
+
+export function recordHandoverRefusal(installedSha256, outcome, reason) {
+    handoverRefusal = { installedSha256, code: `handover-${outcome}`, reason: reason ?? outcome }
+}
+
+function handoverRefusalFor(installedSha256) {
+    if (!handoverRefusal || handoverRefusal.installedSha256 !== installedSha256) return null
+    return { code: handoverRefusal.code, reason: handoverRefusal.reason }
 }
 
 function resolvedInstalledPath(path) {

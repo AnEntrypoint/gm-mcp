@@ -5,7 +5,7 @@ import { startHttpServer, httpListenOptions, setHealthExtras } from './http-tran
 import { defaultHttpPort, httpMcpUrl, probeHealth } from './singleton.js'
 import { startContinuationMonitor } from './continuation.js'
 import { handOverStdioToRefreshedBundle, stdioSessionHandedOver } from './bundle-refresh.js'
-import { bundleHealthBlock, bundleStalenessAnnouncement, runningBundle, startBundleDriftWatch } from './bundle-drift.js'
+import { bundleHealthBlock, bundleStalenessAnnouncement, recordHandoverRefusal, runningBundle, startBundleDriftWatch } from './bundle-drift.js'
 import { recordRunningImage } from './running-images.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runLeakWatchPass } from './leak-watch.js'
@@ -52,11 +52,13 @@ function watchForStaleBundle({ handOver = null, transportKind = 'stdio', settled
             }
             return null
         }
-        const handable = handOver !== null && state?.stale === true && (state.refusal_code == null || state.refusal_code === 'no-handover')
+        const retriable = state?.refusal_code == null || state.refusal_code === 'no-handover' || String(state.refusal_code).startsWith('handover-')
+        const handable = handOver !== null && state?.stale === true && retriable
         if (handable) {
             // Announce only after the handover outcome is known: a failed or deferred handover did not reload.
             const outcome = await handOver({ ...state, reloadable: true, refusal_code: null, refusal_reason: null })
             if (outcome?.outcome !== 'failed' && outcome?.outcome !== 'deferred') return outcome
+            recordHandoverRefusal(state.installed_sha256, outcome.outcome, outcome.reason ?? outcome.outcome)
             const unhanded = { ...state, reloadable: false, refusal_code: 'handover-' + outcome.outcome, refusal_reason: outcome.reason ?? outcome.outcome }
             const line = bundleStalenessAnnouncement(unhanded)
             if (line) console.error(line)
