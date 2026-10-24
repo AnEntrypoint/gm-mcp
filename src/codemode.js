@@ -225,11 +225,14 @@ export function foldVerbArgs(tool, args) {
     return withoutNestedBodyKey(tool.verb, { ...envelope, body: { ...extra, ...body } })
 }
 
-function withoutEchoedSession(args, sessionId) {
+// A verb that declares its own `session` input (writer_lock take/release holds a session name) keeps it even when the
+// value equals the call's session id: that value is the verb's argument, not an echoed envelope key.
+function withoutEchoedSession(args, sessionId, inputSchema = {}) {
     if (!isPlainObject(args) || typeof sessionId !== 'string') return args
     const echoed = (key, value) => (key === 'session' || key === 'session_id') && value === sessionId
     const out = { ...args }
-    if (echoed('session', out.session)) delete out.session
+    const declaresSession = inputSchema !== null && typeof inputSchema === 'object' && 'session' in inputSchema
+    if (!declaresSession && echoed('session', out.session)) delete out.session
     if (isPlainObject(out.body)) out.body = Object.fromEntries(Object.entries(out.body).filter(([key, value]) => !echoed(key, value)))
     return out
 }
@@ -498,8 +501,8 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
         let pending
         let feedContext = null
         try {
-            const merged = withoutEchoedSession(mergeEnvelope(name, args, envelope), session_id)
             const tool = tools.get(name)
+            const merged = withoutEchoedSession(mergeEnvelope(name, args, envelope), session_id, tool?.inputSchema)
             feedContext = browserCallContext(tool.verb, merged, defaultCwdFor(merged, cwd))
             const defaults = {}
             const folded = canonicalFsReadArgs(tool.verb, sessionAliasArgs(tool.verb, foldVerbArgs(verbShapedTool(tool, merged), merged)))

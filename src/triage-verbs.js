@@ -38,6 +38,8 @@ const SHARD_LIMIT = 100
 const QUEUE_LOCK_WAIT_MS = 5_000
 const QUEUE_LOCK_STALE_MS = 30_000
 const CPU_SAMPLE_MS = 500
+const CLOSE_STATUSES = ['resolved', 'stale']
+const WITNESS_ID = /^\d+-\d+-[0-9a-f]+$/
 const PROC = '/proc'
 
 class VerbFault extends Error {
@@ -366,6 +368,12 @@ function commitMessage(value) {
     return value
 }
 
+// A closing witness must be a dispatch the spool ledger recorded (one JSON object per line, keyed dispatch_id).
+function isLedgerWitness(root, id) {
+    const ledger = readText(path.join(root, '.gm', 'exec-spool', '.dispatch-ledger.json'))
+    return ledger !== null && ledger.includes(`"dispatch_id":"${id}"`)
+}
+
 function isExecutable(file) {
     if (process.platform === 'win32') return false
     try {
@@ -389,14 +397,22 @@ async function publishOnOrigin(args) {
     const row = singleLine(args.row, 'row')
     const message = commitMessage(args.message)
     const paths = args.paths.map(publishPath)
-    const checker = path.join(root, 'scripts', 'check-staged-secrets.mjs')
-    if (!isFile(checker)) return refused('checker_missing', `secrets checker not found at ${checker}; nothing pushed`)
+    // The checker lives in the gm checkout's scripts/; a submodule checkout publishes with that root as cwd, or with its own scripts/.
+    const checkerIn = (base) => path.join(base, 'scripts', 'check-staged-secrets.mjs')
+    const checker = [root, repo].map(checkerIn).find(isFile) ?? checkerIn(root)
+    if (!isFile(checker)) return refused('checker_missing', `secrets checker not found at ${checkerIn(root)} or ${checkerIn(repo)}; nothing pushed`)
+    const removedRowFile = paths.some((p) => p.startsWith('.gm/prd/') && p.includes(row) && !isFile(path.join(repo, p)))
+    const closing = args.witness !== undefined || args.status !== undefined || removedRowFile
+    if (closing && (!CLOSE_STATUSES.includes(args.status) || !WITNESS_ID.test(String(args.witness ?? '')) || !isLedgerWitness(root, args.witness))) {
+        return refused('witness_required', `closing row ${row} needs witness (a dispatch id in .gm/exec-spool/.dispatch-ledger.json) and status resolved or stale; nothing pushed`)
+    }
+    const trailers = closing ? ['-m', `Witness: ${args.witness}`, '-m', `Status: ${args.status}`] : []
     const fetched = await run('git', ['fetch', '-q', 'origin', 'main'], { cwd: repo, env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
     if (fetched.status !== 0) return refused('fetch_failed', 'fetch failed; nothing pushed')
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-publish-'))
     try {
         const givenBase = typeof args.publish_base === 'string' && args.publish_base !== '' ? args.publish_base : null
-        return await publishLane({ repo, row, message, paths, givenBase, dryRun: args.dry_run === true, checker, work })
+        return await publishLane({ repo, row, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, trailers })
     } finally {
         fs.rmSync(work, { recursive: true, force: true })
     }
@@ -407,7 +423,7 @@ function gitlinkOf(result) {
     return found === null ? null : found[1]
 }
 
-async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work }) {
+async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [] }) {
     const plain = (gitArgs, extra = {}) => run('git', gitArgs, { cwd: repo, ...extra })
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'index') }
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
@@ -468,7 +484,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
 
     const tree = await indexed(['write-tree'])
     if (tree.status !== 0) return refused('write_tree_failed', 'write-tree failed; nothing pushed')
-    const committed = await plain(['commit-tree', utf8(tree.stdout).trim(), '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`])
+    const committed = await plain(['commit-tree', utf8(tree.stdout).trim(), '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`, ...trailers])
     const sha = utf8(committed.stdout).trim()
     if (committed.status !== 0 || sha === '') return refused('commit_failed', 'commit-tree failed; nothing pushed')
 
@@ -1380,7 +1396,9 @@ export const TRIAGE_VERBS = [
             paths: z.array(z.string()).min(1).describe('Repository-relative paths the lane edited. Each must exist as a file (published), be a submodule pin in the index or HEAD of the lane (published as that commit sha at mode 160000), or be absent (removed from the index unless origin/main pins it as a submodule, which is then left alone).'),
             publish_base: z.string().optional().describe('Base ref for the three-way merge. Use origin/main when the lane rewrote a file whose history it does not share.'),
             dry_run: z.boolean().optional().describe('Build and check the commit, then stop before the push.'),
-            cwd: z.string().optional().describe('gm checkout root: the secrets checker is read from <cwd>/scripts. Required.'),
+            witness: z.string().optional().describe('Dispatch id of the live witness that closes the row: must appear in .gm/exec-spool/.dispatch-ledger.json. Required when this publish closes a row (a status is given, or the row file under .gm/prd/ is removed).'),
+            status: z.enum(['resolved', 'stale']).optional().describe('Status the closing commit records. Required with witness.'),
+            cwd: z.string().optional().describe('gm checkout root: the secrets checker is read from <cwd>/scripts, and the witness ledger from <cwd>/.gm. Required.'),
         },
         handler: toolReply(publishOnOrigin),
     },
