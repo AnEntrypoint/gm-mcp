@@ -5,7 +5,15 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { flagValue } from '../src/argv.js'
+
+// The same contract as src/argv.js flagValue, inlined so the installer can fetch this file alone and run it.
+function flagValue(name) {
+    const args = process.argv.slice(2)
+    const index = args.indexOf(`--${name}`)
+    if (index === -1) return undefined
+    const next = args[index + 1]
+    return next && !next.startsWith('--') ? next : undefined
+}
 
 const MARKER = 'gm-mcp http singleton autostart'
 const BEGIN = `# >>> ${MARKER} (managed by gm-mcp/scripts/install-autostart.mjs; edits here are replaced on the next install) >>>`
