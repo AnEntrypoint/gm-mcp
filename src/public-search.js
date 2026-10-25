@@ -148,8 +148,43 @@ export function runGhSearch(argv) {
     })
 }
 
+const ITEM_STEM_MAX_CHARS = 80
+const ITEM_RESERVED_STEMS = process.platform === 'win32' ? ['con', 'prn', 'aux', 'nul', 'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9', 'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9'] : []
+const FNV_OFFSET = 0xcbf29ce484222325n
+const FNV_PRIME = 0x100000001b3n
+const U64_MASK = 0xffffffffffffffffn
+
+function fnv1a64Hex(text) {
+    let hash = FNV_OFFSET
+    for (const byte of Buffer.from(text, 'utf8')) hash = ((hash ^ BigInt(byte)) * FNV_PRIME) & U64_MASK
+    return hash.toString(16).padStart(8, '0')
+}
+
+export function itemStem(id) {
+    const trimmed = id.trim()
+    let out = ''
+    let prevDash = false
+    for (const ch of trimmed) {
+        if (/[A-Za-z0-9_.-]/.test(ch)) {
+            out += ch.toLowerCase()
+            prevDash = false
+        } else if (!prevDash && out !== '') {
+            out += '-'
+            prevDash = true
+        }
+    }
+    out = out.replace(/[-.]+$/, '').replace(/^[.]+/, '')
+    if (out === '') return '_no-id'
+    const hashSuffix = '-' + fnv1a64Hex(trimmed)
+    const suffixed = out === trimmed ? out : out + hashSuffix
+    const chars = [...suffixed]
+    const capped = chars.length > ITEM_STEM_MAX_CHARS ? chars.slice(0, ITEM_STEM_MAX_CHARS - hashSuffix.length).join('') + hashSuffix : suffixed
+    const stem = capped.replace(/[.]+$/, '')
+    return ITEM_RESERVED_STEMS.includes(stem) ? '_' + stem : stem
+}
+
 export function rowFileOf(root, id) {
-    return path.join(root, '.gm', 'prd', `${id}.yml`)
+    return path.join(root, '.gm', 'prd', itemStem(id) + '.yml')
 }
 
 export function validRowId(value) {
@@ -157,7 +192,10 @@ export function validRowId(value) {
 }
 
 export function readRow(root, id) {
-    const file = rowFileOf(root, id)
+    return readRowFile(rowFileOf(root, id), id)
+}
+
+function readRowFile(file, id) {
     let source
     try {
         source = fs.readFileSync(file, 'utf8')
@@ -259,11 +297,11 @@ export function rowHasReferences(doc) {
     return NO_REFERENCES_LINE.test(prose)
 }
 
-// Null when the row may close: it has references, carries the grandfather note, or its body states why none apply. A row
+// Null when the row may close: it has references, carries the grandfather note, or its body states why none apply. A row that cannot be read is refused, never passed through.
 // that cannot be read is left to the runner, which refuses a missing or malformed row on its own.
 export function referenceGateRefusal(root, id, verb) {
     const read = readRow(root, id)
-    if (read.error_code !== undefined) return null
+    if (read.error_code !== undefined) return verb + ' refused: row ' + id + ' cannot be read (' + read.error_code + '): ' + read.error + ' A close needs its reference on the row, so nothing was closed.'
     if (rowHasReferences(read.doc)) return null
     return `${verb} refused: row ${id} has no references (field "references" is empty). Fill it with gm["prd-references"]({cwd, id, references: [{url, why}]}), or add a row body line "No public references: <reason of at least 10 characters>".`
 }
@@ -282,8 +320,9 @@ export async function ensureReferenceGate(root) {
     }
     const grandfathered = []
     for (const name of names.filter((file) => file.endsWith('.yml'))) {
-        const id = name.slice(0, -'.yml'.length)
-        const read = readRow(root, id)
+        const stem = name.slice(0, -'.yml'.length)
+        const read = readRowFile(path.join(root, '.gm', 'prd', name), stem)
+        const id = read.error_code === undefined && typeof read.doc.id === 'string' && read.doc.id !== '' ? read.doc.id : stem
         if (read.error_code !== undefined) continue
         if (!isGrandfathered(read.doc)) {
             const failure = await appendRowNote(root, id, 'references_gate', `${GRANDFATHER_NOTE} row predates the public-references gate`)
