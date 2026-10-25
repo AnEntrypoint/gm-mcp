@@ -2891,6 +2891,32 @@ function healthFieldsOf(args) {
     return names.length > 0 ? names : null
 }
 
+// health always carries the bundle identity in its data object, so a caller never reads an absent key as unknown.
+function healthBundleFields(drift) {
+    return {
+        bundle_served_version: drift.running_version,
+        bundle_installed_version: drift.installed_version,
+        bundle_stale: drift.stale === true,
+        bundle_served_path: drift.path ?? null,
+        bundle_installed_path: drift.installed_path ?? null,
+    }
+}
+
+function withHealthBundleFields(text) {
+    if (typeof text !== 'string') return text
+    const isJson = /^\s*\{/.test(text)
+    let doc
+    try {
+        doc = isJson ? JSON.parse(text) : yaml.load(text)
+    } catch {
+        return text
+    }
+    if (!isPlainObject(doc)) return text
+    const data = isPlainObject(doc.data) ? doc.data : {}
+    const projected = { ...doc, data: { ...data, ...healthBundleFields(bundleDrift()) } }
+    return isJson ? JSON.stringify(projected) : yaml.dump(projected, { lineWidth: 100 })
+}
+
 function withoutBodyKey(body, key) {
     if (!isPlainObject(body) || !(key in body)) return body
     const { [key]: _dropped, ...rest } = body
@@ -2967,7 +2993,8 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     try {
         const waits = CI_STATUS_VERBS.has(args?.verb) && isPlainObject(args?.body) && args.body.wait === true
         const raw = waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver)
-        const reply = withStaleBundleNotice(args?.verb, projectHealthFields(raw, healthFields), sessionId)
+        const healthed = args?.verb === 'health' ? withHealthBundleFields(raw) : raw
+        const reply = withStaleBundleNotice(args?.verb, projectHealthFields(healthed, healthFields), sessionId)
         if (typeof reply === 'string') replyDispatchId = /^dispatch_id: (\S+)/m.exec(reply)?.[1] ?? null
         if (VERBATIM_REPLY_VERBS.has(args?.verb)) return reply
         const key = continuationKeyOf(args)

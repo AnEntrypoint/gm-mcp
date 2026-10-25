@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.314 - health always carries the bundle identity
+
+`health` now puts `bundle_served_version`, `bundle_installed_version`, `bundle_stale`, `bundle_served_path` and `bundle_installed_path` in its `data` object on every reply, default or with `body.fields`. Before, these keys appeared only while the served bundle was stale, so a current server read as unknown. `bundle_stale` is `false` when the served bundle is current. `BUNDLE_VERSION` and `package.json` move to 0.2.314.
+
 ## 0.2.312 - health takes fields, prd-add takes quiet
 
 `health` with `body.fields` (a comma-separated string or an array) keeps only the named keys of the reply's `data` object. A name with no exact key matches the first key it prefixes with `<name>_`, so `lifecycle` selects `lifecycle_liveness`; names with no key are listed in `fields_missing`. The envelope (`ok`, `verb`, `dispatch_id`, `bundle_*`, `bootstrap`) stays. Without `fields` the reply is unchanged. `prd-add` with `body.quiet: true` returns its reply without the `public_search` and `continuation` blocks; `id`, `status` and `dispatch_id` stay. Without `quiet` the reply is unchanged. Both flags are removed from the body before the spool dispatch. `BUNDLE_VERSION` and `package.json` move to 0.2.312.
