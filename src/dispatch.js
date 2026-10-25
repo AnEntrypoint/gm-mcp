@@ -12,7 +12,7 @@ import { appendDiagnostic } from './server-log.js'
 import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessAnnouncement } from './bundle-drift.js'
 import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuationReserveFor, continuedReply, setContinuationStopped, withoutContinuationBlock } from './continuation.js'
-import { bindSpoolDispatch, closeRowId, ensureReferenceGate, prdAddQuiet, referenceGateRefusal, withPublicSearch } from './public-search.js'
+import { bindSpoolDispatch, closeRowId, ensureReferenceGate, prdAddQuiet, readRow, referenceGateRefusal, withPublicSearch } from './public-search.js'
 import { prdFeedFor } from './prd-feed.js'
 import { bootstrapReply } from './live-state.js'
 import { maybeStartDevSync } from './dev-sync.js'
@@ -2880,6 +2880,18 @@ function closeReferenceRefusal(args) {
     return yaml.dump({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'references_required', refused: true, error: message }, { lineWidth: 100 })
 }
 
+// A blocker is a note on the open row it blocks, never a row of its own: a -blocker- child whose parent row exists is refused.
+function blockerRowRefusal(args) {
+    const id = closeRowId(args)
+    const marker = id === null ? -1 : id.indexOf('-blocker-')
+    if (marker <= 0) return null
+    const parent = id.slice(0, marker)
+    const scope = resolveDispatchRoot(args?.cwd)
+    if (scope.error || !scope.root || readRow(scope.root, parent).error_code !== undefined) return null
+    const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
+    return yaml.dump({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'blocker_row_refused', refused: true, error: `${args.verb} refused: ${id} is a blocker of open row ${parent}, so nothing was filed. Annotate the parent instead: gm.prd_note({cwd, id: "${parent}", note: "<blocker>"}).`, parent }, { lineWidth: 100 })
+}
+
 function prdAddCwdRefusal(args) {
     const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
     return yaml.dump({
@@ -2968,6 +2980,10 @@ export async function gmDispatch(args, signal, responseValueObserver) {
         const scope = resolveDispatchRoot(args?.cwd)
         const failure = scope.error || !scope.root ? null : await ensureReferenceGate(scope.root)
         if (failure !== null) appendDiagnostic('references-gate-grandfather-failed', { verb: args.verb, error: failure })
+    }
+    if (PRD_ADD_VERBS.has(args?.verb) && !args?.resume_task) {
+        const refusal = blockerRowRefusal(args)
+        if (refusal !== null) return refusal
     }
     if (CLOSE_VERBS.has(args?.verb) && !args?.resume_task) {
         const refusal = closeReferenceRefusal(args)
