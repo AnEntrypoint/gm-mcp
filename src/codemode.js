@@ -43,7 +43,11 @@ function codemodeTimeoutMs() {
 function withCodemodeDeadline(pending, timeoutMs) {
     let timer
     const deadline = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`gm_codemode code did not finish within ${timeoutMs} ms. A gm call it awaited never returned, or a loop of calls outlived the budget. Calls already dispatched keep running in the spool: resume one with resume_task, bound the loop, or raise GM_CODEMODE_TIMEOUT_MS.`)), timeoutMs)
+        timer = setTimeout(() => {
+            const error = new Error(`gm_codemode code did not finish within ${timeoutMs} ms. A gm call it awaited never returned, or a loop of calls outlived the budget. Calls already dispatched keep running in the spool: resume one with resume_task, bound the loop, or raise GM_CODEMODE_TIMEOUT_MS.`)
+            error.code = 'codemode_wall_budget'
+            reject(error)
+        }, timeoutMs)
     })
     return Promise.race([pending, deadline]).finally(() => clearTimeout(timer))
 }
@@ -717,6 +721,9 @@ export function registerCodeMode(server, tools) {
                 const pendingCount = replies.length - settled.length - failedCount
                 const unsettledNote = [pendingCount ? `${pendingCount} still pending` : '', failedCount ? `${failedCount} failed` : ''].filter(Boolean).join(', ')
                 const tally = replies.length ? [`gm-mcp: ${settled.length} of ${replies.length} gm call(s) completed before the throw${unsettledNote ? `, ${unsettledNote}` : ''}; their dispatch ids and per-call errors follow`] : []
+                // A body that ran out of wall budget names the call it was awaiting, so the caller resumes that dispatch instead of re-running the body.
+                const stalledIndex = error?.code === 'codemode_wall_budget' ? replies.findIndex((entry) => entry.text === undefined && !entry.failed) : -1
+                if (stalledIndex >= 0) tally.push(`stalled_step: ${stalledIndex + 1}/${replies.length}: gm.${replies[stalledIndex].verb} (dispatch ${replies[stalledIndex].dispatch_id ?? 'not yet issued'}); resume it with resume_task, do not re-run the body`)
                 const ids = callIds.length ? [`gm_dispatch_ids: ${callIds.join(', ')}`] : []
                 const [headlineWithPrefix, ...detailLines] = withFrameLimit(withoutContinuation(detail)).split('\n')
                 const headline = headlineWithPrefix.replace(/^Error: /, '')
