@@ -3021,7 +3021,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             ownerTransport = await plainTextOwnerTransport(root, session_id, signal, Math.max(1, deadline - Date.now()))
             if (signal?.aborted) return toYaml({ error: 'aborted', owner_transport: ownerTransport, wrote_no_new_dispatch: true })
             const plaintext = withTimeoutMsPrefix(verb, raw_body, timeout_seconds)
-            const stored = publishSpoolRequest(inDir, inPath, requestNumber, ownerTransport === 'header-v1' ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
+            const stored = publishSpoolRequest(inDir, inPath, requestNumber, (session_id && ownerTransport !== 'legacy-unverified' && !plaintext.startsWith('gm_session_id=')) ? 'gm_session_id=' + session_id + '\n' + plaintext : plaintext)
             if (stored) return toYaml(stored)
         } else if (rawBodyText !== undefined) {
             const stored = publishSpoolRequest(inDir, inPath, requestNumber, rawBodyText)
