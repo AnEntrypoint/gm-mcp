@@ -362,3 +362,8 @@ export function withPublicSearch(args, reply) {
     })
     return withBlock(reply, 'public_search', block)
 }
+
+// A prd-add call with body.quiet === true gets no public_search block and no continuation block; its id, status and dispatch_id stay.
+export function prdAddQuiet(args) {
+    return PRD_ADD_VERBS.has(args?.verb) && args?.body?.quiet === true
+}

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.312 - health takes fields, prd-add takes quiet
+
+`health` with `body.fields` (a comma-separated string or an array) keeps only the named keys of the reply's `data` object. A name with no exact key matches the first key it prefixes with `<name>_`, so `lifecycle` selects `lifecycle_liveness`; names with no key are listed in `fields_missing`. The envelope (`ok`, `verb`, `dispatch_id`, `bundle_*`, `bootstrap`) stays. Without `fields` the reply is unchanged. `prd-add` with `body.quiet: true` returns its reply without the `public_search` and `continuation` blocks; `id`, `status` and `dispatch_id` stay. Without `quiet` the reply is unchanged. Both flags are removed from the body before the spool dispatch. `BUNDLE_VERSION` and `package.json` move to 0.2.312.
+
 ## 0.2.307 - a fetch HTTP status is read as data inside a gm_codemode body
 
 A `fetch` whose origin answered a non-2xx status (a GitHub Pages 404, for example) replied `ok: false`, `error_code: failed` with `status` and `body`. `replyText` (`src/codemode.js`) threw on every failed reply, so the `gm_codemode` body stopped at the fetch and the calls after it never ran. `isHttpStatusReply` now returns that reply as data, as it already does for an exec child's nonzero exit and a `not_found`. The wire reply is unchanged, so dispatch callers still see `ok: false`; status 0 (no HTTP answer) still throws. `BUNDLE_VERSION` and `package.json` move to 0.2.307.

@@ -1,5 +1,6 @@
 import * as yaml from 'js-yaml'
 import { BUNDLE_VERSION } from './bundle-version.js'
+import { isPlainObject } from './plain-object.js'
 
 export const CONTINUATION_STOP_VERB = 'continuation-stop'
 export const CONTINUATION_LOGGER = 'gm.continuation'
@@ -169,6 +170,18 @@ export function withBlock(text, name, block) {
 
 export function withBootstrap(text, block) {
     return withBlock(text, 'bootstrap', block)
+}
+
+// The reply without its continuation block: a JSON key, or the trailing YAML block. Other blocks stay.
+export function withoutContinuationBlock(text) {
+    if (typeof text !== 'string') return text
+    const json = parsedJsonOf(text)
+    if (json) {
+        if (!isPlainObject(json.value) || !('continuation' in json.value)) return text
+        const { continuation: _dropped, ...rest } = json.value
+        return JSON.stringify(rest)
+    }
+    return textBeforeTrailingBlock(text)
 }
 
 export function continuedReplyWithin(key, text, cap, cut, now = Date.now()) {

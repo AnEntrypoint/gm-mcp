@@ -10,8 +10,8 @@ import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
 import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessAnnouncement } from './bundle-drift.js'
-import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuationReserveFor, continuedReply, setContinuationStopped } from './continuation.js'
-import { bindSpoolDispatch, closeRowId, ensureReferenceGate, referenceGateRefusal, withPublicSearch } from './public-search.js'
+import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuationReserveFor, continuedReply, setContinuationStopped, withoutContinuationBlock } from './continuation.js'
+import { bindSpoolDispatch, closeRowId, ensureReferenceGate, prdAddQuiet, referenceGateRefusal, withPublicSearch } from './public-search.js'
 import { prdFeedFor } from './prd-feed.js'
 import { bootstrapReply } from './live-state.js'
 import { maybeStartDevSync } from './dev-sync.js'
@@ -2883,8 +2883,50 @@ function prdAddCwdRefusal(args) {
     }, { lineWidth: 100 })
 }
 
+// health {fields}: a comma-separated string or an array of data keys to keep; null when the reply is full.
+function healthFieldsOf(args) {
+    if (args?.verb !== 'health') return null
+    const raw = args?.body?.fields
+    const names = (Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : []).map(name => String(name).trim()).filter(Boolean)
+    return names.length > 0 ? names : null
+}
+
+function withoutBodyKey(body, key) {
+    if (!isPlainObject(body) || !(key in body)) return body
+    const { [key]: _dropped, ...rest } = body
+    return rest
+}
+
+// Keeps the named keys of a health reply's data object. A name with no exact key matches the first key it prefixes with `<name>_`
+// (lifecycle selects lifecycle_liveness). The envelope (ok, verb, dispatch_id, bundle_*, bootstrap) stays; a name with no key is listed in fields_missing.
+function projectHealthFields(text, fields) {
+    if (fields === null || typeof text !== 'string') return text
+    const isJson = /^\s*\{/.test(text)
+    let doc
+    try {
+        doc = isJson ? JSON.parse(text) : yaml.load(text)
+    } catch {
+        return text
+    }
+    if (!isPlainObject(doc) || !isPlainObject(doc.data)) return text
+    const keys = Object.keys(doc.data)
+    const data = {}
+    const missing = []
+    for (const name of fields) {
+        const key = keys.includes(name) ? name : keys.find(k => k.startsWith(`${name}_`))
+        if (key === undefined) missing.push(name)
+        else data[key] = doc.data[key]
+    }
+    const projected = { ...doc, data, ...(missing.length > 0 ? { fields_missing: missing } : {}) }
+    return isJson ? JSON.stringify(projected) : yaml.dump(projected, { lineWidth: 100 })
+}
+
 export async function gmDispatch(args, signal, responseValueObserver) {
     await preloadVerbTable()
+    const quiet = prdAddQuiet(args)
+    const healthFields = healthFieldsOf(args)
+    if (quiet) args = { ...args, body: withoutBodyKey(args.body, 'quiet') }
+    if (args?.verb === 'health') args = { ...args, body: withoutBodyKey(args.body, 'fields') }
     if (PRD_ADD_VERBS.has(args?.verb) && !args?.resume_task && !(typeof args?.cwd === 'string' && args.cwd.trim())) return prdAddCwdRefusal(args)
     if ((PRD_ADD_VERBS.has(args?.verb) || CLOSE_VERBS.has(args?.verb)) && !args?.resume_task) {
         const scope = resolveDispatchRoot(args?.cwd)
@@ -2924,14 +2966,16 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     appendDiagnostic('dispatch-start', { call_id: callId, session_id: sessionId, verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
     try {
         const waits = CI_STATUS_VERBS.has(args?.verb) && isPlainObject(args?.body) && args.body.wait === true
-        const reply = withStaleBundleNotice(args?.verb, waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver), sessionId)
+        const raw = waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver)
+        const reply = withStaleBundleNotice(args?.verb, projectHealthFields(raw, healthFields), sessionId)
         if (typeof reply === 'string') replyDispatchId = /^dispatch_id: (\S+)/m.exec(reply)?.[1] ?? null
         if (VERBATIM_REPLY_VERBS.has(args?.verb)) return reply
         const key = continuationKeyOf(args)
         // prd_feed marks the server's own reads (the feed's prd-list lookups, the bootstrap and prompt reads): they get no feed and no bootstrap.
         const feed = args?.prd_feed === true ? undefined : await prdFeedFor(key, args?.verb, reply, gmDispatch, args)
-        const continued = continuedReply(key, withPublicSearch(args, reply), Date.now(), feed !== undefined, feed)
-        return bundleDrift().stale ? await bootstrapReply(gmDispatch, key, continued, { reply, args, feed }) : continued
+        const continued = continuedReply(key, quiet ? reply : withPublicSearch(args, reply), Date.now(), feed !== undefined, feed)
+        const attached = bundleDrift().stale ? await bootstrapReply(gmDispatch, key, continued, { reply, args, feed }) : continued
+        return quiet ? withoutContinuationBlock(attached) : attached
     } catch (error) {
         appendDiagnostic('dispatch-error', { call_id: callId, session_id: sessionId, verb: args?.verb ?? null, error: error?.message ? String(error.message) : String(error), stack: error?.stack ? String(error.stack) : null })
         throw error
