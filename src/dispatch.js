@@ -2569,17 +2569,18 @@ function boundedOwnerProbe(probe, root, session_id, budgetMs = OWNER_PROBE_DEADL
 
 function ownerHeaderRuntimeIdentity(root) {
     const status = readJsonFile(GLOBAL_DAEMON_STATUS_PATH)
-    const hash = status?.loaded_plugin_content_sha256?.gm
-    const slots = status?.shared_pool_slot_content_sha256?.gm
     if (!status || !Number.isSafeInteger(status.pid) || pidAlive(status.pid) !== true
         || !isFreshDaemonTimestamp(status.ts, Date.now())
-        || typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)
-        || !Array.isArray(slots)
-        || slots.some(value => value !== null && value !== hash && value !== 'busy-dispatch-in-flight')
         || (Array.isArray(status.mixed_version_pools) && status.mixed_version_pools.length)) return null
+    const hash = status?.loaded_plugin_content_sha256?.gm
+    const slots = status?.shared_pool_slot_content_sha256?.gm
+    const poolless = hash === undefined && (slots === undefined || (Array.isArray(slots) && slots.length === 0))
+    if (!poolless && (typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)
+        || !Array.isArray(slots)
+        || slots.some(value => value !== null && value !== hash && value !== 'busy-dispatch-in-flight'))) return null
     const project = readJsonFile(path.join(spoolDirOf(root), '.status.json'))
     if (project && (project.pid !== status.pid || !isFreshDaemonTimestamp(project.ts, Date.now()))) return null
-    return JSON.stringify([root, GLOBAL_DAEMON_STATUS_PATH, status.pid, status.daemon_boot_ts, hash])
+    return JSON.stringify([root, GLOBAL_DAEMON_STATUS_PATH, status.pid, status.daemon_boot_ts, poolless ? 'no-gm-pool' : hash])
 }
 
 async function plainTextOwnerTransport(root, session_id, signal, budgetMs = OWNER_PROBE_DEADLINE_MS) {
