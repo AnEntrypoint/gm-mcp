@@ -282,8 +282,10 @@ export function fsWriteEnvelopeDiagnostic(verb, body) {
     return `fs_write refused: content begins with an fs_read reply envelope (a dispatch_id header and the "${VERBATIM_TEXT_MARKER}" line), so writing it would prepend that wrapper to the file. Send only the file text that follows the marker line, which is what fs_read returns in its data.`
 }
 
-// fs_write exact-line form {path, startLine, endLine, replacement}: the named lines of the existing file are replaced, and the result
-// is sent as a whole-file content write, so the guest's own write checks still apply. Returns the rewritten args, or a refusal reply.
+// fs_write exact-line form {path, startLine, endLine, replacement} or {path, startLine, endLine, delete: true}: the named lines of the
+// existing file are replaced, and the result is sent as a whole-file content write, so the guest's own write checks still apply.
+// An empty replacement puts one blank line in the range; delete: true removes the range and reads no replacement.
+// Returns the rewritten args, or a refusal reply.
 function exactLineEdit(args, root) {
     const body = args.body
     const refuse = (message) => yaml.dump({ ok: false, verb: 'fs_write', dispatch_id: `refused-${nextN(explicitBodySessionId(body) || 'no-session')}`, error_code: 'line_edit_refused', refused: true, error: `fs_write refused: ${message}; nothing was written.` }, { lineWidth: 100 })
@@ -292,7 +294,8 @@ function exactLineEdit(args, root) {
     if (rel === '' || path.isAbsolute(rel) || rel.split(/[\\/]/).includes('..')) return refuse(`path ${JSON.stringify(rel)} must be project-relative with no ".." segment`)
     if (!Number.isInteger(body.startLine) || body.startLine < 1) return refuse('startLine must be an integer >= 1')
     if (!Number.isInteger(body.endLine)) return refuse('exact-line form needs endLine (the last replaced line, inclusive; startLine - 1 inserts)')
-    if (typeof body.replacement !== 'string') return refuse('replacement must be a string (empty deletes the lines)')
+    const deleting = body.delete === true
+    if (!deleting && typeof body.replacement !== 'string') return refuse('replacement must be a string (an empty string puts one blank line in the range; delete: true removes the range)')
     let text
     try {
         text = readFileSync(path.join(root, rel), 'utf8')
@@ -304,10 +307,10 @@ function exactLineEdit(args, root) {
     if (text.endsWith('\n')) lines.pop()
     const { startLine: start, endLine: end } = body
     if (start > lines.length + 1 || end < start - 1 || end > lines.length) return refuse(`lines ${start}-${end} are out of range for ${rel} (${lines.length} lines)`)
-    const inserted = body.replacement === '' ? [] : body.replacement.replace(/\n$/, '').split('\n')
-    const joined = [...lines.slice(0, start - 1), ...inserted, ...lines.slice(end)].join('\n')
-    const content = joined === '' || !trailing ? joined : `${joined}\n`
-    const { startLine: _startLine, endLine: _endLine, replacement: _replacement, ...rest } = body
+    const inserted = deleting ? [] : body.replacement.replace(/\n$/, '').split('\n')
+    const kept = [...lines.slice(0, start - 1), ...inserted, ...lines.slice(end)]
+    const content = kept.join('\n') + (trailing && kept.length > 0 ? '\n' : '')
+    const { startLine: _startLine, endLine: _endLine, replacement: _replacement, delete: _delete, ...rest } = body
     return { ...args, body: { ...rest, content, ...(content === '' ? { allow_empty: true } : {}) } }
 }
 
@@ -3190,7 +3193,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     const healthFields = healthFieldsOf(args)
     if (quiet) args = { ...args, body: withoutBodyKey(args.body, 'quiet') }
     if (args?.verb === 'health') args = { ...args, body: withoutBodyKey(args.body, 'fields') }
-    if ((args?.verb === 'fs_write' || args?.verb === 'fs-write') && isPlainObject(args?.body) && args.body.content === undefined && args.body.replacement !== undefined) {
+    if ((args?.verb === 'fs_write' || args?.verb === 'fs-write') && isPlainObject(args?.body) && args.body.content === undefined && (args.body.replacement !== undefined || args.body.delete === true)) {
         const edited = exactLineEdit(args, resolveDispatchRoot(args.cwd).root)
         if (typeof edited === 'string') return edited
         args = edited

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.339 - publish_base merges from the fork point, an empty fs_write replacement is a blank line
+
+`publish_on_origin` no longer refuses a `publish_base` that is not an ancestor of HEAD. The three-way base is `merge-base(HEAD, publish_base)`, which is `publish_base` itself when it is an ancestor; only a pair with no common ancestor refuses (`no_merge_base`, naming both shas). `fs_write` exact-line form: an empty `replacement` puts one blank line in `startLine..endLine` (it used to delete them), and `delete: true` removes the range and reads no replacement. A trailing newline is still not doubled. `BUNDLE_VERSION` and `package.json` move to 0.2.339.
+
 ## 0.2.337 - origin fetch has a per-call deadline and names its failure
 
 `publish_on_origin` takes `fetch_timeout_seconds` (120 to 600, default 300) for its origin fetch. Before the fetch it connects to the origin host for up to 10 s, so an unresolvable, refused or unroutable origin fails in seconds with its cause (`fetch_failed`, or `fetch_timeout` for a connect timeout). A fetch killed at its deadline replies `fetch_timeout` with the deadline and the resume state (none: git keeps no partial pack). `git_fetch` accepts `fetch_timeout_seconds` in its body (guest deadline 120 to 600 s). `BUNDLE_VERSION` and `package.json` move to 0.2.337.
