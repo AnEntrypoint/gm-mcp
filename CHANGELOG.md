@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.306 - a fetch HTTP status is read as data inside a gm_codemode body
+
+A `fetch` whose origin answered a non-2xx status (a GitHub Pages 404, for example) replied `ok: false`, `error_code: failed` with `status` and `body`. `replyText` (`src/codemode.js`) threw on every failed reply, so the `gm_codemode` body stopped at the fetch and the calls after it never ran. `isHttpStatusReply` now returns that reply as data, as it already does for an exec child's nonzero exit and a `not_found`. The wire reply is unchanged, so dispatch callers still see `ok: false`; status 0 (no HTTP answer) still throws. `BUNDLE_VERSION` and `package.json` move to 0.2.306.
+
 ## 0.2.305 - publish_on_origin commits carry the lanmower identity
 
 `publish_on_origin` built its commits with `git commit-tree` under the inherited git identity, so commits landed as the machine's noreply address. The commit-tree calls now set the author and committer to lanmower <almagestfraternite@gmail.com>.
