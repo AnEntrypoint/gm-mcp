@@ -1,0 +1,25 @@
+name: notify-gm
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch submodule-released to AnEntrypoint/gm
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "::error::PUBLISHER_TOKEN is not set; submodule-released cannot reach AnEntrypoint/gm"; exit 1; fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/AnEntrypoint/gm/dispatches \
+            -d '{"event_type":"submodule-released"}')
+          echo "repository_dispatch submodule-released to AnEntrypoint/gm: HTTP $code"
+          if [ "$code" != "204" ]; then echo "::error::expected HTTP 204 from the submodule-released dispatch, got HTTP $code"; exit 1; fi
