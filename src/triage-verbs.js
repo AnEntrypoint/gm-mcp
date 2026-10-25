@@ -632,7 +632,8 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
         if ((await indexed(['update-index', '--add', '--cacheinfo', `100644,${blob},skills/manifest.sha256`])).status !== 0) return refused('index_failed', 'update-index failed for skills/manifest.sha256; nothing pushed')
     }
 
-    const tree = await indexed(['write-tree'])
+    // --missing-ok: a blob:none partial clone lacks the blobs of unchanged paths, and origin already holds them.
+    const tree = await indexed(['write-tree', '--missing-ok'])
     if (tree.status !== 0) return refused('write_tree_failed', 'write-tree failed; nothing pushed')
     const committed = await plain(['commit-tree', utf8(tree.stdout).trim(), '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`, ...trailers], { env: PUBLISH_IDENTITY })
     const sha = utf8(committed.stdout).trim()
