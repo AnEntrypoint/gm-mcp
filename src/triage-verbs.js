@@ -16,8 +16,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { lastTableError, readProcessTableAsync } from './process-table.js'
 import { appendDiagnostic } from './server-log.js'
-import { appendRowNote, checkReferences, ensureReferenceGate, readRow, recordedUrls, REFERENCE_CAP, referenceGateRefusal, runGhSearch, searchPlan, validRowId } from './public-search.js'
-
+import { appendRowNote, checkReferences, ensureReferenceGate, readRow, recordedUrls, REFERENCE_CAP, referenceGateRefusal, rowFileOf, runGhSearch, searchPlan, validRowId } from './public-search.js'
 const LOCAL_TIMEOUT_MS = 60_000
 const NETWORK_TIMEOUT_MS = 180_000
 const MAX_OUTPUT_BYTES = 256 * 1024 * 1024
@@ -496,21 +495,24 @@ async function publishOnOrigin(args) {
     const checkerIn = (base) => path.join(base, 'scripts', 'check-staged-secrets.mjs')
     const checker = [root, repo].map(checkerIn).find(isFile) ?? checkerIn(root)
     if (!isFile(checker)) return refused('checker_missing', `secrets checker not found at ${checkerIn(root)} or ${checkerIn(repo)}; nothing pushed`)
+    const rowRel = path.posix.join('.gm', 'prd', path.basename(rowFileOf(repo, row)))
+    const store = fs.existsSync(rowFileOf(repo, row)) ? repo : root
     const removedRowFile = paths.some((p) => p.startsWith('.gm/prd/') && p.includes(row) && !isFile(path.join(repo, p)))
     const closing = args.witness !== undefined || args.status !== undefined || removedRowFile
-    if (closing && (!CLOSE_STATUSES.includes(args.status) || !WITNESS_ID.test(String(args.witness ?? '')) || !isLedgerWitness(root, args.witness))) {
-        return refused('witness_required', `closing row ${row} needs witness (a dispatch id in .gm/exec-spool/.dispatch-ledger.json) and status resolved or stale; nothing pushed`)
+    if (closing && (!CLOSE_STATUSES.includes(args.status) || !WITNESS_ID.test(String(args.witness ?? '')) || ![repo, root].some((base) => isLedgerWitness(base, args.witness)))) {
+        return refused('witness_required', `closing row ${row} needs witness (a dispatch id in the .gm/exec-spool/.dispatch-ledger.json of repo_dir or cwd) and status resolved or stale; nothing pushed`)
     }
-    if (closing) await ensureReferenceGate(root)
-    const unreferenced = closing ? referenceGateRefusal(root, row, 'publish_on_origin closing commit') : null
+    if (closing) await ensureReferenceGate(store)
+    const unreferenced = closing ? referenceGateRefusal(store, row, 'publish_on_origin closing commit') : null
     if (unreferenced !== null) return refused('references_required', unreferenced)
+    const closeRow = closing && paths.includes(rowRel) ? rowRel : null
     const trailers = closing ? ['-m', `Witness: ${args.witness}`, '-m', `Status: ${args.status}`] : []
     const fetched = await run('git', ['fetch', '-q', 'origin', 'main'], { cwd: repo, env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
     if (fetched.status !== 0) return refused('fetch_failed', 'fetch failed; nothing pushed')
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-publish-'))
     try {
         const givenBase = typeof args.publish_base === 'string' && args.publish_base !== '' ? args.publish_base : null
-        return await publishLane({ repo, row, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, trailers })
+        return await publishLane({ repo, row, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, trailers, closeRow })
     } finally {
         fs.rmSync(work, { recursive: true, force: true })
     }
@@ -555,7 +557,7 @@ async function rebaseCommitOntoTip({ repo, commit, row, message, paths, checker,
     return { sha, stat }
 }
 
-async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [] }) {
+async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [], closeRow = null }) {
     const plain = (gitArgs, extra = {}) => run('git', gitArgs, { cwd: repo, ...extra })
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'index') }
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
@@ -571,6 +573,10 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
 
     for (const [index, p] of paths.entries()) {
         const full = path.join(repo, p)
+        if (p === closeRow) {
+            if ((await indexed(['update-index', '--force-remove', p])).status !== 0) return refused('index_failed', `update-index failed for ${p}; nothing pushed`)
+            continue
+        }
         const lanePin = gitlinkOf(await plain(['ls-files', '-s', '--', p])) ?? gitlinkOf(await plain(['ls-tree', 'HEAD', '--', p]))
         const basePin = gitlinkOf(await plain(['ls-tree', base, '--', p]))
         const originPin = gitlinkOf(await indexed(['ls-files', '-s', '--', p]))
@@ -1641,9 +1647,9 @@ export const TRIAGE_VERBS = [
             paths: z.array(z.string()).min(1).describe('Repository-relative paths the lane edited. Each must exist as a file (published), be a submodule pin in the index or HEAD of the lane (published as that commit sha at mode 160000), or be absent (removed from the index unless origin/main pins it as a submodule, which is then left alone).'),
             publish_base: z.string().optional().describe('The commit the lane\'s copy was made from (a sha or ref). The three-way base is merge-base(HEAD, publish_base), so a ref that moved past the copy resolves back to it. Default origin/main.'),
             dry_run: z.boolean().optional().describe('Build and check the commit, then stop before the push.'),
-            witness: z.string().optional().describe('Dispatch id of the live witness that closes the row: must appear in .gm/exec-spool/.dispatch-ledger.json. Required when this publish closes a row (a status is given, or the row file under .gm/prd/ is removed).'),
+            witness: z.string().optional().describe('Dispatch id of the live witness that closes the row: must appear in the .gm/exec-spool/.dispatch-ledger.json of repo_dir or of cwd. Required when this publish closes a row (a status is given, or the row file under .gm/prd/ is removed). A closing publish keeps the row file in repo_dir: its commit removes it from origin.'),
             status: z.enum(['resolved', 'stale']).optional().describe('Status the closing commit records. Required with witness.'),
-            cwd: z.string().optional().describe('gm checkout root: the secrets checker is read from <cwd>/scripts, and the witness ledger from <cwd>/.gm. Required.'),
+            cwd: z.string().optional().describe('gm checkout root: the secrets checker is read from <cwd>/scripts. Required. The row store is <repo_dir>/.gm/prd when that holds the row, else <cwd>/.gm/prd. The witness ledger is read from <repo_dir>/.gm or <cwd>/.gm.'),
         },
         handler: toolReply('publish_on_origin', publishOnOrigin),
     },
