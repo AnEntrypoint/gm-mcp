@@ -265,6 +265,28 @@ function sessionAliasArgs(verb, folded) {
     return { ...folded, body, session_id: folded.session_id ?? session }
 }
 
+// Dispatch-envelope keys the second-argument fold can carry into any verb call. A key the verb does not declare is ignored:
+// dropped from the top level and from a strictly declared body, never refused.
+const CALL_ENVELOPE_KEYS = ['timeout_seconds', 'poll_interval_seconds', 'full_response', 'resume_task', 'max_chars', 'cwd', 'session_id']
+
+function omitKeys(object, keys) {
+    return Object.fromEntries(Object.entries(object).filter(([key]) => !keys.includes(key)))
+}
+
+function withoutUndeclaredEnvelopeKeys(tool, folded) {
+    if (!isPlainObject(folded)) return folded
+    const declaredTop = new Set(Object.keys(tool?.inputSchema ?? {}))
+    const topDrop = CALL_ENVELOPE_KEYS.filter((key) => key in folded && !declaredTop.has(key))
+    const out = topDrop.length ? omitKeys(folded, topDrop) : folded
+    if (!tool?.verb || !isPlainObject(out.body)) return out
+    const schema = verbBodySchema(tool.verb)
+    if (!schema.declared) return out
+    const known = new Set([...Object.keys(schema.fields), ...Object.keys(DISPATCH_BODY_FIELDS), ...GUEST_ENVELOPE_FIELDS, ...(tableRow(tool.verb)?.aliases ?? [])])
+    for (const spec of Object.values(schema.fields)) for (const alias of spec.aliases ?? []) known.add(alias)
+    const bodyDrop = CALL_ENVELOPE_KEYS.filter((key) => key in out.body && !known.has(key))
+    return bodyDrop.length ? { ...out, body: omitKeys(out.body, bodyDrop) } : out
+}
+
 export function refuseUndeclaredBodyKeys(name, verb, folded) {
     if (!verb || !folded || typeof folded !== 'object') return
     const body = folded.body
@@ -527,7 +549,8 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             const merged = withoutEchoedSession(mergeEnvelope(name, args, envelope), session_id, tool?.inputSchema)
             feedContext = browserCallContext(tool.verb, merged, defaultCwdFor(merged, cwd))
             const defaults = {}
-            const folded = withProjectRootNameDropped(tool.verb, canonicalFsReadArgs(tool.verb, sessionAliasArgs(tool.verb, foldVerbArgs(verbShapedTool(tool, merged), merged))), defaultCwdFor(merged, cwd))
+            const shaped = verbShapedTool(tool, merged)
+            const folded = withoutUndeclaredEnvelopeKeys(shaped, withProjectRootNameDropped(tool.verb, canonicalFsReadArgs(tool.verb, sessionAliasArgs(tool.verb, foldVerbArgs(shaped, merged))), defaultCwdFor(merged, cwd)))
             const refuse = (code, check) => {
                 try {
                     check()

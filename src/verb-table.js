@@ -374,7 +374,7 @@ const CODESEARCH_BODY = {
         glob: { type: 'string', aliases: ['path_glob'], description: 'Path glob; a "!" prefix negates.' },
         exclude: { type: 'string', aliases: ['exclude_glob', 'exclude_globs'], description: 'Exclusion glob.' },
         combine: { type: 'string', aliases: ['term_combination'], enum: ['phrase', 'and', 'or'], description: 'Anything else is refused.' },
-        output: { type: 'string', enum: ['matches', 'full', 'compact', 'content', 'files', 'count'], description: 'Output shape. "compact" is path:line: trimmed text and "content" is the same shape under grep\'s name for it; "full" is an alias of "matches".' },
+        output: { type: 'string', enum: ['matches', 'full', 'compact', 'content', 'files', 'count', 'located'], description: 'Output shape. "compact" is path:line: trimmed text and "content" is the same shape under grep\'s name for it; "full" is an alias of "matches". "located" is one output line per match, "path:line matched text" with the text trimmed to 160 characters; the count field still carries the totals.' },
         case_insensitive: { type: 'boolean', aliases: ['ignore_case'], description: 'Folds case. Literal and regex are case-sensitive by default (a mixed-case match is missed unless this is true); the reply echoes case_insensitive.' },
         whole_word: { type: 'boolean', description: 'Whole-word match; refused in filename mode.' },
         comments_only: { type: 'boolean', aliases: ['comments'], description: 'Scans comments only; refused in filename mode.' },

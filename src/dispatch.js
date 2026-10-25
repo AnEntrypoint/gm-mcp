@@ -1128,6 +1128,28 @@ export function withCodesearchDualPathRouted(verb, body, cwd) {
     return { body: routed, scope: scope === '' || scope === '.' ? null : scope }
 }
 
+const CODESEARCH_VERBS = new Set(['codesearch', 'code_search', 'search'])
+const CODESEARCH_LOCATED_OUTPUT = 'located'
+const CODESEARCH_LOCATED_TEXT_CHARS = 160
+
+// `output: "located"` is served from the guest's default match list: the guest never sees the key, and the reply's matches
+// become one `path:line text` line each in `output`, the text trimmed to 160 characters. `count` keeps the totals.
+function withCodesearchLocatedRouted(verb, body) {
+    if (!CODESEARCH_VERBS.has(verb) || !isPlainObject(body) || body.output !== CODESEARCH_LOCATED_OUTPUT) return { body, located: false }
+    const { output, ...rest } = body
+    return { body: rest, located: true }
+}
+
+function withCodesearchLocated(located, verb, out) {
+    if (!located || !CODESEARCH_VERBS.has(verb) || !isPlainObject(out)) return out
+    const flat = Array.isArray(out.matches)
+    const holder = flat ? out : isPlainObject(out.data) && Array.isArray(out.data.matches) ? out.data : null
+    if (holder === null) return out
+    const { matches, ...rest } = holder
+    const output = matches.map((match) => `${match.path ?? '?'}:${match.line ?? '?'} ${String(match.text ?? '').trim().slice(0, CODESEARCH_LOCATED_TEXT_CHARS)}`)
+    return flat ? { ...rest, output } : { ...out, data: { ...rest, output } }
+}
+
 const DUAL_SCOPE_CHANNELS = ['hits', 'bm25_hits', 'vector_hits', 'definitions', 'references', 'files', 'top_files']
 
 function dualHitPath(hit) {
@@ -2943,6 +2965,65 @@ function ciStatusReplyRunStatus(reply) {
     return typeof status === 'string' ? status : undefined
 }
 
+const CI_FAILURE_LOG_PATTERN = 'FAILED|FAIL \\[|failures:|panicked at|Error:'
+const CI_FAILURE_MARKER = /FAILED|FAIL \[|failures:/
+const CI_PANIC_LINE = /panicked at|Error:/
+const CI_CARGO_FAILED_TEST = /^test (\S+) \.\.\. FAILED$/
+const CI_NEXTEST_FAILED_TEST = /\bFAIL \[[^\]]*\]\s+(.+)$/
+const CI_FAILING_TESTS_PER_JOB = 20
+const CI_PANIC_LINE_CHARS = 300
+const CI_LOG_MAX_LINES = 500
+const CI_LOG_MAX_CHARS = 40000
+const ANSI_ESCAPE = /\u001b\[[0-9;]*[A-Za-z]/g
+
+function parseYamlMapping(text) {
+    try {
+        const parsed = yaml.load(text)
+        return isPlainObject(parsed) ? parsed : null
+    } catch {
+        return null
+    }
+}
+
+// Test names are the cargo `test <name> ... FAILED` and nextest `FAIL [<time>] <name>` lines. The panic line is the first
+// `panicked at` or `Error:` line after the first failure marker. Both are bounded: 20 names, 300 characters.
+function ciLogFailureSummary(lines) {
+    const texts = lines.map((line) => String(line?.text ?? '').replace(ANSI_ESCAPE, '').trim())
+    const names = []
+    for (const text of texts) {
+        const name = (CI_CARGO_FAILED_TEST.exec(text) ?? CI_NEXTEST_FAILED_TEST.exec(text))?.[1]
+        if (name !== undefined && !names.includes(name)) names.push(name)
+    }
+    const marker = texts.findIndex((text) => CI_FAILURE_MARKER.test(text))
+    const panic = marker < 0 ? undefined : texts.slice(marker + 1).find((text) => CI_PANIC_LINE.test(text))
+    return {
+        failing_tests: names.slice(0, CI_FAILING_TESTS_PER_JOB),
+        failing_test_count: names.length,
+        ...(panic === undefined ? {} : { first_panic: panic.slice(0, CI_PANIC_LINE_CHARS) }),
+    }
+}
+
+async function failingJobLogSummary(args, job, signal, observer) {
+    const body = { run_id: job.run_id, job_id: job.job_id, mode: 'regex', pattern: CI_FAILURE_LOG_PATTERN, max_lines: CI_LOG_MAX_LINES, max_chars: CI_LOG_MAX_CHARS }
+    try {
+        const log = parseYamlMapping(await runDispatch({ ...args, verb: 'ci-log', body, raw_body: undefined, resume_task: undefined, full_response: undefined, max_chars: undefined, requested_max_chars: undefined, include_timing: undefined }, signal, observer))
+        if (log === null || log.ok === false) return { log_error: String(log?.error ?? 'ci-log reply unreadable') }
+        return ciLogFailureSummary(Array.isArray(log.lines) ? log.lines : [])
+    } catch (error) {
+        return { log_error: error?.message ? String(error.message) : String(error) }
+    }
+}
+
+// Each failing_jobs row gains failing_tests, failing_test_count and first_panic (or log_error) from its own ci-log read.
+async function withFailingJobLogs(args, raw, signal, observer) {
+    const parsed = typeof raw === 'string' ? parseYamlMapping(raw) : null
+    if (parsed === null || !Array.isArray(parsed.failing_jobs) || parsed.failing_jobs.length === 0) return raw
+    const failing_jobs = await Promise.all(parsed.failing_jobs.map(async (job) => (
+        isPlainObject(job) && job.job_id !== undefined ? { ...job, ...(await failingJobLogSummary(args, job, signal, observer)) } : job
+    )))
+    return yaml.dump({ ...parsed, failing_jobs }, { lineWidth: 100 })
+}
+
 function sleepUnlessAborted(ms, signal) {
     return new Promise((resolve) => {
         const timer = setTimeout(done, ms)
@@ -3159,7 +3240,8 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     appendDiagnostic('dispatch-start', { call_id: callId, session_id: sessionId, verb: args?.verb ?? null, cwd: args?.cwd ?? null, resume_task: args?.resume_task ?? null })
     try {
         const waits = CI_STATUS_VERBS.has(args?.verb) && isPlainObject(args?.body) && args.body.wait === true
-        const raw = waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver)
+        const polled = waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver)
+        const raw = CI_STATUS_VERBS.has(args?.verb) ? await withFailingJobLogs(args, polled, signal, responseValueObserver) : polled
         const healthed = args?.verb === 'health' ? withHealthBundleFields(raw) : withGitAddNote(raw, gitAddNote)
         const reply = withStaleBundleNotice(args?.verb, projectHealthFields(healthed, healthFields), sessionId)
         if (typeof reply === 'string') replyDispatchId = /^dispatch_id: (\S+)/m.exec(reply)?.[1] ?? null
@@ -3232,6 +3314,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     let normalizedBody
     let codesearchKDefaulted = false
     let codesearchDualScope = null
+    let codesearchLocated = false
     let rawBodyText
     if (!resume_task && !isPlainText) {
         const normalized = normalizedObjectBody(verb, body)
@@ -3246,7 +3329,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             const diagnostic = objectBodyDiagnostic(verb, gitCoerced.value) ?? fsWriteEnvelopeDiagnostic(verb, gitCoerced.value)
             if (diagnostic) return `error: ${diagnostic}`
             const coerced = withCodesearchScalarsCoerced(verb, gitCoerced.value)
-            const dualRouted = withCodesearchDualPathRouted(verb, coerced, cwd)
+            const locatedRouted = withCodesearchLocatedRouted(verb, coerced)
+            codesearchLocated = locatedRouted.located
+            const dualRouted = withCodesearchDualPathRouted(verb, locatedRouted.body, cwd)
             codesearchDualScope = dualRouted.scope
             const withDefaultK = withCodesearchDefaultK(verb, dualRouted.body)
             codesearchKDefaulted = withDefaultK.defaulted
@@ -3381,6 +3466,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             out = withCodesearchDualPathScope(codesearchDualScope, out)
             out = withRuleExcludedMatchesDropped(verb, out)
             out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
+            out = withCodesearchLocated(codesearchLocated, verb, out)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs))
             else if (full_response) out = withDispatchWait(out, Date.now() - callStartedAtMs, claimedAtMs, claimedAtMs !== null && typeof landedAtMs === 'number' ? landedAtMs - (callStartedAtMs + claimedAtMs) : null)
             if (out && typeof out === 'object' && out.instruction_unchanged === true && bodyCarriesInstructionHash(normalizedBody)) {

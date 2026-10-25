@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.329 - envelope keys are ignored, codesearch located output, failing tests on ci-status
+
+A second-argument envelope key (`timeout_seconds`, `poll_interval_seconds`, `full_response`, `resume_task`, `max_chars`, `cwd`, `session_id`) the verb does not declare is dropped, not refused: at top level for a native tool, and from a strictly declared body. `codesearch` takes `output: "located"`, one `path:line matched text` line per match in `output` (text trimmed to 160 characters); `count` keeps the totals. `ci-status` adds `failing_tests` (up to 20 cargo or nextest test names), `failing_test_count` and `first_panic` (up to 300 characters) to each `failing_jobs` row, read from that job's `ci-log`. `BUNDLE_VERSION` and `package.json` move to 0.2.329.
+
 ## 0.2.314 - health always carries the bundle identity
 
 `health` now puts `bundle_served_version`, `bundle_installed_version`, `bundle_stale`, `bundle_served_path` and `bundle_installed_path` in its `data` object on every reply, default or with `body.fields`. Before, these keys appeared only while the served bundle was stale, so a current server read as unknown. `bundle_stale` is `false` when the served bundle is current. `BUNDLE_VERSION` and `package.json` move to 0.2.314.
