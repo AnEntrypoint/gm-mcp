@@ -70,11 +70,42 @@ export function lastProjectRoot() {
     }
 }
 
+// Host aliases for project paths absent on this machine: a checkout named /workspace/<name> is at /data/workspace/<name> here.
+// An alias applies only when the requested path does not exist.
+const PATH_ALIASES = [['/workspace/', '/data/workspace/']]
+
+function existingPath(p) {
+    try { statSync(p); return p } catch { return null }
+}
+
+function existingProjectDir(requested) {
+    const direct = existingPath(requested)
+    if (direct) return { dir: direct, source: 'cwd' }
+    for (const [from, to] of PATH_ALIASES) {
+        if (!requested.startsWith(from)) continue
+        const aliased = existingPath(path.join(to, requested.slice(from.length)))
+        if (aliased) return { dir: aliased, source: 'cwd-alias' }
+    }
+    return null
+}
+
 function resolveDispatchRoot(cwd) {
     if (typeof cwd === 'string' && cwd.trim()) {
-        const root = projectRootFor(cwd.trim())
+        const requested = path.resolve(cwd.trim())
+        const found = existingProjectDir(requested)
+        if (!found) {
+            return {
+                error: 'cwd-not-found',
+                refused_root: requested,
+                root_source: 'cwd',
+                refused_reason: 'cwd ' + requested + ' does not exist on this host, so no project root or .gm/exec-spool can be read from it',
+                note: 'The project root must be an existing directory. ' + requested + ' is absent here and no path alias maps it. Pass the checkout path that exists on this host.',
+                accepted_fields: ['cwd'],
+            }
+        }
+        const root = projectRootFor(found.dir)
         rememberProjectRoot(root)
-        return { root, root_source: 'cwd' }
+        return { root, root_source: found.source }
     }
     for (const name of DEFAULT_CWD_ENV_VARS) {
         const value = process.env[name]
