@@ -18,7 +18,7 @@ export const FAST_MANIFEST = {
   },
   "serverInfo": {
    "name": "gm-mcp",
-   "version": "0.2.333"
+   "version": "0.2.334"
   },
   "instructions": "gm-mcp serves one tool, gm_codemode. Every gm verb is a function on `gm` inside its code body: gm_codemode({code: \"return await gm.codesearch({query: 'x'})\"}). Call gm.list() for every callable name and gm.describe(name) for a verb schema. The per-verb tools of earlier builds (gm_instruction, gm, fs_read, git_status, ...) are not registered here, so a client holding a cached tool list must re-fetch tools/list."
  },
