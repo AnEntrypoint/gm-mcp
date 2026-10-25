@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.336 - publish_on_origin never clobbers newer origin text
+
+`publish_on_origin` three-way merges each listed file from the fork point, never from `publish_base` when that names origin/main: a `publish_base` that resolves to the origin/main tip is ignored, and a `publish_base` that is not an ancestor of HEAD refuses with `publish_base_not_fork`. A path origin changed since the fork point merges per hunk and refuses on a conflicting hunk with its path and line span; a path origin deleted refuses unless the lane left it unchanged. The publish fetch deadline is 300 s (was 180 s) and a `fetch_failed` reply names the deadline and the retry. `BUNDLE_VERSION` and `package.json` move to 0.2.336.
+
 ## 0.2.329 - envelope keys are ignored, codesearch located output, failing tests on ci-status
 
 A second-argument envelope key (`timeout_seconds`, `poll_interval_seconds`, `full_response`, `resume_task`, `max_chars`, `cwd`, `session_id`) the verb does not declare is dropped, not refused: at top level for a native tool, and from a strictly declared body. `codesearch` takes `output: "located"`, one `path:line matched text` line per match in `output` (text trimmed to 160 characters); `count` keeps the totals. `ci-status` adds `failing_tests` (up to 20 cargo or nextest test names), `failing_test_count` and `first_panic` (up to 300 characters) to each `failing_jobs` row, read from that job's `ci-log`. `BUNDLE_VERSION` and `package.json` move to 0.2.329.

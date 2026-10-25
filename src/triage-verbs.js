@@ -19,6 +19,7 @@ import { appendDiagnostic } from './server-log.js'
 import { appendRowNote, checkReferences, ensureReferenceGate, readRow, recordedUrls, REFERENCE_CAP, referenceGateRefusal, rowFileOf, runGhSearch, searchPlan, validRowId } from './public-search.js'
 const LOCAL_TIMEOUT_MS = 60_000
 const NETWORK_TIMEOUT_MS = 180_000
+const FETCH_TIMEOUT_MS = 300_000
 const MAX_OUTPUT_BYTES = 256 * 1024 * 1024
 const EMPTY = Buffer.alloc(0)
 const NO_PROMPT = { GIT_TERMINAL_PROMPT: '0' }
@@ -508,8 +509,8 @@ async function publishOnOrigin(args) {
     if (unreferenced !== null) return refused('references_required', unreferenced)
     const closeRow = closing && paths.includes(rowRel) ? rowRel : null
     const trailers = closing ? ['-m', `Witness: ${args.witness}`, '-m', `Status: ${args.status}`] : []
-    const fetched = await run('git', ['fetch', '-q', 'origin', 'main'], { cwd: repo, env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
-    if (fetched.status !== 0) return refused('fetch_failed', 'fetch failed; nothing pushed')
+    const fetched = await run('git', ['fetch', '-q', 'origin', 'main'], { cwd: repo, env: NO_PROMPT, timeout: FETCH_TIMEOUT_MS })
+    if (fetched.status !== 0) return refused('fetch_failed', `fetch of origin main failed (${failureReason(fetched)}); the fetch deadline is ${FETCH_TIMEOUT_MS / 1000} s, and a timeout reads "terminated by SIGTERM"; nothing pushed; retry publish_on_origin`)
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-publish-'))
     try {
         const givenBase = typeof args.publish_base === 'string' && args.publish_base !== '' ? args.publish_base : null
@@ -563,11 +564,18 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'index') }
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
 
-    const found = givenBase === null
-        ? await plain(['merge-base', 'HEAD', 'origin/main'])
-        : await plain(['rev-parse', '--verify', '--quiet', `${givenBase}^{commit}`])
-    if (found.status !== 0) return refused('no_merge_base', givenBase === null ? 'no merge base between HEAD and origin/main; nothing pushed' : `publish_base ${givenBase} names no commit; nothing pushed`)
-    const base = utf8(found.stdout).trim()
+    const forkPoint = await plain(['merge-base', 'HEAD', 'origin/main'])
+    if (forkPoint.status !== 0) return refused('no_merge_base', 'no merge base between HEAD and origin/main; nothing pushed')
+    let base = utf8(forkPoint.stdout).trim()
+    if (givenBase !== null) {
+        const named = await plain(['rev-parse', '--verify', '--quiet', `${givenBase}^{commit}`])
+        if (named.status !== 0) return refused('no_merge_base', `publish_base ${givenBase} names no commit; nothing pushed`)
+        const sha = utf8(named.stdout).trim()
+        if (sha !== utf8((await plain(['rev-parse', '--verify', 'origin/main^{commit}'])).stdout).trim()) {
+            if ((await plain(['merge-base', '--is-ancestor', sha, 'HEAD'])).status !== 0) return refused('publish_base_not_fork', `publish_base ${givenBase} is not an ancestor of HEAD; pass the commit the lane's copy was made from; nothing pushed`)
+            base = sha
+        }
+    }
     if ((await indexed(['read-tree', 'origin/main'])).status !== 0) return refused('read_tree_failed', 'read-tree failed; nothing pushed')
 
     for (const [index, p] of paths.entries()) {
@@ -593,6 +601,10 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
             const ours = fs.readFileSync(full)
             const fork = from.status === 0 ? from.stdout : null
             const onOrigin = theirs.status === 0 ? theirs.stdout : null
+            if (fork !== null && onOrigin === null) {
+                if (sameBytes(ours, fork)) continue
+                return refused('merge_conflict', `${p} was deleted on origin/main and changed in the lane; nothing pushed`, [['path', p], ['fork', base]])
+            }
             let merged
             if ((fork === null && onOrigin === null) || [ours, fork, onOrigin].some(isBinary)) {
                 // An add (absent from the fork point and origin/main) or binary content has no line merge: the side changed against the fork point wins whole.
@@ -665,7 +677,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     const pushed = await plain(['push', '-q', 'origin', `${sha}:refs/heads/main`], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
     if (pushed.status !== 0) {
         // origin moved between the build and the push: replay this one commit onto the new tip and push it once more; the lane's edits are not re-run.
-        const refetched = await plain(['fetch', '-q', 'origin', 'main'], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
+        const refetched = await plain(['fetch', '-q', 'origin', 'main'], { env: NO_PROMPT, timeout: FETCH_TIMEOUT_MS })
         if (refetched.status !== 0) return refused('push_refused', 'push refused and refetch failed; nothing landed', [['commit', sha]])
         const rebased = await rebaseCommitOntoTip({ repo, commit: sha, row, message, paths, checker, work, trailers })
         if (rebased.refusal) return rebased.refusal
@@ -674,7 +686,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
         const retry = await plain(['push', '-q', 'origin', `${landedSha}:refs/heads/main`], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
         if (retry.status !== 0) return refused('push_refused', 'push refused again after one rebase; nothing landed', [['commit', landedSha]])
     }
-    await plain(['fetch', '-q', 'origin', 'main'], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
+    await plain(['fetch', '-q', 'origin', 'main'], { env: NO_PROMPT, timeout: FETCH_TIMEOUT_MS })
     const landed = await plain(['merge-base', '--is-ancestor', landedSha, 'origin/main'])
     if (landed.status === 0) return ok(`published ${landedSha} on origin/main`, [['commit', landedSha], ['fork', base]], stat)
     return refused('not_on_origin', `push reported success but ${landedSha} is not on origin/main`, [['commit', landedSha]])
@@ -1642,13 +1654,13 @@ export const TRIAGE_VERBS = [
     },
     {
         name: 'publish_on_origin',
-        description: 'Publishes the listed paths of repo_dir onto origin/main as one commit, without touching its working tree, index or local main (replaces scripts/triage/publish-on-origin.sh). Steps: fetch origin main; build a temporary index from origin/main; three-way merge each listed file (base = fork point merge-base(HEAD, publish_base), default origin/main; theirs = origin/main; ours = the lane file; a conflict refuses with its path and line span); regenerate skills/manifest.sha256 when a skills/ path is listed; commit-tree with "Row: <row>"; refuse a commit that changes any path outside the list; run <cwd>/scripts/check-staged-secrets.mjs on that index; push sha:refs/heads/main; confirm the sha is on origin/main. dry_run stops before the push. Reply: ok, exit_code, result, commit, then the last three diff stat lines. Refusals return as data with error_code: fetch_failed, merge_conflict, unintended_paths, secrets_check_failed, push_refused, not_on_origin and others; nothing is pushed on a refusal.',
+        description: 'Publishes the listed paths of repo_dir onto origin/main as one commit, without touching its working tree, index or local main (replaces scripts/triage/publish-on-origin.sh). Steps: fetch origin main; build a temporary index from origin/main; three-way merge each listed file (base = the fork point: merge-base(HEAD, origin/main), or publish_base when it is an ancestor of HEAD and not origin/main; theirs = origin/main; ours = the lane file; a conflict refuses with its path and line span; a path origin deleted refuses unless the lane left it unchanged); regenerate skills/manifest.sha256 when a skills/ path is listed; commit-tree with "Row: <row>"; refuse a commit that changes any path outside the list; run <cwd>/scripts/check-staged-secrets.mjs on that index; push sha:refs/heads/main; confirm the sha is on origin/main. dry_run stops before the push. Reply: ok, exit_code, result, commit, then the last three diff stat lines. Refusals return as data with error_code: fetch_failed, merge_conflict, publish_base_not_fork, unintended_paths, secrets_check_failed, push_refused, not_on_origin and others; nothing is pushed on a refusal.',
         inputSchema: {
             repo_dir: z.string().describe('Checkout whose files are published: an absolute path, or relative to cwd.'),
             row: z.string().describe('Row id, written into the commit as "Row: <row>".'),
             message: z.string().describe('Commit subject and body.'),
             paths: z.array(z.string()).min(1).describe('Repository-relative paths the lane edited. Each must exist as a file (published), be a submodule pin in the index or HEAD of the lane (published as that commit sha at mode 160000), or be absent (removed from the index unless origin/main pins it as a submodule, which is then left alone).'),
-            publish_base: z.string().optional().describe('The commit the lane\'s copy was made from (a sha or ref). The three-way base is publish_base itself, so pass the sha the copy was made from; a ref that moved past the copy would take newer origin text as the base. Default: merge-base(HEAD, origin/main).'),
+            publish_base: z.string().optional().describe('The commit the lane\'s copy was made from (a sha or ref). The lane start commit, an ancestor of HEAD. origin/main is never the base: a publish_base that resolves to the origin/main tip is ignored and the base stays the fork point. Default: merge-base(HEAD, origin/main).'),
             dry_run: z.boolean().optional().describe('Build and check the commit, then stop before the push.'),
             witness: z.string().optional().describe('Dispatch id of the live witness that closes the row: must appear in the .gm/exec-spool/.dispatch-ledger.json of repo_dir or of cwd. Required when this publish closes a row (a status is given, or the row file under .gm/prd/ is removed). A closing publish keeps the row file in repo_dir: its commit removes it from origin.'),
             status: z.enum(['resolved', 'stale']).optional().describe('Status the closing commit records. Required with witness.'),
