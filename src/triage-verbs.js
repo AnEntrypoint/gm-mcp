@@ -680,20 +680,20 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     return refused('not_on_origin', `push reported success but ${landedSha} is not on origin/main`, [['commit', landedSha]])
 }
 
-// ---------------------------------------------------------------- git-clone (scratch clones of AnEntrypoint repositories)
+// ---------------------------------------------------------------- git-clone (scratch clones of the owner's repositories)
 
 const SCRATCH_ROOT = '/config/tmp'
 const CLONE_MODES = { blobless: ['--filter=blob:none'], shallow: ['--depth', '1'], full: [] }
-const CLONE_OWNER = 'AnEntrypoint'
+const CLONE_OWNERS = ['AnEntrypoint', 'lanmower']
 
-// Accepts AnEntrypoint/<name>, or the https://github.com URL of one; any other owner is refused.
+// Accepts <owner>/<name> for an owner in CLONE_OWNERS, or the https://github.com URL of one; any other owner is refused.
 function cloneRepoName(value) {
     const text = singleLine(value, 'repo').trim().replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '')
     const [owner, name, ...rest] = text.split('/')
-    if (rest.length > 0 || name === undefined) throw usage('repo must be AnEntrypoint/<name> or its https://github.com URL')
-    if (owner !== CLONE_OWNER) return refused('owner_refused', `git-clone refuses owner ${JSON.stringify(owner)}: only ${CLONE_OWNER} repositories are cloned; nothing cloned`)
+    if (rest.length > 0 || name === undefined) throw usage(`repo must be <owner>/<name> (owner ${CLONE_OWNERS.join(' or ')}) or its https://github.com URL`)
+    if (!CLONE_OWNERS.includes(owner)) return refused('owner_refused', `git-clone refuses owner ${JSON.stringify(owner)}: only ${CLONE_OWNERS.join(' and ')} repositories are cloned; nothing cloned`)
     if (!SAFE_NAME.test(name)) throw usage(`repo name ${JSON.stringify(name)} must be one path component`)
-    return name
+    return `${owner}/${name}`
 }
 
 // The dest is resolved under SCRATCH_ROOT; anything outside it, or the root itself, is refused before any write.
@@ -705,15 +705,15 @@ function cloneDest(value) {
 }
 
 async function gitClone(args) {
-    const name = cloneRepoName(args.repo)
-    if (typeof name !== 'string') return name
+    const slug = cloneRepoName(args.repo)
+    if (typeof slug !== 'string') return slug
     const target = cloneDest(args.dest)
     if (typeof target !== 'string') return target
     const mode = args.mode === undefined ? 'blobless' : args.mode
     if (!Object.hasOwn(CLONE_MODES, mode)) throw usage(`mode must be one of ${Object.keys(CLONE_MODES).join(', ')}`)
     if (fs.existsSync(target)) return refused('dest_exists', `dest ${target} already exists; nothing cloned`)
     fs.mkdirSync(path.dirname(target), { recursive: true })
-    const url = `https://github.com/${CLONE_OWNER}/${name}.git`
+    const url = `https://github.com/${slug}.git`
     const cloned = await run('git', ['clone', ...CLONE_MODES[mode], '--', url, target], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
     if (cloned.status !== 0) {
         fs.rmSync(target, { recursive: true, force: true })
