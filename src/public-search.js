@@ -174,18 +174,33 @@ export function readRow(root, id) {
     return { file, doc }
 }
 
-// Writes the row through a temp file and a rename, and refuses to write any text that would not read back as the same row.
-export function writeRow(file, doc) {
-    const source = yaml.dump(doc, { lineWidth: 120, noRefs: true })
-    if (JSON.stringify(yaml.load(source)) !== JSON.stringify(doc)) throw new Error(`${file} would not read back unchanged; nothing written`)
+let spoolDispatch = null
+
+export function bindSpoolDispatch(dispatch) {
+    spoolDispatch = dispatch
+}
+
+function writeAtomic(file, text) {
     const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
     try {
-        fs.writeFileSync(tmp, source)
+        fs.writeFileSync(tmp, text)
         fs.renameSync(tmp, file)
     } catch (error) {
         fs.rmSync(tmp, { force: true })
         throw error
     }
+}
+
+function noteAccepted(reply) {
+    return /"?noted"?\s*:/.test(reply) && !/"?ok"?\s*:\s*false/.test(reply)
+}
+
+// Appends one note to a named list of an open row through the runner's prd-note, the write path prd-resolve shares (a
+// compare-and-swap write that retries on conflict). Null when the note landed, else the runner's refusal text.
+export async function appendRowNote(root, id, field, note, sessionId) {
+    if (spoolDispatch === null) return 'the spool dispatch is not bound'
+    const reply = String(await spoolDispatch({ verb: 'prd-note', body: { id, field, note }, cwd: root, session_id: sessionId }))
+    return noteAccepted(reply) ? null : reply.trim().slice(0, 400)
 }
 
 // Checks each reference: url and why are required; repo, path and sha are checked when given; license defaults to unknown.
@@ -211,16 +226,32 @@ export function checkReferences(list) {
     return { references }
 }
 
-// Merges by url: a reference with a url already on the row replaces that entry in place.
-export function mergeReferences(existing, incoming) {
-    const byUrl = new Map((Array.isArray(existing) ? existing : []).map((ref) => [ref?.url, ref]))
-    for (const ref of incoming) byUrl.set(ref.url, ref)
-    const merged = [...byUrl.values()]
-    return merged.length > REFERENCE_CAP ? { error: `a row keeps at most ${REFERENCE_CAP} references` } : { references: merged }
+// The urls already on a row. Each reference is one note holding its JSON, so the url is read from that JSON.
+export function recordedUrls(doc) {
+    return (Array.isArray(doc.references) ? doc.references : []).map(recordedUrl).filter((url) => typeof url === 'string')
+}
+
+function recordedUrl(entry) {
+    if (typeof entry?.url === 'string') return entry.url
+    if (typeof entry?.note !== 'string') return null
+    try {
+        const parsed = JSON.parse(entry.note)
+        return typeof parsed?.url === 'string' ? parsed.url : null
+    } catch {
+        return null
+    }
+}
+
+const GRANDFATHER_NOTE = 'grandfathered:'
+const GATE_STATE = path.join('.gm', 'prd-references-gate.json')
+
+function isGrandfathered(doc) {
+    return Array.isArray(doc.references_gate) && doc.references_gate.some((entry) => typeof entry?.note === 'string' && entry.note.startsWith(GRANDFATHER_NOTE))
 }
 
 export function rowHasReferences(doc) {
     if (Array.isArray(doc.references) && doc.references.length > 0) return true
+    if (isGrandfathered(doc)) return true
     const prose = Object.entries(doc)
         .filter(([key, value]) => !ROW_TEXT_EXCLUDED.has(key) && typeof value === 'string')
         .map(([, value]) => value)
@@ -228,13 +259,41 @@ export function rowHasReferences(doc) {
     return NO_REFERENCES_LINE.test(prose)
 }
 
-// Null when the row may close: the row has references, or its body states why none apply. A row that cannot be read is left
-// to the runner, which refuses a missing or malformed row on its own.
+// Null when the row may close: it has references, carries the grandfather note, or its body states why none apply. A row
+// that cannot be read is left to the runner, which refuses a missing or malformed row on its own.
 export function referenceGateRefusal(root, id, verb) {
     const read = readRow(root, id)
-    if (read.error_code === 'row_missing' || read.error_code === 'row_unparseable') return null
+    if (read.error_code !== undefined) return null
     if (rowHasReferences(read.doc)) return null
-    return `${verb} refused: row ${id} has no public references. Fill them with gm["prd-references"]({cwd, id, references: [{url, why}]}), or add a row body line "No public references: <reason of at least 10 characters>".`
+    return `${verb} refused: row ${id} has no references (field "references" is empty). Fill it with gm["prd-references"]({cwd, id, references: [{url, why}]}), or add a row body line "No public references: <reason of at least 10 characters>".`
+}
+
+// Tags each row that exists when the gate first runs with a grandfather note, once per project, and records the pass in
+// .gm/prd-references-gate.json. Rows created later carry no such note and are gated. Returns null, or the reason the pass
+// stopped (the state file is then not written, so the next PRD dispatch retries).
+export async function ensureReferenceGate(root) {
+    const state = path.join(root, GATE_STATE)
+    if (fs.existsSync(state)) return null
+    let names = []
+    try {
+        names = fs.readdirSync(path.join(root, '.gm', 'prd'))
+    } catch {
+        names = []
+    }
+    const grandfathered = []
+    for (const name of names.filter((file) => file.endsWith('.yml'))) {
+        const id = name.slice(0, -'.yml'.length)
+        const read = readRow(root, id)
+        if (read.error_code !== undefined) continue
+        if (!isGrandfathered(read.doc)) {
+            const failure = await appendRowNote(root, id, 'references_gate', `${GRANDFATHER_NOTE} row predates the public-references gate`)
+            if (failure !== null) return `grandfathering ${id} was refused: ${failure}`
+        }
+        grandfathered.push(id)
+    }
+    fs.mkdirSync(path.dirname(state), { recursive: true })
+    writeAtomic(state, `${JSON.stringify({ gate: 'public-references', grandfathered, written_at: new Date().toISOString() }, null, 2)}\n`)
+    return null
 }
 
 export function closeRowId(args) {

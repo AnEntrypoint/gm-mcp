@@ -16,7 +16,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { lastTableError, readProcessTableAsync } from './process-table.js'
 import { appendDiagnostic } from './server-log.js'
-import { checkReferences, mergeReferences, readRow, referenceGateRefusal, runGhSearch, searchPlan, validRowId, writeRow } from './public-search.js'
+import { appendRowNote, checkReferences, ensureReferenceGate, readRow, recordedUrls, REFERENCE_CAP, referenceGateRefusal, runGhSearch, searchPlan, validRowId } from './public-search.js'
 
 const LOCAL_TIMEOUT_MS = 60_000
 const NETWORK_TIMEOUT_MS = 180_000
@@ -490,6 +490,7 @@ async function publishOnOrigin(args) {
     if (closing && (!CLOSE_STATUSES.includes(args.status) || !WITNESS_ID.test(String(args.witness ?? '')) || !isLedgerWitness(root, args.witness))) {
         return refused('witness_required', `closing row ${row} needs witness (a dispatch id in .gm/exec-spool/.dispatch-ledger.json) and status resolved or stale; nothing pushed`)
     }
+    if (closing) await ensureReferenceGate(root)
     const unreferenced = closing ? referenceGateRefusal(root, row, 'publish_on_origin closing commit') : null
     if (unreferenced !== null) return refused('references_required', unreferenced)
     const trailers = closing ? ['-m', `Witness: ${args.witness}`, '-m', `Status: ${args.status}`] : []
@@ -1507,10 +1508,14 @@ async function prdReferencesVerb(args) {
     if (checked.error !== undefined) return refused('bad_reference', checked.error)
     const read = readRow(root, id)
     if (read.error_code !== undefined) return refused(read.error_code, read.error)
-    const merged = mergeReferences(read.doc.references, checked.references)
-    if (merged.error !== undefined) return refused('references_full', merged.error)
-    writeRow(read.file, { ...read.doc, references: merged.references })
-    return ok(`${merged.references.length} references on ${id}`, [['row', id], ['added', checked.references.length], ['references', merged.references.length], ['status', String(read.doc.status ?? 'unknown')]])
+    const known = new Set(recordedUrls(read.doc))
+    const fresh = checked.references.filter((ref) => !known.has(ref.url))
+    if (known.size + fresh.length > REFERENCE_CAP) return refused('references_full', `a row keeps at most ${REFERENCE_CAP} references; ${id} has ${known.size}`)
+    for (const [index, ref] of fresh.entries()) {
+        const failure = await appendRowNote(root, id, 'references', JSON.stringify(ref), args.session_id)
+        if (failure !== null) return refused('prd_note_refused', failure, [['row', id], ['recorded', index]])
+    }
+    return ok(`${fresh.length} references recorded on ${id}`, [['row', id], ['recorded', fresh.length], ['skipped_existing', checked.references.length - fresh.length], ['references', known.size + fresh.length], ['status', String(read.doc.status ?? 'unknown')]])
 }
 
 // ---------------------------------------------------------------- registry
@@ -1616,7 +1621,7 @@ export const TRIAGE_VERBS = [
     },
     {
         name: 'prd-references',
-        description: 'Records public references on an open PRD row. Each entry {url, why, repo, path, sha, license} is merged into the row file .gm/prd/<id>.yml under references, keyed by url (an entry with the same url is replaced). url is https; why is one line; repo is owner/name; path is repository-relative; sha is the git object id from github-search; license defaults to unknown. Only the references key changes: the status is kept, so the call neither reopens nor closes the row, and prd-list {id} shows the references. Typed refusals (ok false, exit 1): row_missing (no open row file), row_unparseable, bad_reference (the reply names the field), references_full (more than 60 per row). Input errors throw (exit 2). prd-resolve, prd-close and the closing commit of publish_on_origin refuse a row that has no references and no body line "No public references: <reason>".',
+        description: 'Records public references on an open PRD row. Each entry {url, why, repo, path, sha, license} becomes one note on the row list references, written through the runner prd-note path (the compare-and-swap write that prd-resolve and prd-note share), holding the entry as JSON. A url already on the row is not recorded again. url is https; why is one line; repo is owner/name; path is repository-relative; sha is the git object id from github-search; license defaults to unknown. Only the references list grows: the status is kept, so the call neither reopens nor closes the row, and prd-list {id} shows the list. Typed refusals (ok false, exit 1): row_missing (no open row file), row_unparseable, bad_reference (the reply names the field), references_full (more than 60 per row), prd_note_refused (the runner reason; recorded counts the notes written before it). Input errors throw (exit 2). prd-resolve, prd-close and the closing commit of publish_on_origin refuse a row with no references and no body line "No public references: <reason>"; rows that predate the gate carry a references_gate note and pass.',
         inputSchema: {
             id: z.string().describe('Open row id: the name of its file under .gm/prd/.'),
             references: z.array(z.object({

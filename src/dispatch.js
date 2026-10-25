@@ -11,7 +11,7 @@ import { appendDiagnostic } from './server-log.js'
 import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessAnnouncement } from './bundle-drift.js'
 import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuationReserveFor, continuedReply, setContinuationStopped } from './continuation.js'
-import { closeRowId, referenceGateRefusal, withPublicSearch } from './public-search.js'
+import { bindSpoolDispatch, closeRowId, ensureReferenceGate, referenceGateRefusal, withPublicSearch } from './public-search.js'
 import { prdFeedFor } from './prd-feed.js'
 import { bootstrapReply } from './live-state.js'
 import { maybeStartDevSync } from './dev-sync.js'
@@ -2858,6 +2858,8 @@ async function runCiStatusWithWait(args, signal, responseValueObserver) {
 const PRD_ADD_VERBS = new Set(['prd-add', 'prd_add'])
 const CLOSE_VERBS = new Set(['prd-resolve', 'prd_resolve', 'prd-close', 'prd_close'])
 
+bindSpoolDispatch(gmDispatch)
+
 function closeReferenceRefusal(args) {
     const id = closeRowId(args)
     const resolved = resolveDispatchRoot(args?.cwd)
@@ -2884,6 +2886,11 @@ function prdAddCwdRefusal(args) {
 export async function gmDispatch(args, signal, responseValueObserver) {
     await preloadVerbTable()
     if (PRD_ADD_VERBS.has(args?.verb) && !args?.resume_task && !(typeof args?.cwd === 'string' && args.cwd.trim())) return prdAddCwdRefusal(args)
+    if ((PRD_ADD_VERBS.has(args?.verb) || CLOSE_VERBS.has(args?.verb)) && !args?.resume_task) {
+        const scope = resolveDispatchRoot(args?.cwd)
+        const failure = scope.error || !scope.root ? null : await ensureReferenceGate(scope.root)
+        if (failure !== null) appendDiagnostic('references-gate-grandfather-failed', { verb: args.verb, error: failure })
+    }
     if (CLOSE_VERBS.has(args?.verb) && !args?.resume_task) {
         const refusal = closeReferenceRefusal(args)
         if (refusal !== null) return refusal
