@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.307 - a fetch HTTP status is read as data inside a gm_codemode body
+
+A `fetch` whose origin answered a non-2xx status (a GitHub Pages 404, for example) replied `ok: false`, `error_code: failed` with `status` and `body`. `replyText` (`src/codemode.js`) threw on every failed reply, so the `gm_codemode` body stopped at the fetch and the calls after it never ran. `isHttpStatusReply` now returns that reply as data, as it already does for an exec child's nonzero exit and a `not_found`. The wire reply is unchanged, so dispatch callers still see `ok: false`; status 0 (no HTTP answer) still throws. `BUNDLE_VERSION` and `package.json` move to 0.2.307.
+
 ## 0.2.306 - nested gm calls keep their own max_chars
 
 A nested gm call inherited the outer `gm_codemode` `max_chars` as its own cap, so the outer cap cut the nested reply before the nested verb's cap applied. `src/codemode.js` no longer passes `max_chars` down to nested calls; each nested call uses its own default.
