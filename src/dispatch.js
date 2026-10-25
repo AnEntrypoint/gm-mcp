@@ -2880,6 +2880,27 @@ function closeReferenceRefusal(args) {
     return yaml.dump({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'references_required', refused: true, error: message }, { lineWidth: 100 })
 }
 
+// A close is recorded by a commit in the store's log whose body carries Row, Witness and Status trailers (publish_on_origin writes them).
+const CLOSE_TRAILERS = 'Row: <id>, Witness: <dispatch id>, Status: resolved|stale'
+
+function rowCloseCommitRecorded(root, id) {
+    const log = runGit(root, ['log', '--format=%B%x1e', '--fixed-strings', `--grep=Row: ${id}`, '-n', '500'])
+    if (!log.ok) return false
+    return log.out.split('\x1e').some((body) => {
+        const lines = body.split('\n').map((line) => line.trim())
+        return lines.includes(`Row: ${id}`) && lines.some((line) => /^Witness: \S/.test(line)) && lines.some((line) => /^Status: (resolved|stale)$/.test(line))
+    })
+}
+
+function closeTrailerRefusal(args) {
+    const id = closeRowId(args)
+    const resolved = resolveDispatchRoot(args?.cwd)
+    if (id === null || resolved.error || !resolved.root) return null
+    if (rowCloseCommitRecorded(resolved.root, id)) return null
+    const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
+    return yaml.dump({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'close_commit_required', refused: true, error: `${args.verb} refused: row ${id} has no closing commit in the store's log. Commit the close with publish_on_origin (witness and status set) so its body carries ${CLOSE_TRAILERS}; nothing was closed.`, trailers_required: ['Row', 'Witness', 'Status'] }, { lineWidth: 100 })
+}
+
 // A blocker is a note on the open row it blocks, never a row of its own: a -blocker- child whose parent row exists is refused.
 function blockerRowRefusal(args) {
     const id = closeRowId(args)
@@ -2986,7 +3007,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
         if (refusal !== null) return refusal
     }
     if (CLOSE_VERBS.has(args?.verb) && !args?.resume_task) {
-        const refusal = closeReferenceRefusal(args)
+        const refusal = closeReferenceRefusal(args) ?? closeTrailerRefusal(args)
         if (refusal !== null) return refusal
     }
     if ((args?.verb === 'codesearch' || args?.verb === 'code_search') && typeof args?.max_chars !== 'number' && typeof args?.body?.max_chars === 'number') args = { ...args, max_chars: args.body.max_chars }
