@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.305 - publish_on_origin commits carry the lanmower identity
+
+`publish_on_origin` built its commits with `git commit-tree` under the inherited git identity, so commits landed as the machine's noreply address. The commit-tree calls now set the author and committer to lanmower <almagestfraternite@gmail.com>.
+
 ## 0.2.268 - a failing gm call no longer answers "Maximum call stack size exceeded"
 
 A gm verb that fails inside a `gm_codemode` body (`git_commit`, `git_push`, any refused dispatch) answered `Maximum call stack size exceeded`, or never answered at all, while the same verb through `gm-mcp-server.mjs dispatch <verb>` worked. `describeError` (`src/server-log.js`) returned `error.stack` verbatim, and the bundle runs as a `data:text/javascript;base64,<bundle>` module (`src/fast-entry.js`), so every stack frame embeds the whole bundle as base64: one throw from seven frames deep measured 10477276 characters (2026-10-23, a `codesearch` refused with `empty_universe`). The codemode catch block then ran `JSON.stringify` and the reply-cut regexes over that text, and `capCodemodeText`'s spool-path scan (`src/codemode.js`) backtracks a leading `[^\s'"()[\]]*` quadratically over it, which either grinds past the client's idle window or overflows the regexp stack into that RangeError. `describeError` now collapses each `data:...;base64,` payload to `<N chars omitted>` and caps the text at `DESCRIBE_ERROR_MAX_CHARS` (8000), so the log record and the reply carry the message and its frames instead of the bundle, and the log no longer blows past its 2 MB rotation on one record. `capCodemodeText` and `completedReplyText` scan `scanScope(text)` (at most `SCAN_SCOPE_MAX_CHARS` = 262144, the whole text below that) instead of the unbounded text, so a reply larger than every cap still cuts in linear time. `BUNDLE_VERSION` and `package.json` move to 0.2.268.

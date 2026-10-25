@@ -22,6 +22,13 @@ const NETWORK_TIMEOUT_MS = 180_000
 const MAX_OUTPUT_BYTES = 256 * 1024 * 1024
 const EMPTY = Buffer.alloc(0)
 const NO_PROMPT = { GIT_TERMINAL_PROMPT: '0' }
+// Every commit this verb builds carries the lanmower identity, whatever git identity the host process inherits.
+const PUBLISH_IDENTITY = {
+    GIT_AUTHOR_NAME: 'lanmower',
+    GIT_AUTHOR_EMAIL: 'almagestfraternite@gmail.com',
+    GIT_COMMITTER_NAME: 'lanmower',
+    GIT_COMMITTER_EMAIL: 'almagestfraternite@gmail.com',
+}
 const SAFE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/
 const LINE_UNSAFE = /[\t\r\n\0]/
 const WRITE_COMMAND = /git (?:add|commit|push|pull|merge|rebase|reset|checkout)/
@@ -512,7 +519,7 @@ async function rebaseCommitOntoTip({ repo, commit, row, message, paths, checker,
     }
     const tree = lines[0].trim()
     if ((await indexed(['read-tree', tree])).status !== 0) return { refusal: refused('read_tree_failed', 'read-tree failed on the rebased tree; nothing pushed') }
-    const committed = await plain(['commit-tree', tree, '-p', tip, '-m', message, '-m', `Row: ${row}`, ...trailers])
+    const committed = await plain(['commit-tree', tree, '-p', tip, '-m', message, '-m', `Row: ${row}`, ...trailers], { env: PUBLISH_IDENTITY })
     const sha = utf8(committed.stdout).trim()
     if (committed.status !== 0 || sha === '') return { refusal: refused('commit_failed', 'commit-tree failed for the rebased commit; nothing pushed') }
     const changed = utf8((await plain(['diff', '--name-only', '--no-renames', '-z', tip, sha])).stdout).split('\0').filter((name) => name !== '')
@@ -585,7 +592,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
 
     const tree = await indexed(['write-tree'])
     if (tree.status !== 0) return refused('write_tree_failed', 'write-tree failed; nothing pushed')
-    const committed = await plain(['commit-tree', utf8(tree.stdout).trim(), '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`, ...trailers])
+    const committed = await plain(['commit-tree', utf8(tree.stdout).trim(), '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`, ...trailers], { env: PUBLISH_IDENTITY })
     const sha = utf8(committed.stdout).trim()
     if (committed.status !== 0 || sha === '') return refused('commit_failed', 'commit-tree failed; nothing pushed')
 
