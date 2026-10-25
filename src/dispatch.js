@@ -977,11 +977,15 @@ const CODESEARCH_INTEGER_FIELDS = ['limit', 'head_limit', 'k', 'max_results', 'm
 const CODESEARCH_BOOLEAN_FIELDS = ['case_insensitive', 'whole_word', 'comments_only']
 
 function withCodesearchScalarsCoerced(verb, body) {
-    if (verb !== 'codesearch') return body
+    if (verb !== 'codesearch' && verb !== 'grep') return body
     const coerced = { ...body }
     if (coerced.ignore_case !== undefined) {
         if (coerced.case_insensitive === undefined) coerced.case_insensitive = coerced.ignore_case
         delete coerced.ignore_case
+    }
+    if (coerced.case_sensitive === true || coerced.case_sensitive === 'true' || coerced.case_sensitive === false || coerced.case_sensitive === 'false') {
+        if (coerced.case_insensitive === undefined) coerced.case_insensitive = coerced.case_sensitive === false || coerced.case_sensitive === 'false'
+        delete coerced.case_sensitive
     }
     for (const field of CODESEARCH_INTEGER_FIELDS) {
         if (typeof coerced[field] === 'string' && /^[0-9]+$/.test(coerced[field].trim())) coerced[field] = Number(coerced[field])

@@ -20,6 +20,17 @@ import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
+const PROJECT_ROOT_NAMING_VERBS = new Set(['grep', 'codesearch'])
+
+function withProjectRootNameDropped(verb, folded, cwd) {
+    if (!PROJECT_ROOT_NAMING_VERBS.has(verb) || typeof cwd !== 'string' || cwd.trim() === '') return folded
+    const body = folded?.body
+    if (!isPlainObject(body) || typeof body.root !== 'string' || body.root.trim() === '') return folded
+    if (resolvePath(cwd, body.root) !== resolvePath(cwd)) return folded
+    const { root: _projectRoot, ...rest } = body
+    return { ...folded, body: rest }
+}
+
 function codemodeTimeoutMs() {
     const configured = Number(process.env.GM_CODEMODE_TIMEOUT_MS)
     if (Number.isFinite(configured) && configured > 0) return configured
@@ -512,7 +523,7 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             const merged = withoutEchoedSession(mergeEnvelope(name, args, envelope), session_id, tool?.inputSchema)
             feedContext = browserCallContext(tool.verb, merged, defaultCwdFor(merged, cwd))
             const defaults = {}
-            const folded = canonicalFsReadArgs(tool.verb, sessionAliasArgs(tool.verb, foldVerbArgs(verbShapedTool(tool, merged), merged)))
+            const folded = withProjectRootNameDropped(tool.verb, canonicalFsReadArgs(tool.verb, sessionAliasArgs(tool.verb, foldVerbArgs(verbShapedTool(tool, merged), merged))), defaultCwdFor(merged, cwd))
             const refuse = (code, check) => {
                 try {
                     check()
