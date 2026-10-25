@@ -366,10 +366,13 @@ const FS_READ_BODY = {
     },
 }
 const FS_WRITE_BODY = {
-    required: ['path', 'content'],
+    required: ['path'],
     fields: {
         path: { type: 'string', description: 'Project-relative path. allowOutsideRoot never widens a write.' },
-        content: { type: 'string|array', aliases: ['data', 'text'], description: 'Complete file content as a string, or an array of lines joined with newlines (plus a trailing newline): gm has no edit verb, so a whole-file write is the supported edit.' },
+        content: { type: 'string|array', aliases: ['data', 'text'], description: 'Complete file content as a string, or an array of lines joined with newlines (plus a trailing newline). Required unless the exact-line form is used.' },
+        startLine: { type: 'integer', description: 'Exact-line form: first line of the existing file to replace, 1-based. Requires replacement; endLine is then required too.' },
+        endLine: { type: 'integer', description: 'Exact-line form: last line replaced, 1-based and inclusive. endLine = startLine - 1 inserts replacement before startLine.' },
+        replacement: { type: 'string', description: 'Exact-line form: the text that takes the place of startLine..endLine. Empty deletes those lines. A trailing newline is not doubled.' },
         allow_empty: { type: 'boolean', description: 'Empty content is refused without it.' },
         append: { type: 'boolean', description: 'Appends instead of replacing.' },
     },
