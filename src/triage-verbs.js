@@ -464,6 +464,15 @@ async function hashBlob(repo, file) {
     return hashed.status === 0 && blob !== '' ? blob : null
 }
 
+// The first conflict block of a merge-file result: its 1-based line span in the merged text and up to 30 of its lines.
+function firstConflict(merged) {
+    const lines = merged.split('\n')
+    const start = lines.findIndex((line) => line.startsWith('<<<<<<<'))
+    const end = lines.findIndex((line, index) => index > start && line.startsWith('>>>>>>>'))
+    const last = end < 0 ? lines.length - 1 : end
+    return { from: start + 1, to: last + 1, lines: lines.slice(start, last + 1).slice(0, 30).map((line) => `| ${line}`) }
+}
+
 async function publishOnOrigin(args) {
     const root = rootOf(args)
     const repo = path.resolve(root, singleLine(args.repo_dir, 'repo_dir'))
@@ -536,12 +545,13 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'index') }
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
 
-    let base = givenBase
-    if (base === null) {
-        const found = await plain(['merge-base', 'HEAD', 'origin/main'])
-        if (found.status !== 0) return refused('no_merge_base', 'no merge base between HEAD and origin/main; nothing pushed')
-        base = utf8(found.stdout).trim()
-    }
+    // The fork point is merge-base(HEAD, publish_base), default origin/main. A publish_base that moved past the lane's copy
+    // resolves back to that copy here, so origin text newer than the copy is never the three-way base (that base is origin/main
+    // itself, which takes the lane's whole file and reverts origin's newer hunks).
+    const forkRef = givenBase ?? 'origin/main'
+    const found = await plain(['merge-base', 'HEAD', forkRef])
+    if (found.status !== 0) return refused('no_merge_base', `no merge base between HEAD and ${forkRef}; nothing pushed`)
+    const base = utf8(found.stdout).trim()
     if ((await indexed(['read-tree', 'origin/main'])).status !== 0) return refused('read_tree_failed', 'read-tree failed; nothing pushed')
 
     for (const [index, p] of paths.entries()) {
@@ -556,7 +566,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
             continue
         }
         if (isFile(full)) {
-            // The lane's change is its working-tree file merged three-way onto origin/main, so newer origin content survives.
+            // The lane's change (its working-tree file against the fork point) is three-way merged onto origin/main, so origin's hunks outside it survive.
             const from = await plain(['show', `${base}:${p}`])
             const theirs = await plain(['show', `origin/main:${p}`])
             const scratch = (suffix) => path.join(work, `${index}.${suffix}`)
@@ -564,7 +574,12 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
             fs.writeFileSync(scratch('theirs'), theirs.status === 0 ? theirs.stdout : EMPTY)
             fs.writeFileSync(scratch('ours'), fs.readFileSync(full))
             const merge = await plain(['merge-file', '-p', scratch('ours'), scratch('base'), scratch('theirs')])
-            if (merge.status !== 0) return refused('merge_conflict', `conflict on ${p} against origin/main; nothing pushed`)
+            const merged = utf8(merge.stdout)
+            if (merged.split('\n').some((line) => line.startsWith('<<<<<<<'))) {
+                const hunk = firstConflict(merged)
+                return refused('merge_conflict', `${p} conflicts with origin/main at lines ${hunk.from}-${hunk.to} (fork ${base}); nothing pushed`, [['path', p], ['fork', base]], hunk.lines)
+            }
+            if (merge.status !== 0) return refused('merge_failed', `merge-file failed on ${p}; nothing pushed`, [['path', p], ['fork', base]])
             fs.writeFileSync(scratch('merged'), merge.stdout)
             const blob = await hashBlob(repo, scratch('merged'))
             if (blob === null) return refused('hash_failed', `empty blob sha for ${p}; nothing pushed`)
@@ -607,7 +622,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
         return refused('secrets_check_failed', 'secrets check failed; nothing pushed', [['commit', sha], ['secrets', output.at(-1) ?? '']])
     }
 
-    if (dryRun) return ok(`dry run: built ${sha} on origin/main, secrets check passed, not pushed`, [['commit', sha]], stat)
+    if (dryRun) return ok(`dry run: built ${sha} on origin/main, secrets check passed, not pushed`, [['commit', sha], ['fork', base]], stat)
 
     let landedSha = sha
     const pushed = await plain(['push', '-q', 'origin', `${sha}:refs/heads/main`], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
@@ -624,7 +639,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     }
     await plain(['fetch', '-q', 'origin', 'main'], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
     const landed = await plain(['merge-base', '--is-ancestor', landedSha, 'origin/main'])
-    if (landed.status === 0) return ok(`published ${landedSha} on origin/main`, [['commit', landedSha]], stat)
+    if (landed.status === 0) return ok(`published ${landedSha} on origin/main`, [['commit', landedSha], ['fork', base]], stat)
     return refused('not_on_origin', `push reported success but ${landedSha} is not on origin/main`, [['commit', landedSha]])
 }
 
@@ -1507,13 +1522,13 @@ export const TRIAGE_VERBS = [
     },
     {
         name: 'publish_on_origin',
-        description: 'Publishes the listed paths of repo_dir onto origin/main as one commit, without touching its working tree, index or local main (replaces scripts/triage/publish-on-origin.sh). Steps: fetch origin main; build a temporary index from origin/main; three-way merge each listed file (base from publish_base, default merge-base HEAD origin/main; theirs from origin/main); regenerate skills/manifest.sha256 when a skills/ path is listed; commit-tree with "Row: <row>"; refuse a commit that changes any path outside the list; run <cwd>/scripts/check-staged-secrets.mjs on that index; push sha:refs/heads/main; confirm the sha is on origin/main. dry_run stops before the push. Reply: ok, exit_code, result, commit, then the last three diff stat lines. Refusals return as data with error_code: fetch_failed, merge_conflict, unintended_paths, secrets_check_failed, push_refused, not_on_origin and others; nothing is pushed on a refusal.',
+        description: 'Publishes the listed paths of repo_dir onto origin/main as one commit, without touching its working tree, index or local main (replaces scripts/triage/publish-on-origin.sh). Steps: fetch origin main; build a temporary index from origin/main; three-way merge each listed file (base = fork point merge-base(HEAD, publish_base), default origin/main; theirs = origin/main; ours = the lane file; a conflict refuses with its path and line span); regenerate skills/manifest.sha256 when a skills/ path is listed; commit-tree with "Row: <row>"; refuse a commit that changes any path outside the list; run <cwd>/scripts/check-staged-secrets.mjs on that index; push sha:refs/heads/main; confirm the sha is on origin/main. dry_run stops before the push. Reply: ok, exit_code, result, commit, then the last three diff stat lines. Refusals return as data with error_code: fetch_failed, merge_conflict, unintended_paths, secrets_check_failed, push_refused, not_on_origin and others; nothing is pushed on a refusal.',
         inputSchema: {
             repo_dir: z.string().describe('Checkout whose files are published: an absolute path, or relative to cwd.'),
             row: z.string().describe('Row id, written into the commit as "Row: <row>".'),
             message: z.string().describe('Commit subject and body.'),
             paths: z.array(z.string()).min(1).describe('Repository-relative paths the lane edited. Each must exist as a file (published), be a submodule pin in the index or HEAD of the lane (published as that commit sha at mode 160000), or be absent (removed from the index unless origin/main pins it as a submodule, which is then left alone).'),
-            publish_base: z.string().optional().describe('Base ref for the three-way merge. Use origin/main when the lane rewrote a file whose history it does not share.'),
+            publish_base: z.string().optional().describe('The commit the lane\'s copy was made from (a sha or ref). The three-way base is merge-base(HEAD, publish_base), so a ref that moved past the copy resolves back to it. Default origin/main.'),
             dry_run: z.boolean().optional().describe('Build and check the commit, then stop before the push.'),
             witness: z.string().optional().describe('Dispatch id of the live witness that closes the row: must appear in .gm/exec-spool/.dispatch-ledger.json. Required when this publish closes a row (a status is given, or the row file under .gm/prd/ is removed).'),
             status: z.enum(['resolved', 'stale']).optional().describe('Status the closing commit records. Required with witness.'),
