@@ -564,12 +564,10 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'index') }
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
 
-    // The fork point is merge-base(HEAD, publish_base), default origin/main. A publish_base that moved past the lane's copy
-    // resolves back to that copy here, so origin text newer than the copy is never the three-way base (that base is origin/main
-    // itself, which takes the lane's whole file and reverts origin's newer hunks).
-    const forkRef = givenBase ?? 'origin/main'
-    const found = await plain(['merge-base', 'HEAD', forkRef])
-    if (found.status !== 0) return refused('no_merge_base', `no merge base between HEAD and ${forkRef}; nothing pushed`)
+    const found = givenBase === null
+        ? await plain(['merge-base', 'HEAD', 'origin/main'])
+        : await plain(['rev-parse', '--verify', '--quiet', `${givenBase}^{commit}`])
+    if (found.status !== 0) return refused('no_merge_base', givenBase === null ? 'no merge base between HEAD and origin/main; nothing pushed' : `publish_base ${givenBase} names no commit; nothing pushed`)
     const base = utf8(found.stdout).trim()
     if ((await indexed(['read-tree', 'origin/main'])).status !== 0) return refused('read_tree_failed', 'read-tree failed; nothing pushed')
 
@@ -1647,7 +1645,7 @@ export const TRIAGE_VERBS = [
             row: z.string().describe('Row id, written into the commit as "Row: <row>".'),
             message: z.string().describe('Commit subject and body.'),
             paths: z.array(z.string()).min(1).describe('Repository-relative paths the lane edited. Each must exist as a file (published), be a submodule pin in the index or HEAD of the lane (published as that commit sha at mode 160000), or be absent (removed from the index unless origin/main pins it as a submodule, which is then left alone).'),
-            publish_base: z.string().optional().describe('The commit the lane\'s copy was made from (a sha or ref). The three-way base is merge-base(HEAD, publish_base), so a ref that moved past the copy resolves back to it. Default origin/main.'),
+            publish_base: z.string().optional().describe('The commit the lane\'s copy was made from (a sha or ref). The three-way base is publish_base itself, so pass the sha the copy was made from; a ref that moved past the copy would take newer origin text as the base. Default: merge-base(HEAD, origin/main).'),
             dry_run: z.boolean().optional().describe('Build and check the commit, then stop before the push.'),
             witness: z.string().optional().describe('Dispatch id of the live witness that closes the row: must appear in the .gm/exec-spool/.dispatch-ledger.json of repo_dir or of cwd. Required when this publish closes a row (a status is given, or the row file under .gm/prd/ is removed). A closing publish keeps the row file in repo_dir: its commit removes it from origin.'),
             status: z.enum(['resolved', 'stale']).optional().describe('Status the closing commit records. Required with witness.'),
