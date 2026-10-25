@@ -659,6 +659,84 @@ function shapeGitStatusReply(verb, body, out) {
     return out
 }
 
+const GIT_ADD_BLANKET_LIMIT = 50
+const GIT_ADD_ROOT_NAMES = new Set(['', '.', ':', ':(top)', '*'])
+
+const gitPathOf = (entry) => (typeof entry === 'string' ? entry : isPlainObject(entry) && typeof entry.path === 'string' ? entry.path : null)
+
+function isDirectoryUnder(root, rel) {
+    try {
+        return statSync(path.resolve(root, rel)).isDirectory()
+    } catch {
+        return false
+    }
+}
+
+// A git_status exclusion rule (".gm", ".agentplug*") or the gm runtime directory. A rule matches its own path prefix only.
+function isExcludedOrTransient(rel, rules) {
+    if (rel === '.gm' || rel.startsWith('.gm/')) return true
+    return rules.some((rule) => {
+        const glob = rule.endsWith('*')
+        const stem = (glob ? rule.slice(0, -1) : rule).replace(/\/+$/, '')
+        if (stem === '') return false
+        return glob ? rel.startsWith(stem) : rel === stem || rel.startsWith(stem + '/')
+    })
+}
+
+// Unstaged working-tree paths under scope (every path when scope is empty), with the exclusion rules git_status reports.
+// Null when the listing is unreadable or truncated, so the caller refuses rather than guessing a count.
+async function gitWorkingTreeLists(args, sessionId, scope) {
+    const text = await runDispatch({ verb: 'git_status', body: scope.length > 0 ? { paths: scope } : {}, session_id: sessionId, cwd: args.cwd, full_response: true })
+    let doc = null
+    try {
+        doc = yaml.load(String(text))
+    } catch {
+        return null
+    }
+    const data = isPlainObject(doc) && isPlainObject(doc.data) ? doc.data : null
+    if (data === null || (Array.isArray(data.truncated_lists) && data.truncated_lists.length > 0)) return null
+    const listOf = (key) => (Array.isArray(data[key]) ? data[key].map(gitPathOf).filter((p) => p !== null) : [])
+    return {
+        changed: [...listOf('untracked'), ...listOf('modified'), ...listOf('deleted')],
+        excluded: Array.isArray(data.excluded) ? data.excluded.filter((rule) => typeof rule === 'string') : [],
+    }
+}
+
+// Plans a git_add. A blanket path ('.') or a directory stages only paths git_status does not report as excluded or
+// transient, and a blanket add above GIT_ADD_BLANKET_LIMIT paths is refused. Returns {args} to dispatch as is, or
+// {args, note} with the explicit path list, or {refusal} or {done} to answer without dispatching.
+async function planGitAdd(args) {
+    const body = isPlainObject(args.body) ? args.body : {}
+    const named = [body.paths, body.files, args.paths].find(Array.isArray)
+    if (!named || named.length === 0 || !named.every((p) => typeof p === 'string')) return { args }
+    const sessionId = (typeof args.session_id === 'string' && args.session_id.trim()) || explicitBodySessionId(body) || null
+    const root = typeof args.cwd === 'string' && args.cwd.trim() ? args.cwd : process.cwd()
+    const entries = [...new Set(named.map((p) => p.trim().replace(/^\.\/+/, '').replace(/\/+$/, '')))]
+    const blanket = entries.filter((p) => GIT_ADD_ROOT_NAMES.has(p))
+    const dirs = entries.filter((p) => !GIT_ADD_ROOT_NAMES.has(p) && isDirectoryUnder(root, p))
+    if (blanket.length === 0 && dirs.length === 0) return { args }
+    if (sessionId === null) return { args }
+    const lists = await gitWorkingTreeLists(args, sessionId, blanket.length > 0 ? [] : dirs)
+    if (lists === null) return { refusal: `git_add refused: git_status could not list the working tree under ${[...blanket, ...dirs].map((p) => `"${p || '.'}"`).join(', ')}, so the paths to stage cannot be counted. Name the paths explicitly.` }
+    const candidates = [...new Set(lists.changed)]
+    const kept = candidates.filter((rel) => !isExcludedOrTransient(rel, lists.excluded))
+    const skipped = candidates.length - kept.length
+    if (blanket.length > 0 && kept.length > GIT_ADD_BLANKET_LIMIT) {
+        const tops = [...new Set(kept.map((rel) => rel.split('/')[0]))].slice(0, 8)
+        return { refusal: `git_add refused: the blanket path would stage ${kept.length} paths (limit ${GIT_ADD_BLANKET_LIMIT}); ${skipped} excluded or transient paths were skipped. Name the directories to stage in body.paths, for example ${JSON.stringify(tops)}.` }
+    }
+    const explicit = entries.filter((p) => !GIT_ADD_ROOT_NAMES.has(p) && !dirs.includes(p))
+    const paths = [...new Set([...explicit, ...kept])]
+    if (paths.length === 0) return { done: `git_add: nothing to stage; ${skipped} excluded or transient paths were skipped\n` }
+    const { files, ...rest } = body
+    return { args: { ...args, body: { ...rest, paths } }, note: { staged: paths.length, skipped } }
+}
+
+function withGitAddNote(text, note) {
+    if (note === null || typeof text !== 'string' || text.trimStart().startsWith('{')) return text
+    return `${text.endsWith('\n') ? text : text + '\n'}git_add_staged: ${note.staged}\ngit_add_skipped_excluded_or_transient: ${note.skipped}\n`
+}
+
 export function shapeGitDiffReply(verb, body, out) {
     if (verb !== 'git_diff' || !isPlainObject(out) || typeof out.diff !== 'string') return out
     const limit = Number(body?.limit)
@@ -2720,9 +2798,9 @@ function pendingBundleNoticeReserve(verb) {
 const staleNoticeAnnounced = new Set()
 
 
-// Keyed on session id, installed sha, running sha and refusal code: each session sees the notice once per bundle state.
+// Keyed on session id and served version: each session sees the notice once, and again only when the served version changes.
 function staleNoticeKey(drift, sessionId) {
-    return [sessionId ?? '', drift.installed_sha256, drift.running_sha256, drift.refusal_code].map((v) => v ?? '').join('|')
+    return [sessionId ?? '', drift.running_version].map((v) => v ?? '').join('|')
 }
 
 
@@ -3049,6 +3127,14 @@ export async function gmDispatch(args, signal, responseValueObserver) {
         const reserve = continuationReserveFor(continuationKeyOf(args))
         if (reserve > 0 && args.max_chars > 2 * reserve) args = { ...args, max_chars: args.max_chars - reserve, requested_max_chars: args.max_chars }
     }
+    let gitAddNote = null
+    if (args?.verb === 'git_add' && !args?.resume_task) {
+        const planned = await planGitAdd(args)
+        if (planned.refusal !== undefined) throw new Error(planned.refusal)
+        if (planned.done !== undefined) return planned.done
+        args = planned.args
+        gitAddNote = planned.note ?? null
+    }
     if (args?.verb === CONTINUATION_STOP_VERB) {
         const key = continuationKeyOf(args)
         setContinuationStopped(key, true)
@@ -3074,7 +3160,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     try {
         const waits = CI_STATUS_VERBS.has(args?.verb) && isPlainObject(args?.body) && args.body.wait === true
         const raw = waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver)
-        const healthed = args?.verb === 'health' ? withHealthBundleFields(raw) : raw
+        const healthed = args?.verb === 'health' ? withHealthBundleFields(raw) : withGitAddNote(raw, gitAddNote)
         const reply = withStaleBundleNotice(args?.verb, projectHealthFields(healthed, healthFields), sessionId)
         if (typeof reply === 'string') replyDispatchId = /^dispatch_id: (\S+)/m.exec(reply)?.[1] ?? null
         if (VERBATIM_REPLY_VERBS.has(args?.verb)) return reply

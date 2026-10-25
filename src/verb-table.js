@@ -45,9 +45,49 @@ const FS_READDIR_PATH_RULE = ` "path" is resolved against the cwd you pass (the 
 const FS_READ_DESCRIPTION = ` Line ranges are 1-based and inclusive on both ends: ${FS_READ_RANGE_ALIASES.join(', ')} are accepted at the top level and folded into body, and the same keys inside body work identically. ${FS_READ_RANGE_PAIR_HELP} A range-looking key that is not one of them is an error naming the accepted keys rather than a silent whole file. Without any of them the whole file is returned, unchanged.` + FS_READ_PATH_RULE
 
 const COMMIT_SUBJECT_LIMIT = 50
+const COMMIT_BODY_WRAP = 72
+const wrapWords = (text, width) => {
+    const lines = []
+    let line = ''
+    for (const word of text.split(/\s+/).filter(Boolean)) {
+        if (line !== '' && [...line].length + 1 + [...word].length > width) {
+            lines.push(line)
+            line = word
+        } else {
+            line = line === '' ? word : `${line} ${word}`
+        }
+    }
+    if (line !== '') lines.push(line)
+    return lines
+}
+const fitWords = (text, width) => {
+    let out = ''
+    for (const word of text.split(/\s+/).filter(Boolean)) {
+        const next = out === '' ? word : `${out} ${word}`
+        if ([...next].length > width) break
+        out = next
+    }
+    return out
+}
+// Every style violation of a commit message, each naming its line, so one re-draft clears them all.
+const commitStyleProblems = (message) => {
+    const lines = message.split('\n')
+    const subject = lines[0]
+    const subjectLength = [...subject].length
+    const problems = []
+    if (subjectLength === 0) problems.push('line 1: the subject is empty; write one line of intent')
+    else if (subjectLength > COMMIT_SUBJECT_LIMIT) problems.push(`line 1: the subject is ${subjectLength} characters; the limit is ${COMMIT_SUBJECT_LIMIT}. Shorten it, for example "${fitWords(subject, COMMIT_SUBJECT_LIMIT)}"`)
+    if (subject.endsWith('.')) problems.push(`line 1: the subject ends with a period; drop it, for example "${subject.replace(/\.+$/, '')}"`)
+    if (lines.length > 1 && lines[1].trim() !== '') problems.push('line 2: the subject must be followed by a blank line, but line 2 holds body text; insert an empty line after line 1')
+    lines.forEach((line, index) => {
+        if (index === 0 || [...line].length <= COMMIT_BODY_WRAP || !line.includes(' ')) return
+        const wrapped = wrapWords(line, COMMIT_BODY_WRAP)
+        problems.push(`line ${index + 1}: ${[...line].length} characters; body lines wrap at ${COMMIT_BODY_WRAP}. Re-wrapped as ${wrapped.map((part) => `"${part}"`).join(' ')}`)
+    })
+    return problems
+}
 const commitSubjectCheck = (message, ctx) => {
-    const length = [...message.split('\n', 1)[0]].length
-    if (length > COMMIT_SUBJECT_LIMIT) ctx.addIssue({ code: 'custom', message: `commit subject is ${length} characters; the limit is ${COMMIT_SUBJECT_LIMIT} characters (the subject is the first line of message). Shorten the first line and resend.` })
+    for (const problem of commitStyleProblems(message)) ctx.addIssue({ code: 'custom', message: `commit style: ${problem}` })
 }
 
 const GIT_COMMIT_TYPES = {
@@ -416,7 +456,7 @@ const GIT_COMMIT_BODY = {
 const GIT_ADD_BODY = {
     required: [],
     fields: {
-        paths: { type: 'array', aliases: ['files'], description: 'Pathspecs to stage with git add. Protected gm state paths are refused and named in the refusal.' },
+        paths: { type: 'array', aliases: ['files'], description: 'Pathspecs to stage with git add. Protected gm state paths are refused and named in the refusal. A blanket "." stages only paths git_status does not report as excluded or transient, refused above 50 paths: name the directories instead. The reply reports git_add_staged and git_add_skipped_excluded_or_transient.' },
     },
 }
 
