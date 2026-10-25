@@ -5,7 +5,7 @@ import { startHttpServer, httpListenOptions, setHealthExtras } from './http-tran
 import { defaultHttpPort, httpMcpUrl, probeHealth } from './singleton.js'
 import { startContinuationMonitor } from './continuation.js'
 import { handOverStdioToRefreshedBundle, stdioSessionHandedOver } from './bundle-refresh.js'
-import { bundleHealthBlock, bundleStalenessAnnouncement, recordHandoverRefusal, runningBundle, startBundleDriftWatch } from './bundle-drift.js'
+import { bundleHealthBlock, bundleStalenessAnnouncement, recordDriftPair, recordHandoverRefusal, runningBundle, startBundleDriftWatch } from './bundle-drift.js'
 import { recordRunningImage } from './running-images.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runLeakWatchPass } from './leak-watch.js'
@@ -44,13 +44,10 @@ async function liveHttpTarget() {
 }
 
 function watchForStaleBundle({ handOver = null, transportKind = 'stdio', settled = () => false } = {}) {
-    let settledNoted = false
     return startBundleDriftWatch(async (state) => {
         if (settled()) {
-            if (!settledNoted) {
-                settledNoted = true
-                appendDiagnostic('bundle-drift-settled', { transport: transportKind, from: state?.running_sha256 ?? null, to: state?.installed_sha256 ?? null, pid: process.pid })
-            }
+            recordDriftPair(state, transportKind, 'settled')
+            appendDiagnostic('bundle-drift-settled', { transport: transportKind, from: state?.running_sha256 ?? null, to: state?.installed_sha256 ?? null, pid: process.pid, already: true })
             return null
         }
         const retriable = state?.refusal_code == null || state.refusal_code === 'no-handover' || String(state.refusal_code).startsWith('handover-')
@@ -58,14 +55,21 @@ function watchForStaleBundle({ handOver = null, transportKind = 'stdio', settled
         if (handable) {
             // Announce only after the handover outcome is known: a failed or deferred handover did not reload.
             const outcome = await handOver({ ...state, reloadable: true, refusal_code: null, refusal_reason: null })
+            if (outcome?.outcome === 'handed-over') {
+                recordDriftPair(state, transportKind, 'settled')
+                appendDiagnostic('bundle-drift-settled', { transport: transportKind, from: state.running_sha256 ?? null, to: state.installed_sha256 ?? null, pid: process.pid })
+                return outcome
+            }
             if (outcome?.outcome !== 'failed' && outcome?.outcome !== 'deferred') return outcome
             recordHandoverRefusal(state.installed_sha256, outcome.outcome, outcome.reason ?? outcome.outcome)
+            if (outcome.outcome === 'failed') recordDriftPair(state, transportKind, 'reconnect-needed')
             const unhanded = { ...state, reloadable: false, refusal_code: 'handover-' + outcome.outcome, refusal_reason: outcome.reason ?? outcome.outcome }
             const line = bundleStalenessAnnouncement(unhanded)
             if (line) console.error(line)
             if (line) appendDiagnostic('bundle-stale-no-handover', { ...unhanded, transport: transportKind })
             return outcome
         }
+        recordDriftPair(state, transportKind, 'reconnect-needed')
         const honest = handOver ? state : { ...state, reloadable: false, refusal_code: 'no-handover', refusal_reason: 'a ' + transportKind + ' server cannot replace itself without dropping its client, so a relaunch serves the installed bundle' }
         const line = bundleStalenessAnnouncement(honest)
         if (line) console.error(line)

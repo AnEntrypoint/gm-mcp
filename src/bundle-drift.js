@@ -174,6 +174,19 @@ function handoverRefusalFor(installedSha256) {
     return { code: handoverRefusal.code, reason: handoverRefusal.reason }
 }
 
+// Each drift pair (running sha, installed sha, transport) this process has acted on. 'detected' is logged once and stays
+// retriable while a handover may still succeed (a deferred one); 'settled' and 'reconnect-needed' are final. A final pair
+// is neither logged nor acted on again, and a new installed sha is a new pair.
+const driftPairs = new Map()
+
+function driftPairKey(state, transport) {
+    return [normalizeTransport(transport ?? servingTransport), state.running_sha256, state.installed_sha256].join('|')
+}
+
+export function recordDriftPair(state, transport, status) {
+    driftPairs.set(driftPairKey(state, transport), status)
+}
+
 export function bundleStalenessLine(state = bundleDrift()) {
     if (!state?.stale) return null
     const installedPath = state.installed_path ?? state.path
@@ -222,7 +235,13 @@ export function startBundleDriftWatch(onDrift, { intervalMs = bundleDriftInterva
         try {
             const state = bundleDrift({ transport })
             if (state.stale) {
-                appendDiagnostic('bundle-drift-detected', state)
+                const pair = driftPairKey(state, transport)
+                const status = driftPairs.get(pair)
+                if (status === 'settled' || status === 'reconnect-needed') return
+                if (status === undefined) {
+                    appendDiagnostic('bundle-drift-detected', state)
+                    driftPairs.set(pair, 'detected')
+                }
                 await onDrift(state)
             }
         } catch (error) {
