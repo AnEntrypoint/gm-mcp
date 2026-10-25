@@ -10,6 +10,7 @@ import { recordRunningImage } from './running-images.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runLeakWatchPass } from './leak-watch.js'
 import { runReleaseBridgeInBackground } from './release-bridge.js'
+import { installSkillsInBackground } from './skill-install.js'
 import { housekeepInBackground } from './triage-verbs.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { installSpoolPort } from './spool-port.js'
@@ -85,6 +86,7 @@ export async function main() {
         watchForStaleBundle({ transportKind: 'http' })
         scheduleStaleDeployedBundleChecks(null, runLeakWatchPass)
         runReleaseBridgeInBackground()
+        installSkillsInBackground()
         return
     }
 
@@ -105,6 +107,7 @@ export async function main() {
     watchForStaleBundle({ transportKind: 'stdio', settled: stdioSessionHandedOver, handOver: (state) => handOverStdioToRefreshedBundle({ state, transport, server, monitor, target: liveHttpTarget, recover: liveHttpTarget }) })
     scheduleStaleDeployedBundleChecks(null, runLeakWatchPass)
     runReleaseBridgeInBackground()
+    installSkillsInBackground()
 }
 
 export { flagValue }

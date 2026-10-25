@@ -23,8 +23,8 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
 
 Not published to npm -- `gm-mcp` is an unrelated package on the npm
 registry. The shipped `bin/gm-mcp-server.js` is a pre-bundled, dependency-free
-file (see Development below); `npx github:AnEntrypoint/gm -g` (the gm
-installer) vendors it to `~/.gm-tools/gm-mcp-server.mjs` and registers that
+file (see Development below). The one-time install in the gm README (Install)
+fetches it to `~/.gm-tools/gm-mcp-server.mjs`, and the host registration points at that local file:
 local file with every agent host:
 
 ```json
@@ -251,8 +251,11 @@ connected` for the rest of the session, and no server-side fix re-dials it.
 Restoring the port helps every new session; the stranded session needs `/mcp`
 reconnect or a restart.
 
-A stdio server never exits to pick up a newer bundle, because its client holds the pipe. `node ~/.gm-tools/gm-mcp-server.mjs self-update-status` lists each such process under `running_images` with `stale: true` and the version it runs.
-Operator action: relaunch the session that owns the process (`/mcp` then gm then Reconnect, or restart the session). The listing clears on relaunch. Killing the pid by hand also clears it, but the owning session loses its gm tools until it reconnects.
+A stdio server cannot load a newer bundle in place, and it never exits, because the host treats its exit as a disconnect. When no dispatch is in flight and no stdin bytes are unread, a stale stdio server relays its stdin and stdout to a child started from the installed bundle (`src/stdio-respawn.js`). The host keeps the same process and pipes; the child serves the session. If the child exits before taking over, the stale server keeps serving as before, and the session needs `/mcp` then gm then Reconnect, or a restart. `node ~/.gm-tools/gm-mcp-server.mjs self-update-status` lists a stale process under `running_images` with `stale: true` until its relay or the session ends.
+
+### Self-install on a fresh machine
+
+On start the bundle installs what a host needs, with no installer. Missing gm skill files are written from the embedded snapshot to `~/.claude/skills/<name>/` and `~/.agents/skills/<name>/` (`src/skill-install.js`); an existing file is never overwritten, and a link is left alone. The agentplug runner is installed from the `AnEntrypoint/agentplug-bin` release when `~/.gm-tools/agentplug-runner` is absent, and the gm guest from `AnEntrypoint/plugkit-bin`, each checked against its sha256 and a self-check before it is renamed into place (`src/release-bridge.js`).
 
 ### No supervisor, no boot entry
 

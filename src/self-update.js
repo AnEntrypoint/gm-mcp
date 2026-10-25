@@ -41,7 +41,7 @@ const readDigest = (file) => {
 }
 const shortHash = (hex) => hex.slice(0, 12)
 
-function defaultDeployedPath() {
+export function defaultDeployedPath() {
     return path.join(toolsDir(), DEPLOYED_BUNDLE_FILE_NAME)
 }
 

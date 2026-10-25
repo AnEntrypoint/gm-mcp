@@ -256,11 +256,32 @@ export function bridgeNoSelfUpdateReason() {
     return null
 }
 
+// A fresh machine has no runner yet: install the release build, checked against its sha256 and a self-check
+// of the staged file, before it is renamed into place.
+async function installAbsentRunner(release, runnerPath) {
+    const { bytes, sha256: newSha } = await fetchVerified(release, runnerAssetName())
+    mkdirSync(toolsDir(), { recursive: true })
+    const tempPath = `${runnerPath}.bridge-${process.pid}-${Date.now()}.new`
+    writeFileSync(tempPath, bytes, { flag: 'wx', mode: 0o755 })
+    try {
+        const staged = await probeRunner(tempPath)
+        if (!staged || staged.version !== release.version || !staged.release_build) {
+            throw new Error(`staged runner reports ${JSON.stringify(staged)}, expected release build ${release.version}`)
+        }
+    } catch (error) {
+        rmSync(tempPath, { force: true })
+        throw error
+    }
+    swapIn(runnerPath, tempPath, 'absent')
+    recordRunnerSwap(release.version, newSha)
+    return { outcome: 'swapped', from: null, to: release.version, sha256: newSha, backup: null }
+}
+
 async function reconcileRunner(release) {
     const asset = runnerAssetName()
     if (!asset) return { outcome: 'skipped', reason: `no runner asset for ${process.platform}-${process.arch}` }
     const runnerPath = path.join(toolsDir(), runnerFileName())
-    if (!existsSync(runnerPath)) return { outcome: 'skipped', reason: 'runner-not-installed' }
+    if (!existsSync(runnerPath)) return installAbsentRunner(release, runnerPath)
     const installed = await probeRunner(runnerPath)
     if (!installed) return { outcome: 'skipped', reason: 'installed-version-unknown' }
     if (!installed.release_build) return { outcome: 'skipped', reason: 'local-build' }
