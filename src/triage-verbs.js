@@ -496,7 +496,6 @@ async function publishOnOrigin(args) {
     // The checker lives in the gm checkout's scripts/; a submodule checkout publishes with that root as cwd, or with its own scripts/.
     const checkerIn = (base) => path.join(base, 'scripts', 'check-staged-secrets.mjs')
     const checker = [root, repo].map(checkerIn).find(isFile) ?? checkerIn(root)
-    if (!isFile(checker)) return refused('checker_missing', `secrets checker not found at ${checkerIn(root)} or ${checkerIn(repo)}; nothing pushed`)
     const rowRel = path.posix.join('.gm', 'prd', path.basename(rowFileOf(repo, row)))
     const store = fs.existsSync(rowFileOf(repo, row)) ? repo : root
     const removedRowFile = paths.some((p) => p.startsWith('.gm/prd/') && p.includes(row) && !isFile(path.join(repo, p)))
@@ -641,7 +640,11 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     // --missing-ok: a blob:none partial clone lacks the blobs of unchanged paths, and origin already holds them.
     const tree = await indexed(['write-tree', '--missing-ok'])
     if (tree.status !== 0) return refused('write_tree_failed', 'write-tree failed; nothing pushed')
-    const committed = await plain(['commit-tree', utf8(tree.stdout).trim(), '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`, ...trailers], { env: PUBLISH_IDENTITY })
+    const treeSha = utf8(tree.stdout).trim()
+    const noTrackedChange = treeSha === utf8((await plain(['rev-parse', 'origin/main^{tree}'])).stdout).trim()
+    if (noTrackedChange && trailers.length === 0) return refused('nothing_to_publish', `${paths.join(', ')} has no tracked change against origin/main; nothing pushed`)
+    const noChangeNote = noTrackedChange ? ['-m', `No tracked change: row ${row} publishes no file change; none of its paths is tracked.`] : []
+    const committed = await plain(['commit-tree', treeSha, '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`, ...noChangeNote, ...trailers], { env: PUBLISH_IDENTITY })
     const sha = utf8(committed.stdout).trim()
     if (committed.status !== 0 || sha === '') return refused('commit_failed', 'commit-tree failed; nothing pushed')
 
@@ -650,7 +653,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     const unintended = changed.filter((name) => !paths.includes(name) && name !== 'skills/manifest.sha256')
     if (unintended.length > 0) return refused('unintended_paths', 'commit changes paths outside the list; nothing pushed', [['commit', sha]], unintended)
 
-    const scan = changed.length === 0 && trailers.length > 0 ? { status: 0 } : await run(process.execPath, [checker], { cwd: repo, env: indexEnv })
+    const scan = noTrackedChange ? { status: 0 } : isFile(checker) ? await run(process.execPath, [checker], { cwd: repo, env: indexEnv }) : refused('checker_missing', `secrets checker not found at ${checker}; nothing pushed`)
     if (scan.status !== 0) {
         const output = `${utf8(scan.stdout)}\n${utf8(scan.stderr)}`.split('\n').filter((line) => line.trim() !== '')
         return refused('secrets_check_failed', 'secrets check failed; nothing pushed', [['commit', sha], ['secrets', output.at(-1) ?? '']])
