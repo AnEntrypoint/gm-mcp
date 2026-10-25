@@ -11,6 +11,7 @@ import { appendDiagnostic } from './server-log.js'
 import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessAnnouncement } from './bundle-drift.js'
 import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuationReserveFor, continuedReply, setContinuationStopped } from './continuation.js'
+import { closeRowId, referenceGateRefusal, withPublicSearch } from './public-search.js'
 import { prdFeedFor } from './prd-feed.js'
 import { bootstrapReply } from './live-state.js'
 import { maybeStartDevSync } from './dev-sync.js'
@@ -2855,6 +2856,17 @@ async function runCiStatusWithWait(args, signal, responseValueObserver) {
 }
 
 const PRD_ADD_VERBS = new Set(['prd-add', 'prd_add'])
+const CLOSE_VERBS = new Set(['prd-resolve', 'prd_resolve', 'prd-close', 'prd_close'])
+
+function closeReferenceRefusal(args) {
+    const id = closeRowId(args)
+    const resolved = resolveDispatchRoot(args?.cwd)
+    if (id === null || resolved.error || !resolved.root) return null
+    const message = referenceGateRefusal(resolved.root, id, args.verb)
+    if (message === null) return null
+    const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
+    return yaml.dump({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'references_required', refused: true, error: message }, { lineWidth: 100 })
+}
 
 function prdAddCwdRefusal(args) {
     const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
@@ -2872,6 +2884,10 @@ function prdAddCwdRefusal(args) {
 export async function gmDispatch(args, signal, responseValueObserver) {
     await preloadVerbTable()
     if (PRD_ADD_VERBS.has(args?.verb) && !args?.resume_task && !(typeof args?.cwd === 'string' && args.cwd.trim())) return prdAddCwdRefusal(args)
+    if (CLOSE_VERBS.has(args?.verb) && !args?.resume_task) {
+        const refusal = closeReferenceRefusal(args)
+        if (refusal !== null) return refusal
+    }
     if ((args?.verb === 'codesearch' || args?.verb === 'code_search') && typeof args?.max_chars !== 'number' && typeof args?.body?.max_chars === 'number') args = { ...args, max_chars: args.body.max_chars }
     if (typeof args?.max_chars === 'number' && !VERBATIM_REPLY_VERBS.has(args?.verb)) {
         const reserve = continuationReserveFor(continuationKeyOf(args))
@@ -2907,7 +2923,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
         const key = continuationKeyOf(args)
         // prd_feed marks the server's own reads (the feed's prd-list lookups, the bootstrap and prompt reads): they get no feed and no bootstrap.
         const feed = args?.prd_feed === true ? undefined : await prdFeedFor(key, args?.verb, reply, gmDispatch, args)
-        const continued = continuedReply(key, reply, Date.now(), feed !== undefined, feed)
+        const continued = continuedReply(key, withPublicSearch(args, reply), Date.now(), feed !== undefined, feed)
         return bundleDrift().stale ? await bootstrapReply(gmDispatch, key, continued, { reply, args, feed }) : continued
     } catch (error) {
         appendDiagnostic('dispatch-error', { call_id: callId, session_id: sessionId, verb: args?.verb ?? null, error: error?.message ? String(error.message) : String(error), stack: error?.stack ? String(error.stack) : null })

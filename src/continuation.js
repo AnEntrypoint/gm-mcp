@@ -157,14 +157,18 @@ export function pendingRowsOf(key) {
     return entryFor(key).pending_rows
 }
 
-// Adds the bootstrap block to a reply: a field of a JSON object, or YAML placed before the trailing continuation block.
-export function withBootstrap(text, block) {
+// Adds a named block to a reply: a field of a JSON object, or YAML placed before the trailing continuation block.
+export function withBlock(text, name, block) {
     if (typeof text !== 'string') return text
     const json = parsedJsonOf(text)
-    if (json) return json.value !== null && typeof json.value === 'object' && !Array.isArray(json.value) ? JSON.stringify({ ...json.value, bootstrap: block }) : text
+    if (json) return json.value !== null && typeof json.value === 'object' && !Array.isArray(json.value) ? JSON.stringify({ ...json.value, [name]: block }) : text
     const body = textBeforeTrailingBlock(text)
     const separator = body === '' || body.endsWith('\n') ? '' : '\n'
-    return `${body}${separator}${yaml.dump({ bootstrap: block }, { lineWidth: 100 })}${text.slice(body.length)}`
+    return `${body}${separator}${yaml.dump({ [name]: block }, { lineWidth: 100 })}${text.slice(body.length)}`
+}
+
+export function withBootstrap(text, block) {
+    return withBlock(text, 'bootstrap', block)
 }
 
 export function continuedReplyWithin(key, text, cap, cut, now = Date.now()) {

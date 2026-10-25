@@ -16,6 +16,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { lastTableError, readProcessTableAsync } from './process-table.js'
 import { appendDiagnostic } from './server-log.js'
+import { checkReferences, mergeReferences, readRow, referenceGateRefusal, runGhSearch, searchPlan, validRowId, writeRow } from './public-search.js'
 
 const LOCAL_TIMEOUT_MS = 60_000
 const NETWORK_TIMEOUT_MS = 180_000
@@ -489,6 +490,8 @@ async function publishOnOrigin(args) {
     if (closing && (!CLOSE_STATUSES.includes(args.status) || !WITNESS_ID.test(String(args.witness ?? '')) || !isLedgerWitness(root, args.witness))) {
         return refused('witness_required', `closing row ${row} needs witness (a dispatch id in .gm/exec-spool/.dispatch-ledger.json) and status resolved or stale; nothing pushed`)
     }
+    const unreferenced = closing ? referenceGateRefusal(root, row, 'publish_on_origin closing commit') : null
+    if (unreferenced !== null) return refused('references_required', unreferenced)
     const trailers = closing ? ['-m', `Witness: ${args.witness}`, '-m', `Status: ${args.status}`] : []
     const fetched = await run('git', ['fetch', '-q', 'origin', 'main'], { cwd: repo, env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
     if (fetched.status !== 0) return refused('fetch_failed', 'fetch failed; nothing pushed')
@@ -1485,6 +1488,31 @@ export function housekeepInBackground(root) {
 }
 
 
+// ---------------------------------------------------------------- github-search, prd-references (public-search.js)
+
+async function githubSearchVerb(args) {
+    const plan = searchPlan(args)
+    if (plan.error !== undefined) throw usage(plan.error)
+    const found = await runGhSearch(plan.argv)
+    if (!found.ok) return refused(found.code, found.message, [['query', plan.query]])
+    const lines = found.hits.map((hit) => `${hit.rank}. ${hit.repo} ${hit.path} sha=${hit.sha} url=${hit.url} raw_url=${hit.raw_url}`)
+    return ok(`${found.hits.length} hits`, [['query', plan.query], ['transport', 'gh search code'], ['count', found.hits.length]], lines)
+}
+
+async function prdReferencesVerb(args) {
+    const root = rootOf(args)
+    const id = singleLine(args.id, 'id')
+    if (!validRowId(id)) throw usage('id must be a row id: letters, digits, dot, dash or underscore')
+    const checked = checkReferences(args.references)
+    if (checked.error !== undefined) return refused('bad_reference', checked.error)
+    const read = readRow(root, id)
+    if (read.error_code !== undefined) return refused(read.error_code, read.error)
+    const merged = mergeReferences(read.doc.references, checked.references)
+    if (merged.error !== undefined) return refused('references_full', merged.error)
+    writeRow(read.file, { ...read.doc, references: merged.references })
+    return ok(`${merged.references.length} references on ${id}`, [['row', id], ['added', checked.references.length], ['references', merged.references.length], ['status', String(read.doc.status ?? 'unknown')]])
+}
+
 // ---------------------------------------------------------------- registry
 
 export const TRIAGE_VERBS = [
@@ -1566,6 +1594,42 @@ export const TRIAGE_VERBS = [
             cwd: z.string().optional().describe('Project root when root is omitted. Required.'),
         },
         handler: toolReply('housekeep', housekeepVerb),
+    },
+    {
+        name: 'github-search',
+        description: 'Searches public GitHub code through the gh CLI (gh search code, the GitHub code search API). Returns ranked hits: rank, repo, path, sha (the git blob id), url (html) and raw_url (plain text, for fetch). Filters map to gh flags: owner (a list is allowed), repo (owner/name), language, extension, filename, size (kilobytes: >N, <N or A..B), match (file contents or path), limit (1 to 100, default 30). path is sent as the path: qualifier. query is free text, a quoted phrase, or raw qualifiers (repo:, language:, path:, filename:, extension:) sent unchanged; an empty query is valid when filters alone select the code. mode symbol sends one identifier as the symbol: qualifier. Regex search is not available: the API runs the legacy code search engine, so match literal terms, phrases and qualifiers. Typed refusals (ok false, exit 1): gh_missing, auth_required, rate_limited, bad_qualifier (the query parser refused it), search_timeout, search_failed. Bad input throws (exit 2). With cwd, the call is recorded in the project dispatch ledger.',
+        inputSchema: {
+            query: z.string().optional().describe('Free text, a quoted phrase, or raw qualifiers, sent unchanged. Leave empty when the filters alone are the query.'),
+            mode: z.enum(['text', 'symbol']).optional().describe('text (default), or symbol: the query, one identifier, is sent as the symbol: qualifier.'),
+            owner: z.union([z.string(), z.array(z.string())]).optional().describe('Owner or organisation filter, or a list of them.'),
+            repo: z.string().optional().describe('One repository, owner/name.'),
+            language: z.string().optional().describe('Language name, e.g. Rust, JavaScript, Python.'),
+            extension: z.string().optional().describe('File extension without the dot, e.g. rs.'),
+            filename: z.string().optional().describe('Bare file name, e.g. package.json.'),
+            path: z.string().optional().describe('Repository-relative path prefix, sent as the path: qualifier.'),
+            match: z.enum(['file', 'path']).optional().describe('Match file contents (file) or file paths (path).'),
+            size: z.string().optional().describe('Kilobyte range: >100, <50 or 10..200.'),
+            limit: z.number().int().min(1).max(100).optional().describe('Hits to return, 1 to 100 (default 30).'),
+            cwd: z.string().optional().describe('Project root for the dispatch ledger. Optional: the search does not depend on it.'),
+        },
+        handler: toolReply('github-search', githubSearchVerb),
+    },
+    {
+        name: 'prd-references',
+        description: 'Records public references on an open PRD row. Each entry {url, why, repo, path, sha, license} is merged into the row file .gm/prd/<id>.yml under references, keyed by url (an entry with the same url is replaced). url is https; why is one line; repo is owner/name; path is repository-relative; sha is the git object id from github-search; license defaults to unknown. Only the references key changes: the status is kept, so the call neither reopens nor closes the row, and prd-list {id} shows the references. Typed refusals (ok false, exit 1): row_missing (no open row file), row_unparseable, bad_reference (the reply names the field), references_full (more than 60 per row). Input errors throw (exit 2). prd-resolve, prd-close and the closing commit of publish_on_origin refuse a row that has no references and no body line "No public references: <reason>".',
+        inputSchema: {
+            id: z.string().describe('Open row id: the name of its file under .gm/prd/.'),
+            references: z.array(z.object({
+                url: z.string().describe('https URL of the reference (required).'),
+                why: z.string().describe('One line: why this reference answers the row (required).'),
+                repo: z.string().optional().describe('owner/name of the repository.'),
+                path: z.string().optional().describe('Repository-relative path, with the line the citation names.'),
+                sha: z.string().optional().describe('Git object id of the file, from github-search.'),
+                license: z.string().optional().describe('License identifier; defaults to unknown.'),
+            })).min(1).max(20).describe('References to record, at most 20 per call.'),
+            cwd: z.string().describe('Project root that holds .gm/prd. Required.'),
+        },
+        handler: toolReply('prd-references', prdReferencesVerb),
     },
 ]
 

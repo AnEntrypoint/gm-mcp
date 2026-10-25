@@ -1,1 +1,1 @@
-export const BUNDLE_VERSION = '0.2.308'
+export const BUNDLE_VERSION = '0.2.309'
