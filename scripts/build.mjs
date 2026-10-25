@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -14,10 +14,36 @@ export function bundleVersion(root) {
     return m[1]
 }
 
+const BUNDLE_ENTRIES = ['src/cli.js', 'src/fast-entry.js']
+const RELATIVE_IMPORT = /(?:\bfrom\s*|\bimport\s*\(?\s*)['"](\.{1,2}\/[^'"]+)['"]/g
+
+function resolveRelativeImport(fromFile, spec) {
+    const base = path.resolve(path.dirname(fromFile), spec)
+    for (const candidate of [base, base + '.js', path.join(base, 'index.js')]) {
+        if (existsSync(candidate) && statSync(candidate).isFile()) return candidate
+    }
+    return null
+}
+
+export function bundleSourcePaths(root) {
+    const seen = new Set()
+    const pending = BUNDLE_ENTRIES.map(rel => path.join(root, rel))
+    while (pending.length) {
+        const file = pending.pop()
+        if (seen.has(file) || !existsSync(file)) continue
+        seen.add(file)
+        for (const match of readFileSync(file, 'utf8').matchAll(RELATIVE_IMPORT)) {
+            const next = resolveRelativeImport(file, match[1])
+            if (next) pending.push(next)
+        }
+    }
+    return [...seen].map(file => path.relative(root, file).split(path.sep).join('/')).sort()
+}
+
 export function srcSha256(root) {
     const hash = createHash('sha256')
-    for (const name of readdirSync(path.join(root, 'src')).filter(n => n.endsWith('.js')).sort()) {
-        hash.update(name).update('\0').update(readFileSync(path.join(root, 'src', name), 'utf8').replace(/\r\n?/g, '\n')).update('\0')
+    for (const rel of bundleSourcePaths(root)) {
+        hash.update(rel).update('\0').update(readFileSync(path.join(root, rel), 'utf8').replace(/\r\n?/g, '\n')).update('\0')
     }
     return hash.digest('hex')
 }

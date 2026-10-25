@@ -4,7 +4,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildBundle, bundleVersion, srcSha256 } from './build.mjs'
+import { buildBundle, bundleSourcePaths, bundleVersion, srcSha256 } from './build.mjs'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const esbuildInstalled = existsSync(path.join(repoRoot, 'node_modules', 'esbuild', 'package.json'))
@@ -70,7 +70,8 @@ const committed = binStaged
 
 const headChanged = git(['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', 'HEAD'])
 const headFiles = headChanged.status === 0 ? headChanged.stdout.split('\n').map(line => line.trim()).filter(Boolean) : []
-const srcFiles = headFiles.filter(p => p.startsWith('src/'))
+const bundleSources = new Set(bundleSourcePaths(buildRoot))
+const srcFiles = headFiles.filter(p => bundleSources.has(p))
 const regenSet = [binRel, ...srcFiles].join(' ')
 const changedNow = includedSrc.length ? includedSrc : headFiles
 const binChangedNow = changedNow.includes(binRel)
