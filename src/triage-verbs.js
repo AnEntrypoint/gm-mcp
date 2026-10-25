@@ -238,6 +238,8 @@ async function measuredTable() {
 
 // ---------------------------------------------------------------- writer_lock (writer-lock.sh)
 
+const GM_RUNTIME_UNTRACKED = /^\?\? \.(gm|agentplug|agentplug-kv)\//;
+
 async function writerLock(args) {
     const root = rootOf(args)
     const action = args.action.replace(/-/g, '_')
@@ -277,7 +279,7 @@ async function writerLock(args) {
         const fetchState = fetched.status === 0 ? ['fetch', 'ok'] : ['fetch', 'unknown (' + failureReason(fetched) + ')']
         const status = await run('git', ['status', '--porcelain'], { cwd: checkout })
         if (status.status !== 0) return refused('status_unknown', repo + ': local status unreadable (' + failureReason(status) + ')', [fetchState])
-        const dirty = utf8(status.stdout).split('\n').filter((line) => line !== '' && !line.startsWith(' D .gm/dream-rsi')).length
+        const dirty = utf8(status.stdout).split('\n').filter((line) => line !== '' && !line.startsWith(' D .gm/dream-rsi') && !GM_RUNTIME_UNTRACKED.test(line)).length
         const counted = await run('git', ['rev-list', '--left-right', '--count', 'origin/main...HEAD'], { cwd: checkout })
         const [behind, ahead] = counted.status === 0 ? utf8(counted.stdout).trim().split(/\s+/) : []
         if (!/^\d+$/.test(ahead ?? '')) return refused('ahead_unknown', repo + ': dirty=' + dirty + ' ahead=unknown (' + failureReason(counted) + ')', [fetchState])
