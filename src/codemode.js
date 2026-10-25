@@ -11,6 +11,7 @@ import { NOTICES } from './notices.js'
 import { CONTINUATION_RESERVE_CHARS, continuedReplyWithin } from './continuation.js'
 import { CODEMODE_HEARTBEAT_MS, DEFAULT_CODEMODE_TIMEOUT_MS } from './codemode-budget.js'
 import { browserAfterCall, screenshotPathsOf } from './browser-feed.js'
+import { load as yamlLoad } from 'js-yaml'
 
 let codemodeInvocationSeq = 0
 const newCodemodeSessionId = () => `mcp-codemode-${process.pid}-${Date.now()}-${++codemodeInvocationSeq}`
@@ -71,7 +72,7 @@ function startHeartbeat(extra, startedAt) {
     return () => clearInterval(timer)
 }
 
-const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A second object argument is folded into the first, so gm.<verb>({...}, {cwd: "<root>", max_chars: 800}) is the same call; a second argument that is not an object is refused rather than dropped, because a dropped cwd silently runs the dispatch against another project. A top-level `body` is the dispatch body only when it is an object or JSON object text; any other text is row prose, sent as the verb\'s own `body` field when it declares one and as `description` otherwise, so gm.prd_add({id, subject, body}) reaches prd-add as body:{id, subject, description} (an explicit description wins). Each call returns that tool\'s reply as a String object: its text is also readable as `r.text`, string methods such as `r.includes("needle")` work on it, and a read such as `r.data.matches` is undefined because the reply is never a parsed object. Each call throws when the tool fails, except an exec child that exits nonzero (its reply carries exit_code, stdout, stderr) and a fetch that got an HTTP status (its reply carries status and body): both are returned as data.`return gm.list()` returns one entry per verb as {name, aliases?, description?}: the description is the verb text cut to 80 chars, without the boilerplate every runner verb shares, and it is omitted when the verb has none; `gm.describe(name)` gives the runner spelling of the verb, its input schema and its body schema. `gm.list({filter, names_only, max_desc})` narrows it (max_desc 0 gives full descriptions). `gm.help()` returns the notice codes that replies carry. The reply is capped at max_chars (default 24000). `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). If the body returns nothing, the text of every gm call reply is returned in call order, so a git_commit or git_push without a return still reports its result. Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
+const CODEMODE_DESCRIPTION = 'Run an async JavaScript body in which every gm tool is a function on `gm`: `await gm.codesearch({query: "createWorkerRenderer", mode: "literal"})`. Arguments go in that one object: `gm.<verb>(args)` is the same dispatch as `gm.gm({verb, body: args})`, so every key the verb reads from its body (query, path, id, message, code, ...) is passed flat and folded into the body for you, while the dispatch envelope (session_id, cwd, body, raw_body, timeout_seconds, max_chars, full_response, resume_task) stays at the top level. A second object argument is folded into the first, so gm.<verb>({...}, {cwd: "<root>", max_chars: 800}) is the same call; a second argument that is not an object is refused rather than dropped, because a dropped cwd silently runs the dispatch against another project. A top-level `body` is the dispatch body only when it is an object or JSON object text; any other text is row prose, sent as the verb\'s own `body` field when it declares one and as `description` otherwise, so gm.prd_add({id, subject, body}) reaches prd-add as body:{id, subject, description} (an explicit description wins). Each call returns that tool\'s reply as a String object: its text is also readable as `r.text`, string methods such as `r.includes("needle")` work on it, and a read such as `r.data.matches` is undefined unless the codemode envelope passes `parsed: true`, which returns each reply parsed from YAML into an object (its text stays in `r.text`, and string methods do not apply to that object). Each call throws when the tool fails, except an exec child that exits nonzero (its reply carries exit_code, stdout, stderr) and a fetch that got an HTTP status (its reply carries status and body): both are returned as data.`return gm.list()` returns one entry per verb as {name, aliases?, description?}: the description is the verb text cut to 80 chars, without the boilerplate every runner verb shares, and it is omitted when the verb has none; `gm.describe(name)` gives the runner spelling of the verb, its input schema and its body schema. `gm.list({filter, names_only, max_desc})` narrows it (max_desc 0 gives full descriptions). `gm.help()` returns the notice codes that replies carry. The reply is capped at max_chars (default 24000). `return gm.describe(name)` returns a tool\'s JSON input schema plus the spool verb body schema, and accepts either spelling of a name (`prd-add` and `prd_add` both resolve). If the body returns nothing, the text of every gm call reply is returned in call order, so a git_commit or git_push without a return still reports its result. Values returned by the body and console.log output are returned as text: a string is returned as-is, anything structured as JSON, and what JSON cannot render (a function, a symbol, a BigInt, a cycle) as text -- `[Function f]`, `42n`, `[Circular]` -- instead of being dropped or throwing. Code runs in the gm-mcp server process with the same authority as exec_js.'
 
 function dispatchIdOf(text) {
     return /^dispatch_id: (\S+)/m.exec(text)?.[1] ?? null
@@ -576,12 +577,13 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
         } catch (error) {
             fail(error)
         }
-        if (!entry) return pending.then(replyValue)
+        const replyOf = topEnvelope.parsed === true ? parsedReplyValue : replyValue
+        if (!entry) return pending.then(replyOf)
         return pending.then((text) => {
             entry.text = text
             entry.dispatch_id = dispatchIdOf(text)
             if (feedContext) entry.images = browserAfterCall(feedContext, text, extra?.sendNotification)
-            return replyValue(text)
+            return replyOf(text)
         }, fail)
     }
     let envelopeCache
@@ -662,6 +664,18 @@ function replyValue(text) {
     return Object.assign(new String(text), { text: String(text) })
 }
 
+function parsedReplyValue(text) {
+    let parsed
+    try {
+        parsed = yamlLoad(text)
+    } catch {
+        return replyValue(text)
+    }
+    if (!isPlainObject(parsed)) return replyValue(text)
+    if (!('text' in parsed)) Object.defineProperty(parsed, 'text', { value: text, enumerable: false })
+    return parsed
+}
+
 function textOf(value) {
     try {
         return String(value)
@@ -695,6 +709,7 @@ export function registerCodeMode(server, tools) {
                 session_id: z.string().optional().describe('Default session_id for every gm call that does not pass its own.'),
                 cwd: z.string().optional().describe('Default cwd for every gm call that does not pass its own.'),
                 max_chars: z.number().optional().describe('Reply cap in characters for the returned text (default 24000). Past it the text is cut and reply_truncated is true. Nested gm calls do not inherit it: each keeps its own max_chars default.'),
+                parsed: z.boolean().optional().describe('Opt-in: each gm call returns its reply parsed from YAML into an object, so r.data is usable; the reply text stays in r.text. Default false: each reply is a String object.'),
                 timeout_seconds: z.number().optional().describe('Dispatch envelope key folded into every gm call that declares it: poll budget in seconds (default 120, ceiling 600; override the ceiling with GM_MCP_POLL_TIMEOUT_CEILING_MS). A timeout keeps the dispatch running; resume it with resume_task.'),
                 full_response: z.boolean().optional().describe('Dispatch envelope key folded into every gm call that declares it (bypass reply compaction).'),
                 resume_task: z.string().optional().describe('Dispatch envelope key folded into every gm call that declares it (resume an earlier dispatch by task id).'),
@@ -708,7 +723,7 @@ export function registerCodeMode(server, tools) {
             const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
             const stopHeartbeat = startHeartbeat(extra, Date.now())
             try {
-                const gm = bindings(tools, { session_id, cwd: args.cwd, ...envelopeKeys(args) }, extra, replies)
+                const gm = bindings(tools, { session_id, cwd: args.cwd, ...envelopeKeys(args), parsed: args.parsed }, extra, replies)
                 const require = createRequire(resolvePath(args.cwd || process.cwd(), 'gm-codemode.js'))
                 const value = await withCodemodeDeadline(new AsyncFunction('gm', 'console', 'require', args.code)(gm, logger, require), codemodeTimeoutMs())
                 const unreturned = value === undefined

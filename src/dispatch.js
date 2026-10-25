@@ -264,6 +264,15 @@ export function outsideRootReadRefusal(verb, body, cwd) {
     return `${verb} path ${body.path} is outside the project root ${root}: pass allowOutsideRoot:true with the same path to read this sibling root (a read-only verb; allowOutsideRoot never applies to fs_write)`
 }
 
+const PARENT_SEGMENT_REFUSED_VERBS = ['fs_read', 'fs_readdir', 'fs_stat', 'codesearch']
+
+export function parentSegmentReadRefusal(verb, body) {
+    if (!PARENT_SEGMENT_REFUSED_VERBS.includes(verb) || !isPlainObject(body)) return null
+    const named = [body.path, body.file].find((value) => typeof value === 'string' && value.split(/[\\/]/).includes('..'))
+    if (named === undefined) return null
+    return `${verb} path ${JSON.stringify(named)} has a ".." segment: a path with .. is always refused, even with allowOutsideRoot:true. Pass an absolute path inside the project root, or drop the ..`
+}
+
 const VERBATIM_HEADER_SCAN_LINES = 12
 
 export function fsWriteEnvelopeDiagnostic(verb, body) {
@@ -517,7 +526,7 @@ function scanMatchesTotal(holder, sampleLength) {
 }
 
 // The verdict leads a slim reply: a stale or partial result must read before its matches (line 1 of every codesearch reply).
-const SLIM_MATCH_HEADER_KEYS = ['complete', 'complete_reason', 'dispatch_id', 'ok', 'verb', 'exhaustive', 'count']
+const SLIM_MATCH_HEADER_KEYS = ['truncated_note', 'truncated_count', 'complete', 'complete_reason', 'dispatch_id', 'ok', 'verb', 'exhaustive', 'count']
 
 function renderMatchesKept(out, holder, kept, toYaml, slim = false) {
     const keptMatches = holder.matches.slice(0, kept)
@@ -1227,21 +1236,18 @@ export function withCodesearchDefaultK(verb, body) {
     return { body: { ...body, k: CODESEARCH_DEFAULT_K }, defaulted: true }
 }
 
-export function withCodesearchDefaultKHint(defaulted, verb, out) {
-    if (!defaulted || verb !== 'codesearch' || !isPlainObject(out)) return out
+export function withCodesearchKCut(defaulted, verb, out) {
+    if (verb !== 'codesearch' || !isPlainObject(out)) return out
     const nested = isPlainObject(out.data) && Array.isArray(out.data.matches)
     const source = nested ? out.data : out
     if (!Array.isArray(source.matches)) return out
     const shown = source.matches.length
     const total = Number(/^(\d+) lines?\b/.exec(String(source.count ?? ''))?.[1] ?? shown)
     if (shown === 0 || total <= shown) return out
-    const hint = {
-        shown,
-        total,
-        default_k: CODESEARCH_DEFAULT_K,
-        hint: `showing ${shown} of ${total} matches (default k=${CODESEARCH_DEFAULT_K}): raise k (0 = all) or narrow with path/glob`,
-    }
-    return nested ? { ...out, data: { ...out.data, ...hint } } : { ...out, ...hint }
+    const truncated_count = total - shown
+    const cause = defaulted ? `default k=${CODESEARCH_DEFAULT_K}` : 'k or limit'
+    const truncated_note = `truncated_count ${truncated_count}: showing ${shown} of ${total} matches (${cause}): raise k (0 = all) or narrow with path/glob`
+    return { truncated_note, truncated_count, ...out }
 }
 
 function withQuietAdmission(out) {
@@ -3337,6 +3343,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             codesearchKDefaulted = withDefaultK.defaulted
             const siblingRefusal = outsideRootReadRefusal(verb, withDefaultK.body, cwd)
             if (siblingRefusal) return `error: ${siblingRefusal}`
+            const parentSegmentRefusal = parentSegmentReadRefusal(verb, withDefaultK.body)
+            if (parentSegmentRefusal) return `error: ${parentSegmentRefusal}`
             normalizedBody = withAssertedInstructionHash(verb, fsReadRangeCanonicalBody(verb, fsReadProjectRelativeBody(verb, withDefaultK.body, cwd)))
         }
     }
@@ -3465,7 +3473,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, await gitShowCaptureFallback(verb, normalizedBody, out, root))))
             out = withCodesearchDualPathScope(codesearchDualScope, out)
             out = withRuleExcludedMatchesDropped(verb, out)
-            out = withCodesearchDefaultKHint(codesearchKDefaulted, verb, out)
+            out = withCodesearchKCut(codesearchKDefaulted, verb, out)
             out = withCodesearchLocated(codesearchLocated, verb, out)
             if (resume_task) out = withResumeDisclosure(out, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs))
             else if (full_response) out = withDispatchWait(out, Date.now() - callStartedAtMs, claimedAtMs, claimedAtMs !== null && typeof landedAtMs === 'number' ? landedAtMs - (callStartedAtMs + claimedAtMs) : null)
