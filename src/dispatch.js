@@ -1510,7 +1510,7 @@ const GLOB_EXCLUDE_FIELDS = ['exclude_glob', 'exclude_globs']
 
 const GIT_BOOL_STRING_FIELDS = { git_diff: ['staged', 'stat'], git_reset: ['hard'], git_merge: ['ff_only'], git_checkout: ['create'], git_worktree_add: ['create'] }
 
-// Folds the git body aliases the guest does not read (sha as rev on git_push), coerces "true"/"false" on boolean-only git fields, refuses any other string there, and turns git_show path into the paths form so the guest never builds rev:path.
+// Folds the git body aliases the guest does not read (sha as rev on git_push), coerces "true"/"false" on boolean-only git fields, refuses any other string there, and folds git_show path into rev:path so it prints that file at the revision (a pathspec prints nothing for a commit that does not touch the file).
 export function withGitBodyCoerced(verb, body) {
     if (!body || typeof body !== 'object' || !verb.startsWith('git_')) return { value: body }
     const coerced = { ...body }
@@ -1526,11 +1526,11 @@ export function withGitBodyCoerced(verb, body) {
         delete coerced.sha
     }
     if (verb === 'git_show' && typeof coerced.path === 'string') {
-        const scoped = Array.isArray(coerced.paths) ? coerced.paths : Array.isArray(coerced.files) ? coerced.files : []
-        const combined = [...scoped, coerced.path]
-        delete coerced.path
-        delete coerced.files
-        coerced.paths = combined
+        const refspec = ['rev', 'ref', 'sha', 'commit'].map((k) => coerced[k]).find((v) => typeof v === 'string' && v.trim()) ?? 'HEAD'
+        if (refspec.includes(':')) return { error: `git_show rev ${refspec} already carries a path; pass the commit alone as rev and the file as path` }
+        if (coerced.paths !== undefined || coerced.files !== undefined) return { error: 'git_show takes path (one file read at the revision) or paths/files (a diff scope), not both' }
+        coerced.rev = `${refspec}:${coerced.path}`
+        for (const k of ['path', 'ref', 'sha', 'commit']) delete coerced[k]
     }
     return { value: coerced }
 }
