@@ -524,7 +524,7 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
     if (text.length <= maxChars) return text
     let holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
     const noticeDispatchId = text.match(/^[ \t-]*dispatch_id: (\S+)/m)?.[1] ?? 'not reported'
-        const buildNotice = (matchesReturned, matchesTotal, deliveredChars = text.length) => `dispatch_id: ${noticeDispatchId}\nreply_truncated: true\nreply_chars: ${deliveredChars}\nreply_max_chars: ${maxChars}\nreply_full_chars: ${text.length} (raise max_chars to at least this to read the whole reply)\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: continuation_reserve_chars (${CONTINUATION_RESERVE_CHARS}, held back for the continuation block)\n` : ''}spill_file: ${spillPath}\n${spillNote}${matchesCutNotice(matchesReturned, matchesTotal, maxChars)}`
+        const buildNotice = (matchesReturned, matchesTotal, deliveredChars = text.length) => `dispatch_id: ${noticeDispatchId}\nreply_truncated: true\nreply_chars: ${deliveredChars}\nreply_max_chars: ${maxChars}\nreply_full_chars: ${text.length} (raise max_chars to at least this to read the whole reply)\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: bundle_notice_reserve (${requestedMaxChars - maxChars}, held back for the stale-bundle notice)\n` : ''}spill_file: ${spillPath}\n${spillNote}${matchesCutNotice(matchesReturned, matchesTotal, maxChars)}`
     let head = text
     let matchesTotal
     let matchesReturned
@@ -2639,10 +2639,11 @@ function bundleNoticeTail(verb, drift) {
     return line ? block + '\n' + line + '\n' : block + '\n'
 }
 
-function pendingBundleNoticeReserve(verb) {
+function pendingBundleNoticeReserve(verb, sessionId) {
     if (VERBATIM_REPLY_VERBS.has(verb)) return 0
     const drift = bundleDrift()
     if (!drift.stale) return 0
+    if (staleNoticeAnnounced.has(staleNoticeKey(drift, sessionId))) return 0
     return bundleNoticeTail(verb, drift).length + 1
 }
 
@@ -3114,7 +3115,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (LATEST_ONLY_VERBS.has(verb)) pruneSupersededListings(outDir, verb, session_id, outPath, callStartedAtMs)
             const spillPath = `${outPath}.reply.txt`
             if (rendered.length > replyCap) fs.writeFileSync(spillPath, rendered, { encoding: 'utf8', mode: SPOOL_FILE_MODE })
-            return capReplyText(rendered, Math.max(0, replyCap - pendingBundleNoticeReserve(verb)), spillPath, fitted, toYaml, spillNote, requested_max_chars ?? replyCap)
+            return capReplyText(rendered, Math.max(0, replyCap - pendingBundleNoticeReserve(verb, session_id)), spillPath, fitted, toYaml, spillNote, requested_max_chars ?? replyCap)
         } catch (e) {
             const failed = { error: `response file was not valid JSON: ${e.message}`, task: requestNumber, out_path: outPath }
             return toYaml(resume_task ? withResumeDisclosure(failed, resumeDisclosure(requestNumber, landedAtMs, callStartedAtMs)) : failed)
