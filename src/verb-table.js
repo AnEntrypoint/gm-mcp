@@ -557,6 +557,7 @@ const GIT_FETCH_BODY = {
         ref: { type: 'string', description: 'Sha, branch or refspec to fetch. Must not start with a dash. Wins over rev and refspec when several are given.' },
         rev: { type: 'string', description: 'Alias of ref, read when ref is absent.' },
         refspec: { type: 'string', description: 'Refspec to fetch, read when ref and rev are absent.' },
+        fetch_timeout_seconds: { type: 'integer', description: 'Deadline for this fetch in seconds, 120 to 600; default 360.' },
     },
 }
 

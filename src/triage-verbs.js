@@ -9,6 +9,7 @@
 // or input error and throws like any failed verb (isError).
 
 import { execFile } from 'node:child_process'
+import net from 'node:net'
 import { createHash, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -19,7 +20,11 @@ import { appendDiagnostic } from './server-log.js'
 import { appendRowNote, checkReferences, ensureReferenceGate, readRow, recordedUrls, REFERENCE_CAP, referenceGateRefusal, rowFileOf, runGhSearch, searchPlan, validRowId } from './public-search.js'
 const LOCAL_TIMEOUT_MS = 60_000
 const NETWORK_TIMEOUT_MS = 180_000
-const FETCH_TIMEOUT_MS = 300_000
+const FETCH_TIMEOUT_DEFAULT_S = 300
+const FETCH_TIMEOUT_MIN_S = 120
+const FETCH_TIMEOUT_MAX_S = 600
+const PROBE_TIMEOUT_MS = 10_000
+const FETCH_ARGV = ['fetch', '-q', 'origin', 'main']
 const MAX_OUTPUT_BYTES = 256 * 1024 * 1024
 const EMPTY = Buffer.alloc(0)
 const NO_PROMPT = { GIT_TERMINAL_PROMPT: '0' }
@@ -487,6 +492,58 @@ function firstConflict(merged) {
 const isBinary = (bytes) => bytes !== null && bytes.subarray(0, 8000).includes(0)
 const sameBytes = (a, b) => (a === null || b === null ? a === b : a.equals(b))
 
+function fetchBudgetSeconds(value) {
+    if (value === undefined) return FETCH_TIMEOUT_DEFAULT_S
+    if (!Number.isInteger(value) || value < FETCH_TIMEOUT_MIN_S || value > FETCH_TIMEOUT_MAX_S) throw usage(`fetch_timeout_seconds must be an integer from ${FETCH_TIMEOUT_MIN_S} to ${FETCH_TIMEOUT_MAX_S}`)
+    return value
+}
+
+function connectCause(error, host) {
+    if (error.code === 'ENOTFOUND' || error.code === 'EAI_AGAIN') return `no route to origin: DNS failure, ${host} does not resolve (${error.code})`
+    if (error.code === 'ECONNREFUSED') return `connection refused by ${host}`
+    if (error.code === 'EHOSTUNREACH' || error.code === 'ENETUNREACH') return `no route to origin: ${error.code} to ${host}`
+    return `connect to ${host} failed: ${error.code ?? error.message}`
+}
+
+// A TCP connect to origin before the fetch: an unresolvable, refused or unroutable host fails here with its cause, not after the fetch deadline.
+async function probeOrigin(repo) {
+    const url = utf8((await run('git', ['remote', 'get-url', 'origin'], { cwd: repo, env: NO_PROMPT })).stdout).trim()
+    const found = /^https:\/\/([^/:]+)(?::(\d+))?/.exec(url)
+    if (found === null || ['HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy'].some((name) => process.env[name])) return null
+    const host = found[1]
+    return new Promise((resolve) => {
+        const socket = net.connect({ host, port: Number(found[2] ?? 443) })
+        const finish = (outcome) => {
+            socket.destroy()
+            resolve(outcome)
+        }
+        socket.setTimeout(PROBE_TIMEOUT_MS)
+        socket.once('connect', () => finish(null))
+        socket.once('timeout', () => finish({ code: 'fetch_timeout', cause: `no route to origin: TCP connect to ${host} timed out after ${PROBE_TIMEOUT_MS / 1000} s` }))
+        socket.once('error', (error) => finish({ code: 'fetch_failed', cause: connectCause(error, host) }))
+    })
+}
+
+function fetchCause(result) {
+    const text = utf8(result.stderr)
+    if (/Could not resolve host/.test(text)) return 'no route to origin: DNS failure'
+    if (/Connection refused|Failed to connect/.test(text)) return 'connection refused'
+    if (/No route to host|Network is unreachable/.test(text)) return 'no route to origin'
+    if (/[Pp]roxy/.test(text)) return 'proxy error'
+    if (/SSL|TLS|certificate/.test(text)) return 'TLS error'
+    return failureReason(result)
+}
+
+// Null when the fetch lands. A deadline kill is fetch_timeout; any other failure is fetch_failed with its transport cause.
+async function fetchOrigin(repo, fetchMs) {
+    const fetched = await run('git', FETCH_ARGV, { cwd: repo, env: NO_PROMPT, timeout: fetchMs })
+    if (fetched.status === 0) return null
+    const seconds = fetchMs / 1000
+    const resume = 'resume state: none, git keeps no partial pack, so a retry restarts the fetch'
+    if (fetched.signal) return refused('fetch_timeout', `git fetch origin main hit its ${seconds} s deadline (${fetched.signal}); nothing pushed; ${resume}; retry with fetch_timeout_seconds up to ${FETCH_TIMEOUT_MAX_S}`)
+    return refused('fetch_failed', `git fetch origin main failed: ${fetchCause(fetched)}; fetch deadline ${seconds} s; nothing pushed; ${resume}`)
+}
+
 async function publishOnOrigin(args) {
     const root = rootOf(args)
     const repo = path.resolve(root, singleLine(args.repo_dir, 'repo_dir'))
@@ -509,12 +566,15 @@ async function publishOnOrigin(args) {
     if (unreferenced !== null) return refused('references_required', unreferenced)
     const closeRow = closing && paths.includes(rowRel) ? rowRel : null
     const trailers = closing ? ['-m', `Witness: ${args.witness}`, '-m', `Status: ${args.status}`] : []
-    const fetched = await run('git', ['fetch', '-q', 'origin', 'main'], { cwd: repo, env: NO_PROMPT, timeout: FETCH_TIMEOUT_MS })
-    if (fetched.status !== 0) return refused('fetch_failed', `fetch of origin main failed (${failureReason(fetched)}); the fetch deadline is ${FETCH_TIMEOUT_MS / 1000} s, and a timeout reads "terminated by SIGTERM"; nothing pushed; retry publish_on_origin`)
+    const fetchMs = fetchBudgetSeconds(args.fetch_timeout_seconds) * 1000
+    const unreachable = await probeOrigin(repo)
+    if (unreachable !== null) return refused(unreachable.code, `${unreachable.cause}; nothing pushed; resume state: none`)
+    const fetchRefusal = await fetchOrigin(repo, fetchMs)
+    if (fetchRefusal !== null) return fetchRefusal
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-publish-'))
     try {
         const givenBase = typeof args.publish_base === 'string' && args.publish_base !== '' ? args.publish_base : null
-        return await publishLane({ repo, row, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, trailers, closeRow })
+        return await publishLane({ repo, row, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, trailers, closeRow, fetchMs })
     } finally {
         fs.rmSync(work, { recursive: true, force: true })
     }
@@ -559,7 +619,7 @@ async function rebaseCommitOntoTip({ repo, commit, row, message, paths, checker,
     return { sha, stat }
 }
 
-async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [], closeRow = null }) {
+async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [], closeRow = null, fetchMs = FETCH_TIMEOUT_DEFAULT_S * 1000 }) {
     const plain = (gitArgs, extra = {}) => run('git', gitArgs, { cwd: repo, ...extra })
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'index') }
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
@@ -677,7 +737,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     const pushed = await plain(['push', '-q', 'origin', `${sha}:refs/heads/main`], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
     if (pushed.status !== 0) {
         // origin moved between the build and the push: replay this one commit onto the new tip and push it once more; the lane's edits are not re-run.
-        const refetched = await plain(['fetch', '-q', 'origin', 'main'], { env: NO_PROMPT, timeout: FETCH_TIMEOUT_MS })
+        const refetched = await plain(FETCH_ARGV, { env: NO_PROMPT, timeout: fetchMs })
         if (refetched.status !== 0) return refused('push_refused', 'push refused and refetch failed; nothing landed', [['commit', sha]])
         const rebased = await rebaseCommitOntoTip({ repo, commit: sha, row, message, paths, checker, work, trailers })
         if (rebased.refusal) return rebased.refusal
@@ -686,7 +746,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
         const retry = await plain(['push', '-q', 'origin', `${landedSha}:refs/heads/main`], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
         if (retry.status !== 0) return refused('push_refused', 'push refused again after one rebase; nothing landed', [['commit', landedSha]])
     }
-    await plain(['fetch', '-q', 'origin', 'main'], { env: NO_PROMPT, timeout: FETCH_TIMEOUT_MS })
+    await plain(FETCH_ARGV, { env: NO_PROMPT, timeout: fetchMs })
     const landed = await plain(['merge-base', '--is-ancestor', landedSha, 'origin/main'])
     if (landed.status === 0) return ok(`published ${landedSha} on origin/main`, [['commit', landedSha], ['fork', base]], stat)
     return refused('not_on_origin', `push reported success but ${landedSha} is not on origin/main`, [['commit', landedSha]])
@@ -1654,13 +1714,14 @@ export const TRIAGE_VERBS = [
     },
     {
         name: 'publish_on_origin',
-        description: 'Publishes the listed paths of repo_dir onto origin/main as one commit, without touching its working tree, index or local main (replaces scripts/triage/publish-on-origin.sh). Steps: fetch origin main; build a temporary index from origin/main; three-way merge each listed file (base = the fork point: merge-base(HEAD, origin/main), or publish_base when it is an ancestor of HEAD and not origin/main; theirs = origin/main; ours = the lane file; a conflict refuses with its path and line span; a path origin deleted refuses unless the lane left it unchanged); regenerate skills/manifest.sha256 when a skills/ path is listed; commit-tree with "Row: <row>"; refuse a commit that changes any path outside the list; run <cwd>/scripts/check-staged-secrets.mjs on that index; push sha:refs/heads/main; confirm the sha is on origin/main. dry_run stops before the push. Reply: ok, exit_code, result, commit, then the last three diff stat lines. Refusals return as data with error_code: fetch_failed, merge_conflict, publish_base_not_fork, unintended_paths, secrets_check_failed, push_refused, not_on_origin and others; nothing is pushed on a refusal.',
+        description: 'Publishes the listed paths of repo_dir onto origin/main as one commit, without touching its working tree, index or local main (replaces scripts/triage/publish-on-origin.sh). Steps: fetch origin main; build a temporary index from origin/main; three-way merge each listed file (base = the fork point: merge-base(HEAD, origin/main), or publish_base when it is an ancestor of HEAD and not origin/main; theirs = origin/main; ours = the lane file; a conflict refuses with its path and line span; a path origin deleted refuses unless the lane left it unchanged); regenerate skills/manifest.sha256 when a skills/ path is listed; commit-tree with "Row: <row>"; refuse a commit that changes any path outside the list; run <cwd>/scripts/check-staged-secrets.mjs on that index; push sha:refs/heads/main; confirm the sha is on origin/main. dry_run stops before the push. Reply: ok, exit_code, result, commit, then the last three diff stat lines. Refusals return as data with error_code: fetch_timeout, fetch_failed (with the transport cause), merge_conflict, publish_base_not_fork, unintended_paths, secrets_check_failed, push_refused, not_on_origin and others; nothing is pushed on a refusal.',
         inputSchema: {
             repo_dir: z.string().describe('Checkout whose files are published: an absolute path, or relative to cwd.'),
             row: z.string().describe('Row id, written into the commit as "Row: <row>".'),
             message: z.string().describe('Commit subject and body.'),
             paths: z.array(z.string()).min(1).describe('Repository-relative paths the lane edited. Each must exist as a file (published), be a submodule pin in the index or HEAD of the lane (published as that commit sha at mode 160000), or be absent (removed from the index unless origin/main pins it as a submodule, which is then left alone).'),
             publish_base: z.string().optional().describe('The commit the lane\'s copy was made from (a sha or ref). The lane start commit, an ancestor of HEAD. origin/main is never the base: a publish_base that resolves to the origin/main tip is ignored and the base stays the fork point. Default: merge-base(HEAD, origin/main).'),
+            fetch_timeout_seconds: z.number().int().min(FETCH_TIMEOUT_MIN_S).max(FETCH_TIMEOUT_MAX_S).optional().describe('Deadline for the origin fetch in seconds, 120 to 600; default 300. A fetch past it replies fetch_timeout with the deadline and the resume state.'),
             dry_run: z.boolean().optional().describe('Build and check the commit, then stop before the push.'),
             witness: z.string().optional().describe('Dispatch id of the live witness that closes the row: must appear in the .gm/exec-spool/.dispatch-ledger.json of repo_dir or of cwd. Required when this publish closes a row (a status is given, or the row file under .gm/prd/ is removed). A closing publish keeps the row file in repo_dir: its commit removes it from origin.'),
             status: z.enum(['resolved', 'stale']).optional().describe('Status the closing commit records. Required with witness.'),

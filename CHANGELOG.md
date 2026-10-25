@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.337 - origin fetch has a per-call deadline and names its failure
+
+`publish_on_origin` takes `fetch_timeout_seconds` (120 to 600, default 300) for its origin fetch. Before the fetch it connects to the origin host for up to 10 s, so an unresolvable, refused or unroutable origin fails in seconds with its cause (`fetch_failed`, or `fetch_timeout` for a connect timeout). A fetch killed at its deadline replies `fetch_timeout` with the deadline and the resume state (none: git keeps no partial pack). `git_fetch` accepts `fetch_timeout_seconds` in its body (guest deadline 120 to 600 s). `BUNDLE_VERSION` and `package.json` move to 0.2.337.
+
 ## 0.2.336 - publish_on_origin never clobbers newer origin text
 
 `publish_on_origin` three-way merges each listed file from the fork point, never from `publish_base` when that names origin/main: a `publish_base` that resolves to the origin/main tip is ignored, and a `publish_base` that is not an ancestor of HEAD refuses with `publish_base_not_fork`. A path origin changed since the fork point merges per hunk and refuses on a conflicting hunk with its path and line span; a path origin deleted refuses unless the lane left it unchanged. The publish fetch deadline is 300 s (was 180 s) and a `fetch_failed` reply names the deadline and the retry. `BUNDLE_VERSION` and `package.json` move to 0.2.336.

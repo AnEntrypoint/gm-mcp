@@ -48,7 +48,8 @@ export const GUEST_ACCEPTED_FIELDS = {
         "remote",
         "ref",
         "rev",
-        "refspec"
+        "refspec",
+        "fetch_timeout_seconds"
     ],
     "git_pull": [
         "remote",
