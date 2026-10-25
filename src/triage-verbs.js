@@ -154,11 +154,16 @@ function run(file, args, { cwd, env, timeout = LOCAL_TIMEOUT_MS } = {}) {
         const options = { cwd, env: env === undefined ? process.env : { ...process.env, ...env }, encoding: 'buffer', maxBuffer: MAX_OUTPUT_BYTES, timeout, windowsHide: true }
         execFile(file, args, options, (error, stdout, stderr) => {
             const status = error === null ? 0 : Number.isInteger(error.code) ? error.code : 1
-            resolve({ status, stdout: stdout ?? EMPTY, stderr: stderr ?? EMPTY })
+            resolve({ status, stdout: stdout ?? EMPTY, stderr: stderr ?? EMPTY, signal: error?.signal ?? null })
         })
     })
 }
 
+function failureReason(result) {
+    if (result.signal) return 'terminated by ' + result.signal
+    const line = utf8(result.stderr).split('\n').map((text) => text.trim()).find((text) => text !== '')
+    return line === undefined ? 'exit ' + result.status : line
+}
 const utf8 = (buffer) => buffer.toString('utf8')
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const byBytes = (a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'))
@@ -270,14 +275,16 @@ async function writerLock(args) {
     if (action === 'check') {
         const checkout = repo === 'gm' ? root : path.join(root, repo)
         const fetched = await run('git', ['fetch', '-q', 'origin', 'main'], { cwd: checkout, env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
+        const fetchState = fetched.status === 0 ? ['fetch', 'ok'] : ['fetch', 'unknown (' + failureReason(fetched) + ')']
         const status = await run('git', ['status', '--porcelain'], { cwd: checkout })
+        if (status.status !== 0) return refused('status_unknown', repo + ': local status unreadable (' + failureReason(status) + ')', [fetchState])
         const dirty = utf8(status.stdout).split('\n').filter((line) => line !== '' && !line.startsWith(' D .gm/dream-rsi')).length
-        const counted = await run('git', ['rev-list', '--count', 'origin/main..HEAD'], { cwd: checkout })
-        const ahead = counted.status === 0 ? utf8(counted.stdout).trim() : null
+        const counted = await run('git', ['rev-list', '--left-right', '--count', 'origin/main...HEAD'], { cwd: checkout })
+        const [behind, ahead] = counted.status === 0 ? utf8(counted.stdout).trim().split(/\s+/) : []
+        if (!/^\d+$/.test(ahead ?? '')) return refused('ahead_unknown', repo + ': dirty=' + dirty + ' ahead=unknown (' + failureReason(counted) + ')', [fetchState])
         const clean = dirty === 0 && ahead === '0'
-        const result = `${repo}: dirty=${dirty} ahead=${ahead ?? ''}`
-        const fields = [['fetch', fetched.status === 0 ? 'ok' : 'failed']]
-        return clean ? ok(result, fields) : refused('not_clean', result, fields)
+        const result = repo + ': dirty=' + dirty + ' ahead=' + ahead + ' behind=' + behind
+        return clean ? ok(result, [fetchState]) : refused('not_clean', result, [fetchState])
     }
 
     if (action === 'quarantine_stale') {
