@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
 import { CONTINUATION_LOGGER, observeRelayedReply, startContinuationMonitor } from './continuation.js'
+import { CLIENT_CWD_HEADER } from './request-context.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { createServer } from './mcp-server.js'
 import { gitToplevel } from './git-adapter.js'
@@ -75,7 +76,7 @@ function post(url, line) {
     return new Promise((resolve, reject) => {
         const request = httpRequest(url, {
             method: 'POST',
-            headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'content-length': Buffer.byteLength(line) },
+            headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'content-length': Buffer.byteLength(line), [CLIENT_CWD_HEADER]: process.cwd() },
         }, (response) => {
             const chunks = []
             response.on('data', (chunk) => chunks.push(chunk))

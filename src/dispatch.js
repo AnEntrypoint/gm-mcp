@@ -1,4 +1,5 @@
 import { isPlainObject } from './plain-object.js';
+import { clientCwdContext } from './request-context.js'
 import { agentplugDir, spoolDirOf, toolsDir } from './paths.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { spoolFs as fs, spoolSpawn as spawn } from './spool-port.js'
@@ -107,6 +108,11 @@ function resolveDispatchRoot(cwd) {
         const root = projectRootFor(found.dir)
         rememberProjectRoot(root)
         return { root, root_source: found.source }
+    }
+    const clientCwd = clientCwdContext.getStore()
+    if (clientCwd) {
+        const top = gitToplevel(clientCwd)
+        if (top) return { root: top, root_source: 'client_cwd' }
     }
     for (const name of DEFAULT_CWD_ENV_VARS) {
         const value = process.env[name]

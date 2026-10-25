@@ -96,6 +96,14 @@ self-update (<code>) -- <reason>`), so it lands in the daemon log instead of
 being swallowed by the background check. The `.prev` backup and the `node
 --check` validation of a candidate are unchanged.
 
+The runner and guest swap of the release bridge (`src/release-bridge.js`) is
+serialised by the lock file `gm-mcp-release-bridge.lock` in the same dir. A
+contended acquire is not queued: it makes two attempts with no wait and returns
+`{ outcome: 'busy' }`. That is intended backpressure. The only caller is the
+background tick, which treats `busy` as a silent no-op, and the holder is
+already running the check that the next tick would run. A holder whose pid is
+dead, or whose lock is older than 15 minutes, is treated as stale and taken over.
+
 ### Picking up a newer bundle without a reconnect
 
 The self-update above compares the deployed file against a URL, so it answers
