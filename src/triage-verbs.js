@@ -1667,6 +1667,67 @@ async function prdReferencesVerb(args) {
     return ok(`${fresh.length} references recorded on ${id}`, [['row', id], ['recorded', fresh.length], ['skipped_existing', checked.references.length - fresh.length], ['references', known.size + fresh.length], ['status', String(read.doc.status ?? 'unknown')]])
 }
 
+// ---------------------------------------------------------------- dev-log (the log scripts/dev-log/server.mjs writes to <cwd>/.gm/dev-log)
+
+const DEV_LOG_LIMIT_DEFAULT = 100
+const DEV_LOG_LIMIT_MAX = 500
+const DEV_LOG_DROP = /gm dev-log dropped (\d+) over the \d+\/s limit and (\d+) malformed/
+
+// Epoch ms before which records are out of the since filter: an ISO time, or seconds back (a number or a digit string).
+function devLogCutoff(since, now) {
+    if (since === undefined) return null
+    if (typeof since === 'number') return now - since * 1000
+    if (/^\d+(\.\d+)?$/.test(since.trim())) return now - Number(since.trim()) * 1000
+    const parsed = Date.parse(since)
+    if (Number.isNaN(parsed)) throw usage('since must be an ISO time, or a number of seconds back')
+    return parsed
+}
+
+// log.1.jsonl (rotated, older) then log.jsonl; a torn line left by a crash is skipped.
+function devLogRecords(dir) {
+    const records = []
+    for (const name of ['log.1.jsonl', 'log.jsonl']) {
+        for (const line of (readText(path.join(dir, name)) ?? '').split('\n')) {
+            if (line === '') continue
+            try {
+                records.push(JSON.parse(line))
+            } catch {
+                // a torn line is skipped
+            }
+        }
+    }
+    return records
+}
+
+function devLogVerb(args) {
+    const root = rootOf(args)
+    const dir = path.join(root, '.gm', 'dev-log')
+    const logPath = path.join(dir, 'log.jsonl')
+    const limit = args.limit ?? DEV_LOG_LIMIT_DEFAULT
+    const cutoff = devLogCutoff(args.since, Date.now())
+    const hasLog = isFile(logPath) || isFile(path.join(dir, 'log.1.jsonl'))
+    const enabled = isFile(path.join(dir, 'disabled')) ? 'false' : hasLog ? 'true' : 'unknown'
+    const all = devLogRecords(dir)
+    const inWindow = all.filter((record) => cutoff === null || record.time >= cutoff)
+    const matched = inWindow.filter((record) => (args.kind === undefined || record.kind === args.kind) && (args.level === undefined || record.level === args.level))
+    const tally = (key) => {
+        const counts = new Map()
+        for (const record of matched) counts.set(record[key], (counts.get(record[key]) ?? 0) + 1)
+        return [...counts].map(([value, count]) => `${value}=${count}`).join(' ') || 'none'
+    }
+    let dropped = null
+    for (const record of inWindow) {
+        const found = DEV_LOG_DROP.exec(String(record.text ?? ''))
+        if (found !== null) dropped = (dropped ?? 0) + Number(found[1]) + Number(found[2])
+    }
+    const returned = matched.slice(-limit)
+    const fields = [['enabled', enabled], ['path', logPath], ['total', all.length], ['matched', matched.length]]
+    if (dropped !== null) fields.push(['dropped', dropped])
+    fields.push(['kinds', tally('kind')], ['levels', tally('level')])
+    const lines = returned.map(({ level, text, url, line, time, kind }) => JSON.stringify({ level, text, url, line, time, kind }))
+    return ok(`${returned.length} of ${matched.length} records`, fields, lines)
+}
+
 // ---------------------------------------------------------------- registry
 
 export const TRIAGE_VERBS = [
@@ -1795,6 +1856,18 @@ export const TRIAGE_VERBS = [
             cwd: z.string().describe('Project root that holds .gm/prd. Required.'),
         },
         handler: toolReply('prd-references', prdReferencesVerb),
+    },
+    {
+        name: 'dev-log',
+        description: 'Reads the dev-server browser log that scripts/dev-log/server.mjs writes to <cwd>/.gm/dev-log/log.jsonl (rotated to log.1.jsonl at 2 MB). Reads only the cwd project. Each record has the browser verb shape: level, text, url, line, time, kind. Filters: since (ISO time, or seconds back), kind, level. limit keeps the newest matching records (default 100, max 500), returned oldest first, one JSON record per line. Reply: ok, exit_code, result "<returned> of <matched> records", enabled (true; false when .gm/dev-log/disabled exists; unknown when no log file exists), path (the log file read), total (records read), matched, dropped (summed from the writer drop notices, only when one is present), kinds and levels counts over the matches. A missing log is enabled unknown, not an error.',
+        inputSchema: {
+            limit: z.number().int().min(1).max(DEV_LOG_LIMIT_MAX).optional().describe('Newest matching records to return, 1 to 500 (default 100).'),
+            since: z.union([z.string(), z.number().min(0)]).optional().describe('Only records at or after this time: an ISO 8601 time, or seconds back as a number or a digit string.'),
+            kind: z.string().optional().describe('Record kind as the writer stores it, e.g. console, exception, network, resource.'),
+            level: z.enum(['error', 'warning', 'info', 'debug']).optional().describe('Record level.'),
+            cwd: z.string().optional().describe('Project root whose .gm/dev-log is read. Required.'),
+        },
+        handler: toolReply('dev-log', devLogVerb),
     },
 ]
 
