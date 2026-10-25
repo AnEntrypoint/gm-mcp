@@ -551,7 +551,7 @@ async function rebaseCommitOntoTip({ repo, commit, row, message, paths, checker,
     const changed = utf8((await plain(['diff', '--name-only', '--no-renames', '-z', tip, sha])).stdout).split('\0').filter((name) => name !== '')
     const unintended = changed.filter((name) => !paths.includes(name) && name !== 'skills/manifest.sha256')
     if (unintended.length > 0) return { refusal: refused('unintended_paths', 'rebased commit changes paths outside the list; nothing pushed', [['commit', sha]], unintended) }
-    const scan = await run(process.execPath, [checker], { cwd: repo, env: indexEnv })
+    const scan = changed.length === 0 && trailers.length > 0 ? { status: 0 } : await run(process.execPath, [checker], { cwd: repo, env: indexEnv })
     if (scan.status !== 0) return { refusal: refused('secrets_check_failed', 'secrets check failed on the rebased commit; nothing pushed', [['commit', sha]]) }
     const stat = utf8((await plain(['diff', '--stat', tip, sha])).stdout).split('\n').filter((line) => line !== '').slice(-3)
     return { sha, stat }
@@ -650,7 +650,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     const unintended = changed.filter((name) => !paths.includes(name) && name !== 'skills/manifest.sha256')
     if (unintended.length > 0) return refused('unintended_paths', 'commit changes paths outside the list; nothing pushed', [['commit', sha]], unintended)
 
-    const scan = await run(process.execPath, [checker], { cwd: repo, env: indexEnv })
+    const scan = changed.length === 0 && trailers.length > 0 ? { status: 0 } : await run(process.execPath, [checker], { cwd: repo, env: indexEnv })
     if (scan.status !== 0) {
         const output = `${utf8(scan.stdout)}\n${utf8(scan.stderr)}`.split('\n').filter((line) => line.trim() !== '')
         return refused('secrets_check_failed', 'secrets check failed; nothing pushed', [['commit', sha], ['secrets', output.at(-1) ?? '']])
