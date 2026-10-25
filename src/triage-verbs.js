@@ -474,6 +474,10 @@ function firstConflict(merged) {
     return { from: start + 1, to: last + 1, lines: lines.slice(start, last + 1).slice(0, 30).map((line) => `| ${line}`) }
 }
 
+// Git's own binary rule: a NUL byte in the first 8000 bytes. A null side is a path absent from that revision.
+const isBinary = (bytes) => bytes !== null && bytes.subarray(0, 8000).includes(0)
+const sameBytes = (a, b) => (a === null || b === null ? a === b : a.equals(b))
+
 async function publishOnOrigin(args) {
     const root = rootOf(args)
     const repo = path.resolve(root, singleLine(args.repo_dir, 'repo_dir'))
@@ -574,17 +578,29 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
             const from = await plain(['show', `${base}:${p}`])
             const theirs = await plain(['show', `origin/main:${p}`])
             const scratch = (suffix) => path.join(work, `${index}.${suffix}`)
-            fs.writeFileSync(scratch('base'), from.status === 0 ? from.stdout : EMPTY)
-            fs.writeFileSync(scratch('theirs'), theirs.status === 0 ? theirs.stdout : EMPTY)
-            fs.writeFileSync(scratch('ours'), fs.readFileSync(full))
-            const merge = await plain(['merge-file', '-p', scratch('ours'), scratch('base'), scratch('theirs')])
-            const merged = utf8(merge.stdout)
-            if (merged.split('\n').some((line) => line.startsWith('<<<<<<<'))) {
-                const hunk = firstConflict(merged)
-                return refused('merge_conflict', `${p} conflicts with origin/main at lines ${hunk.from}-${hunk.to} (fork ${base}); nothing pushed`, [['path', p], ['fork', base]], hunk.lines)
+            const ours = fs.readFileSync(full)
+            const fork = from.status === 0 ? from.stdout : null
+            const onOrigin = theirs.status === 0 ? theirs.stdout : null
+            let merged
+            if ((fork === null && onOrigin === null) || [ours, fork, onOrigin].some(isBinary)) {
+                // An add (absent from the fork point and origin/main) or binary content has no line merge: the side changed against the fork point wins whole.
+                if (sameBytes(ours, onOrigin) || sameBytes(fork, onOrigin)) merged = ours
+                else if (sameBytes(ours, fork)) continue
+                else return refused('merge_conflict', `${p} is binary and changed on both the fork point and origin/main; nothing pushed`, [['path', p], ['fork', base]])
+            } else {
+                fs.writeFileSync(scratch('base'), fork ?? EMPTY)
+                fs.writeFileSync(scratch('theirs'), onOrigin ?? EMPTY)
+                fs.writeFileSync(scratch('ours'), ours)
+                const merge = await plain(['merge-file', '-p', scratch('ours'), scratch('base'), scratch('theirs')])
+                const text = utf8(merge.stdout)
+                if (text.split('\n').some((line) => line.startsWith('<<<<<<<'))) {
+                    const hunk = firstConflict(text)
+                    return refused('merge_conflict', `${p} conflicts with origin/main at lines ${hunk.from}-${hunk.to} (fork ${base}); nothing pushed`, [['path', p], ['fork', base]], hunk.lines)
+                }
+                if (merge.status !== 0) return refused('merge_failed', `merge-file failed on ${p}; nothing pushed`, [['path', p], ['fork', base]])
+                merged = merge.stdout
             }
-            if (merge.status !== 0) return refused('merge_failed', `merge-file failed on ${p}; nothing pushed`, [['path', p], ['fork', base]])
-            fs.writeFileSync(scratch('merged'), merge.stdout)
+            fs.writeFileSync(scratch('merged'), merged)
             const blob = await hashBlob(repo, scratch('merged'))
             if (blob === null) return refused('hash_failed', `empty blob sha for ${p}; nothing pushed`)
             const mode = isExecutable(full) ? '100755' : '100644'
