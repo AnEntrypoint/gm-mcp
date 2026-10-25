@@ -671,6 +671,50 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     return refused('not_on_origin', `push reported success but ${landedSha} is not on origin/main`, [['commit', landedSha]])
 }
 
+// ---------------------------------------------------------------- git-clone (scratch clones of AnEntrypoint repositories)
+
+const SCRATCH_ROOT = '/config/tmp'
+const CLONE_MODES = { blobless: ['--filter=blob:none'], shallow: ['--depth', '1'], full: [] }
+const CLONE_OWNER = 'AnEntrypoint'
+
+// Accepts AnEntrypoint/<name>, or the https://github.com URL of one; any other owner is refused.
+function cloneRepoName(value) {
+    const text = singleLine(value, 'repo').trim().replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '')
+    const [owner, name, ...rest] = text.split('/')
+    if (rest.length > 0 || name === undefined) throw usage('repo must be AnEntrypoint/<name> or its https://github.com URL')
+    if (owner !== CLONE_OWNER) return refused('owner_refused', `git-clone refuses owner ${JSON.stringify(owner)}: only ${CLONE_OWNER} repositories are cloned; nothing cloned`)
+    if (!SAFE_NAME.test(name)) throw usage(`repo name ${JSON.stringify(name)} must be one path component`)
+    return name
+}
+
+// The dest is resolved under SCRATCH_ROOT; anything outside it, or the root itself, is refused before any write.
+function cloneDest(value) {
+    const target = path.resolve(SCRATCH_ROOT, singleLine(value, 'dest'))
+    const root = path.resolve(SCRATCH_ROOT)
+    if (target === root || !target.startsWith(root + path.sep)) return refused('dest_refused', `dest ${target} must be a directory under ${root}; nothing cloned`)
+    return target
+}
+
+async function gitClone(args) {
+    const name = cloneRepoName(args.repo)
+    if (typeof name !== 'string') return name
+    const target = cloneDest(args.dest)
+    if (typeof target !== 'string') return target
+    const mode = args.mode === undefined ? 'blobless' : args.mode
+    if (!Object.hasOwn(CLONE_MODES, mode)) throw usage(`mode must be one of ${Object.keys(CLONE_MODES).join(', ')}`)
+    if (fs.existsSync(target)) return refused('dest_exists', `dest ${target} already exists; nothing cloned`)
+    fs.mkdirSync(path.dirname(target), { recursive: true })
+    const url = `https://github.com/${CLONE_OWNER}/${name}.git`
+    const cloned = await run('git', ['clone', ...CLONE_MODES[mode], '--', url, target], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
+    if (cloned.status !== 0) {
+        fs.rmSync(target, { recursive: true, force: true })
+        return refused('clone_failed', `git clone of ${url} failed (${utf8(cloned.stderr).trim().split('\n').at(-1) ?? 'no stderr'}); nothing kept`)
+    }
+    const sha = utf8((await run('git', ['rev-parse', 'HEAD'], { cwd: target })).stdout).trim()
+    const branch = utf8((await run('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: target })).stdout).trim()
+    return ok(`cloned ${url} (${mode})`, [['sha', sha], ['default_branch', branch], ['dest', target]])
+}
+
 // ---------------------------------------------------------------- spool_orphans (spool-orphans.sh)
 
 function rootFrom(value, cwd) {
@@ -1545,6 +1589,16 @@ async function prdReferencesVerb(args) {
 // ---------------------------------------------------------------- registry
 
 export const TRIAGE_VERBS = [
+    {
+        name: 'git-clone',
+        description: 'Clones one AnEntrypoint repository into a scratch directory under /config/tmp (replaces a raw git clone). repo is AnEntrypoint/<name> or its https://github.com URL; any other owner is refused. dest is resolved under /config/tmp and must not exist yet. mode: blobless (default, --filter=blob:none), shallow (--depth 1) or full. Reply: sha (cloned HEAD), default_branch and dest. The clone is recorded in the dispatch ledger.',
+        inputSchema: {
+            repo: z.string().describe('AnEntrypoint/<name>, or https://github.com/AnEntrypoint/<name>(.git).'),
+            dest: z.string().describe('Directory under /config/tmp to create; relative paths resolve under /config/tmp.'),
+            mode: z.enum(['blobless', 'shallow', 'full']).optional().describe('blobless (default): partial clone without blobs. shallow: depth 1. full: complete history.'),
+        },
+        handler: toolReply('git-clone', gitClone),
+    },
     {
         name: 'writer_lock',
         description: 'Writer lock for one checkout (replaces scripts/triage/writer-lock.sh). action take takes <cwd>/.gm/locks/<repo>.writer for session; release drops it only for its holder; status prints the holder or free; check fetches origin/main and reports "<repo>: dirty=N ahead=M" (dirty counts porcelain paths except unstaged .gm/dream-rsi deletions; exit 1 when not clean); quarantine_stale moves a lock whose holder has no live process, with no git write running, into a dated quarantine directory and never deletes. Reply: ok, exit_code, result (the script line), fields, and error_code on a refusal: held, not_holder, not_clean, git_write_live, holder_live, holder_changed, process_table_unreadable. A refusal returns as data with ok: false; a usage error throws.',
