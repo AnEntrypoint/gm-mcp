@@ -433,6 +433,21 @@ function fsReadFitReply(out, replyCap, toYaml) {
         if (renderVerbatimFileText(cutAt(mid), toYaml).length <= replyCap) low = mid
         else high = mid - 1
     }
+    if (low === 1 && renderVerbatimFileText(cutAt(1), toYaml).length > replyCap) {
+        // One line longer than the cap: cut it by characters, so the reply keeps verbatim text and marks the line partial.
+        const cutChars = (count) => {
+            const fields = { [key]: lines[0].slice(0, count), start_line: start, end_line: start, returned_lines: 1, total_lines: total, has_more_lines: true, truncated_at_bytes: true, partial_line: true }
+            return { ...out, ...(nested ? { data: { ...body, ...fields } } : fields), truncated: true }
+        }
+        let lo = 0
+        let hi = lines[0].length
+        while (lo < hi) {
+            const mid = Math.ceil((lo + hi) / 2)
+            if (renderVerbatimFileText(cutChars(mid), toYaml).length <= replyCap) lo = mid
+            else hi = mid - 1
+        }
+        return cutChars(lo)
+    }
     return cutAt(low)
 }
 

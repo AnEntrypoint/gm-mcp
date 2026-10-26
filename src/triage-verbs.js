@@ -544,6 +544,64 @@ async function fetchOrigin(repo, fetchMs) {
     return refused('fetch_failed', `git fetch origin main failed: ${fetchCause(fetched)}; fetch deadline ${seconds} s; nothing pushed; ${resume}`)
 }
 
+const COMPUTED_SKIP_SEGMENTS = ['.git', '.gm', 'node_modules', 'target', 'dist', 'build', 'coverage', '.next']
+
+// Glob to RegExp for the include and exclude lists: * and ? stay inside one path segment, ** crosses segments.
+function globRegExp(glob) {
+    let source = ''
+    for (let i = 0; i < glob.length; i++) {
+        const c = glob[i]
+        if (c === '*' && glob[i + 1] === '*') {
+            if (glob[i + 2] === '/') {
+                source += '(?:.*/)?'
+                i += 2
+            } else {
+                source += '.*'
+                i += 1
+            }
+        } else if (c === '*') source += '[^/]*'
+        else if (c === '?') source += '[^/]'
+        else source += c.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    }
+    return new RegExp(`^${source}$`)
+}
+
+function globList(value, name) {
+    if (value === undefined) return []
+    if (!Array.isArray(value) || value.some((glob) => typeof glob !== 'string' || glob === '')) throw usage(`${name} must be an array of non-empty glob strings`)
+    return value.map(globRegExp)
+}
+
+// paths_file: one repo-relative path per line, read directly from a file inside the project root (cwd). Blank lines and # comments are skipped.
+function readPathsFile(value, root) {
+    const file = path.resolve(root, singleLine(value, 'paths_file'))
+    const rel = path.relative(root, file)
+    if (rel === '' || path.isAbsolute(rel) || rel.split(path.sep)[0] === '..') throw usage('paths_file must be a file inside the project root (cwd)')
+    const text = readText(file)
+    if (text === null) throw usage(`paths_file ${value} cannot be read`)
+    return text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== '' && !line.startsWith('#'))
+}
+
+// Tracked files that differ from HEAD in the worktree, plus untracked files not ignored; state (.gm) and regenerable dirs are dropped.
+async function computedChangedSet(args, repo) {
+    const include = globList(args.include, 'include')
+    const exclude = globList(args.exclude, 'exclude')
+    const diffed = await run('git', ['diff', '--name-only', '--no-renames', '-z', 'HEAD'], { cwd: repo })
+    const loose = await run('git', ['ls-files', '-o', '--exclude-standard', '-z'], { cwd: repo })
+    const failed = diffed.status !== 0 ? diffed : loose.status !== 0 ? loose : null
+    if (failed !== null) throw new VerbFault('changed_set_failed', `git could not list the changed set of ${repo}: ${failureReason(failed)}`)
+    const names = new Set(`${utf8(diffed.stdout)}\0${utf8(loose.stdout)}`.split('\0').filter((name) => name !== ''))
+    return [...names].filter((name) => !name.split('/').some((segment) => COMPUTED_SKIP_SEGMENTS.includes(segment)) && (include.length === 0 || include.some((re) => re.test(name))) && !exclude.some((re) => re.test(name))).sort(byBytes)
+}
+
+// The paths a publish lists: paths_file lines, else paths, else the computed changed set (publish_base given, paths omitted).
+async function listedPaths(args, root, repo) {
+    if (args.paths_file !== undefined) return readPathsFile(args.paths_file, root)
+    if (args.paths !== undefined) return args.paths
+    if (args.publish_base === undefined) throw usage('paths, paths_file, or publish_base (which computes the changed set) is required')
+    return computedChangedSet(args, repo)
+}
+
 async function publishOnOrigin(args) {
     const root = rootOf(args)
     const repo = path.resolve(root, singleLine(args.repo_dir, 'repo_dir'))
@@ -551,7 +609,7 @@ async function publishOnOrigin(args) {
     const row = singleLine(args.row, 'row')
     const message = commitMessage(args.message)
     const pins = args.pins ?? {}
-    const paths = [...new Set([...args.paths.map(publishPath), ...Object.keys(pins)])]
+    const paths = [...new Set([...(await listedPaths(args, root, repo)).map(publishPath), ...Object.keys(pins)])]
     // The checker lives in the gm checkout's scripts/; a submodule checkout publishes with that root as cwd, or with its own scripts/.
     const checkerIn = (base) => path.join(base, 'scripts', 'check-staged-secrets.mjs')
     const checker = [root, repo].map(checkerIn).find(isFile) ?? checkerIn(root)
@@ -1792,15 +1850,18 @@ export const TRIAGE_VERBS = [
     },
     {
         name: 'publish_on_origin',
-        description: 'Publishes the listed paths of repo_dir onto origin/main as one commit, without touching its working tree, index or local main (replaces scripts/triage/publish-on-origin.sh). Steps: fetch origin main; build a temporary index from origin/main; three-way merge each listed file (base = the fork point: merge-base(HEAD, origin/main), or merge-base(HEAD, publish_base) when publish_base is given and is not origin/main; theirs = origin/main; ours = the lane file; a conflict refuses with its path and line span; a path origin deleted refuses unless the lane left it unchanged); regenerate skills/manifest.sha256 when a skills/ path is listed; commit-tree with "Row: <row>"; refuse a commit that changes any path outside the list; run <cwd>/scripts/check-staged-secrets.mjs on that index; push sha:refs/heads/main; confirm the sha is on origin/main. dry_run stops before the push. Reply: ok, exit_code, result, commit, then the last three diff stat lines. Refusals return as data with error_code: fetch_timeout, fetch_failed (with the transport cause), merge_conflict, no_merge_base (publish_base and HEAD share no ancestor), unintended_paths, secrets_check_failed, push_refused, not_on_origin and others; nothing is pushed on a refusal.',
+        description: 'Publishes the listed paths of repo_dir onto origin/main (listed by paths, by paths_file, or, with publish_base and no paths, by the computed changed set: HEAD against the worktree plus untracked files, minus .git, .gm and regenerable dirs, filtered by include and exclude globs) as one commit, without touching its working tree, index or local main (replaces scripts/triage/publish-on-origin.sh). Steps: fetch origin main; build a temporary index from origin/main; three-way merge each listed file (base = the fork point: merge-base(HEAD, origin/main), or merge-base(HEAD, publish_base) when publish_base is given and is not origin/main; theirs = origin/main; ours = the lane file; a conflict refuses with its path and line span; a path origin deleted refuses unless the lane left it unchanged); regenerate skills/manifest.sha256 when a skills/ path is listed; commit-tree with "Row: <row>"; refuse a commit that changes any path outside the list; run <cwd>/scripts/check-staged-secrets.mjs on that index; push sha:refs/heads/main; confirm the sha is on origin/main. dry_run stops before the push. Reply: ok, exit_code, result, commit, then the last three diff stat lines. Refusals return as data with error_code: fetch_timeout, fetch_failed (with the transport cause), merge_conflict, no_merge_base (publish_base and HEAD share no ancestor), unintended_paths, secrets_check_failed, push_refused, not_on_origin and others; nothing is pushed on a refusal.',
         inputSchema: {
             repo_dir: z.string().describe('Checkout whose files are published: an absolute path, or relative to cwd.'),
             row: z.string().describe('Row id, written into the commit as "Row: <row>".'),
             message: z.string().describe('Commit subject and body.'),
-            paths: z.array(z.string()).min(1).describe('Repository-relative paths the lane edited. Each must exist as a file (published), be a submodule pin in the index or HEAD of the lane (published as that commit sha at mode 160000), or be absent (removed from the index unless origin/main pins it as a submodule, which is then left alone).'),
+            paths: z.array(z.string()).optional().describe('Repository-relative paths the lane edited. Omit with publish_base to publish the computed changed set; omit with paths_file too. Each must exist as a file (published), be a submodule pin in the index or HEAD of the lane (published as that commit sha at mode 160000), or be absent (removed from the index unless origin/main pins it as a submodule, which is then left alone).'),
             pins: z.record(z.string(), z.string().regex(/^[0-9a-f]{40}$/)).optional().describe('Submodule pins to advance: a map of submodule path to the full 40-hex sha of its commit on that submodule\'s origin/main. Each path is published as that sha at mode 160000 and is added to paths; a sha that is not on that origin/main refuses the publish.'),
             publish_base: z.string().optional().describe('The commit the lane\'s copy was made from (a sha or ref). The base is merge-base(HEAD, publish_base): publish_base itself when it is an ancestor of HEAD, otherwise their common ancestor. origin/main is never the base: a publish_base that resolves to the origin/main tip is ignored and the base stays the fork point. Default: merge-base(HEAD, origin/main).'),
             fetch_timeout_seconds: z.number().int().min(FETCH_TIMEOUT_MIN_S).max(FETCH_TIMEOUT_MAX_S).optional().describe('Deadline for the origin fetch in seconds, 120 to 600; default 300. A fetch past it replies fetch_timeout with the deadline and the resume state.'),
+            paths_file: z.string().optional().describe('File inside the cwd project root, one repo-relative path per line (blank lines and # comments skipped). Read directly by the verb; replaces paths when given.'),
+            include: z.array(z.string()).optional().describe('Glob list (* ? **) that the computed changed set must match. Used only when paths and paths_file are omitted.'),
+            exclude: z.array(z.string()).optional().describe('Glob list the computed changed set must not match. Used only when paths and paths_file are omitted.'),
             dry_run: z.boolean().optional().describe('Build and check the commit, then stop before the push.'),
             witness: z.string().optional().describe('Dispatch id of the live witness that closes the row: must appear in the .gm/exec-spool/.dispatch-ledger.json of repo_dir or of cwd. Required when this publish closes a row (a status is given, or the row file under .gm/prd/ is removed). A closing publish keeps the row file in repo_dir: its commit removes it from origin.'),
             status: z.enum(['resolved', 'stale']).optional().describe('Status the closing commit records. Required with witness.'),
