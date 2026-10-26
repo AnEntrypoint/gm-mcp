@@ -550,7 +550,8 @@ async function publishOnOrigin(args) {
     if (!isDirectory(repo)) return refused('repo_missing', `${repo} is not a directory; nothing pushed`)
     const row = singleLine(args.row, 'row')
     const message = commitMessage(args.message)
-    const paths = args.paths.map(publishPath)
+    const pins = args.pins ?? {}
+    const paths = [...new Set([...args.paths.map(publishPath), ...Object.keys(pins)])]
     // The checker lives in the gm checkout's scripts/; a submodule checkout publishes with that root as cwd, or with its own scripts/.
     const checkerIn = (base) => path.join(base, 'scripts', 'check-staged-secrets.mjs')
     const checker = [root, repo].map(checkerIn).find(isFile) ?? checkerIn(root)
@@ -571,10 +572,17 @@ async function publishOnOrigin(args) {
     if (unreachable !== null) return refused(unreachable.code, `${unreachable.cause}; nothing pushed; resume state: none`)
     const fetchRefusal = await fetchOrigin(repo, fetchMs)
     if (fetchRefusal !== null) return fetchRefusal
+    for (const [pinPath, sha] of Object.entries(pins)) {
+        const sub = path.join(repo, pinPath)
+        if (!isDirectory(sub)) return refused('pin_missing', `submodule ${pinPath} is not checked out at ${sub}; nothing pushed`)
+        await run('git', ['fetch', '-q', 'origin', 'main'], { cwd: sub, env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
+        if (utf8((await run('git', ['cat-file', '-t', sha], { cwd: sub })).stdout).trim() !== 'commit') return refused('pin_unknown', `${sha} is not a commit in submodule ${pinPath}; nothing pushed`)
+        if ((await run('git', ['merge-base', '--is-ancestor', sha, 'origin/main'], { cwd: sub })).status !== 0) return refused('pin_not_on_main', `${sha} is not on origin/main of submodule ${pinPath}; nothing pushed`)
+    }
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-publish-'))
     try {
         const givenBase = typeof args.publish_base === 'string' && args.publish_base !== '' ? args.publish_base : null
-        return await publishLane({ repo, row, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, trailers, closeRow, fetchMs })
+        return await publishLane({ repo, row, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, trailers, closeRow, fetchMs, pins })
     } finally {
         fs.rmSync(work, { recursive: true, force: true })
     }
@@ -619,7 +627,7 @@ async function rebaseCommitOntoTip({ repo, commit, row, message, paths, checker,
     return { sha, stat }
 }
 
-async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [], closeRow = null, fetchMs = FETCH_TIMEOUT_DEFAULT_S * 1000 }) {
+async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [], closeRow = null, fetchMs = FETCH_TIMEOUT_DEFAULT_S * 1000, pins = {} }) {
     const plain = (gitArgs, extra = {}) => run('git', gitArgs, { cwd: repo, ...extra })
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'index') }
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
@@ -650,7 +658,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
             if ((await indexed(['update-index', '--force-remove', p])).status !== 0) return refused('index_failed', `update-index failed for ${p}; nothing pushed`)
             continue
         }
-        const lanePin = gitlinkOf(await plain(['ls-files', '-s', '--', p])) ?? gitlinkOf(await plain(['ls-tree', 'HEAD', '--', p]))
+        const lanePin = Object.hasOwn(pins, p) ? pins[p] : gitlinkOf(await plain(['ls-files', '-s', '--', p])) ?? gitlinkOf(await plain(['ls-tree', 'HEAD', '--', p]))
         const basePin = gitlinkOf(await plain(['ls-tree', base, '--', p]))
         const originPin = gitlinkOf(await indexed(['ls-files', '-s', '--', p]))
         if (lanePin !== null) {
@@ -1787,6 +1795,7 @@ export const TRIAGE_VERBS = [
             row: z.string().describe('Row id, written into the commit as "Row: <row>".'),
             message: z.string().describe('Commit subject and body.'),
             paths: z.array(z.string()).min(1).describe('Repository-relative paths the lane edited. Each must exist as a file (published), be a submodule pin in the index or HEAD of the lane (published as that commit sha at mode 160000), or be absent (removed from the index unless origin/main pins it as a submodule, which is then left alone).'),
+            pins: z.record(z.string(), z.string().regex(/^[0-9a-f]{40}$/)).optional().describe('Submodule pins to advance: a map of submodule path to the full 40-hex sha of its commit on that submodule\'s origin/main. Each path is published as that sha at mode 160000 and is added to paths; a sha that is not on that origin/main refuses the publish.'),
             publish_base: z.string().optional().describe('The commit the lane\'s copy was made from (a sha or ref). The base is merge-base(HEAD, publish_base): publish_base itself when it is an ancestor of HEAD, otherwise their common ancestor. origin/main is never the base: a publish_base that resolves to the origin/main tip is ignored and the base stays the fork point. Default: merge-base(HEAD, origin/main).'),
             fetch_timeout_seconds: z.number().int().min(FETCH_TIMEOUT_MIN_S).max(FETCH_TIMEOUT_MAX_S).optional().describe('Deadline for the origin fetch in seconds, 120 to 600; default 300. A fetch past it replies fetch_timeout with the deadline and the resume state.'),
             dry_run: z.boolean().optional().describe('Build and check the commit, then stop before the push.'),
