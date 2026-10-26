@@ -2029,3 +2029,7 @@ export const TRIAGE_VERBS = [
 // so the ledger line names the caller's session.
 const SESSION_ID_FIELD = z.string().optional().describe('Caller session recorded in the dispatch ledger. A gm call supplies its own session when this is omitted.')
 for (const triage of TRIAGE_VERBS) triage.inputSchema.session_id = SESSION_ID_FIELD
+// codemode passes cwd only to schemas that declare it (validatedArgs strips the rest). Without it rootOf throws, callerRoot returns null,
+// and toolReply skips recordTriageDispatch silently, so git-clone and any cwd-less triage verb left no ledger line.
+const TRIAGE_CWD_FIELD = z.string().optional().describe('Project root (gm checkout) whose .gm/exec-spool/.dispatch-ledger.json records this dispatch.')
+for (const triage of TRIAGE_VERBS) triage.inputSchema.cwd ??= TRIAGE_CWD_FIELD

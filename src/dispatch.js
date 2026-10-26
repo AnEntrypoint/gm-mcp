@@ -3148,11 +3148,43 @@ function rowCloseCommitRecorded(root, id) {
     return submoduleDirs(root).some((dir) => trailerLogHas(dir, 'origin/main', id))
 }
 
+// A stale close records a refuted premise, not a content change, so it needs no closing commit. It is accepted only when its witness
+// is a ledgered dispatch of this project and its resolution states the refutation. A resolved close still needs the commit trailer.
+function ledgerHasDispatch(root, dispatchId) {
+    let text
+    try {
+        text = readFileSync(`${root}/.gm/exec-spool/.dispatch-ledger.json`, 'utf8')
+    } catch {
+        return false
+    }
+    return text.split('\n').some((line) => {
+        if (!line.includes(dispatchId)) return false
+        try {
+            const entry = JSON.parse(line)
+            return entry.dispatch_id === dispatchId && 'verb' in entry
+        } catch {
+            return false
+        }
+    })
+}
+
+function refutedStaleClose(args) {
+    if (args?.verb !== 'prd-resolve' && args?.verb !== 'prd-close') return false
+    const body = args?.body
+    if (!isPlainObject(body) || body.status !== 'stale') return false
+    if (typeof body.resolution !== 'string' || !/refut/i.test(body.resolution)) return false
+    const witness = typeof body.witness_dispatch_id === 'string' ? body.witness_dispatch_id.trim() : ''
+    if (witness === '') return false
+    const resolved = resolveDispatchRoot(args?.cwd ?? body.cwd)
+    if (resolved.error || !resolved.root) return false
+    return ledgerHasDispatch(resolved.root, witness)
+}
+
 function closeTrailerRefusal(args) {
     const id = closeRowId(args)
     const resolved = resolveDispatchRoot(args?.cwd)
     if (id === null || resolved.error || !resolved.root) return null
-    if (rowCloseCommitRecorded(resolved.root, id)) return null
+    if (refutedStaleClose(args) || rowCloseCommitRecorded(resolved.root, id)) return null
     const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
     return yaml.dump({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'close_commit_required', refused: true, error: `${args.verb} refused: row ${id} has no closing commit in the store's log. Commit the close with publish_on_origin (witness and status set) so its body carries ${CLOSE_TRAILERS}; nothing was closed.`, trailers_required: ['Row', 'Witness', 'Status'] }, { lineWidth: 100 })
 }
