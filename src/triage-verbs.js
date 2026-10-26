@@ -304,20 +304,47 @@ async function writerLock(args) {
 
     if (action === 'check') {
         const checkout = repo === 'gm' ? root : path.join(root, repo)
-        const fetched = await run('git', ['fetch', '-q', 'origin', 'main'], { cwd: checkout, env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
-        const fetchState = fetched.status === 0 ? ['fetch', 'ok'] : ['fetch', 'unknown (' + failureReason(fetched) + ')']
-        // Default: untracked content inside a submodule (its .gm/ runtime state) is ignored; a submodule with modified tracked content still counts.
-        const status = await run('git', ['status', '--porcelain', '--ignore-submodules=untracked'], { cwd: checkout })
-        if (status.status !== 0) return refused('status_unknown', repo + ': local status unreadable (' + failureReason(status) + ')', [fetchState])
-        const dirtyLines = utf8(status.stdout).split('\n').filter((line) => line !== '' && !line.startsWith(' D .gm/dream-rsi') && !GM_RUNTIME_UNTRACKED.test(line))
+        const kind = repo === 'gm' ? 'parent' : 'submodule'
+        const where = repo + ' (' + kind + ' checkout ' + checkout + '; git cwd ' + checkout + ')'
+        const place = [['checkout', checkout], ['kind', kind], ['git_cwd', checkout]]
+        // The fetch is retried once and reported on its own line; a fetch error never changes the dirty count.
+        const fetchOnce = () => run('git', ['-C', checkout, 'fetch', '-q', 'origin', 'main'], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
+        let fetched = await fetchOnce()
+        if (fetched.status !== 0) fetched = await fetchOnce()
+        const fetchState = fetched.status === 0 ? ['fetch', 'ok'] : ['fetch', 'error (' + failureReason(fetched) + ') after 2 attempts']
+        const status = await run('git', ['-C', checkout, 'status', '--porcelain', '--ignore-submodules=untracked'], { env: NO_PROMPT })
+        const statusCommand = 'git -C ' + checkout + ' status --porcelain --ignore-submodules=untracked'
+        if (status.status !== 0) return refused('status_unknown', where + ': local status unreadable (' + failureReason(status) + ')', [fetchState, ...place, ['git_command', statusCommand], ['git_cwd_used', checkout], ['git_exit', String(status.status)], ['git_signal', status.signal ?? 'none']])
+        // A submodule line (" M") counts only when the submodule has changes outside its .gm/ runtime state or its HEAD is off the parent pin.
+        const gmRuntimeOnly = async (rel) => {
+            const dir = path.join(checkout, rel)
+            const pinned = await run('git', ['-C', checkout, 'ls-tree', 'HEAD', '--', rel], { env: NO_PROMPT })
+            const head = await run('git', ['-C', dir, 'rev-parse', 'HEAD'], { env: NO_PROMPT })
+            if (pinned.status !== 0 || head.status !== 0) return false
+            if (utf8(pinned.stdout).trim().split(/s+/)[2] !== utf8(head.stdout).trim()) return false
+            const inner = await run('git', ['-C', dir, 'status', '--porcelain', '--ignore-submodules=untracked'], { env: NO_PROMPT })
+            return inner.status === 0 && utf8(inner.stdout).split('\n').filter((line) => line !== '').every((line) => line.slice(3).startsWith('.gm/'))
+        }
+        const entries = utf8(status.stdout).split('\n').filter((line) => line !== '' && !line.startsWith(' D .gm/dream-rsi') && !GM_RUNTIME_UNTRACKED.test(line))
+        const dirtyLines = []
+        const runtimeIgnored = []
+        for (const line of entries) {
+            const rel = line.slice(3)
+            if (kind === 'parent' && line.startsWith(' M ') && await gmRuntimeOnly(rel)) runtimeIgnored.push(rel)
+            else dirtyLines.push(line)
+        }
         const dirty = dirtyLines.length
         const dirtyPaths = dirtyLines.map((line) => `${line.slice(0, 2).trim()} ${line.slice(3)} (${porcelainReason(line.slice(0, 2))})`)
-        const counted = await run('git', ['rev-list', '--left-right', '--count', 'origin/main...HEAD'], { cwd: checkout })
-        const [behind, ahead] = counted.status === 0 ? utf8(counted.stdout).trim().split(/\s+/) : []
-        if (!/^\d+$/.test(ahead ?? '')) return refused('ahead_unknown', repo + ': dirty=' + dirty + ' ahead=unknown (' + failureReason(counted) + ')', [fetchState])
-        const clean = dirty === 0 && ahead === '0'
-        const result = repo + ': dirty=' + dirty + ' ahead=' + ahead + ' behind=' + behind
-        return clean ? ok(result, [fetchState]) : refused('not_clean', dirtyPaths.length ? `${result}; dirty paths: ${dirtyPaths.join('; ')}` : result, [fetchState, ['dirty_paths', dirtyPaths.join(' | ')]])
+        const ignoredField = [['runtime_ignored', runtimeIgnored.length ? runtimeIgnored.join(', ') + ' (only .gm/ changes; ignored by default)' : 'none']]
+        const counted = await run('git', ['-C', checkout, 'rev-list', '--left-right', '--count', 'origin/main...HEAD'], { env: NO_PROMPT })
+        const [behind, ahead] = counted.status === 0 ? utf8(counted.stdout).trim().split(/s+/) : []
+        const aheadKnown = /^d+$/.test(ahead ?? '')
+        const result = where + ': dirty=' + dirty + ' ahead=' + (aheadKnown ? ahead : 'unknown') + ' behind=' + (behind ?? 'unknown')
+        const fields = [fetchState, ...place, ...ignoredField]
+        if (dirty > 0) return refused('not_clean', result + '; dirty paths: ' + dirtyPaths.join('; '), [...fields, ['dirty_paths', dirtyPaths.join(' | ')]])
+        if (!aheadKnown) return refused('ahead_unknown', result + ' (' + failureReason(counted) + ')', fields)
+        if (ahead !== '0') return refused('unpushed', result + '; commits not on origin/main', fields)
+        return ok(result, fields)
     }
 
     if (action === 'quarantine_stale') {
