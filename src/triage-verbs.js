@@ -269,6 +269,18 @@ function porcelainReason(code) {
     return 'changed'
 }
 
+// The checkout a repo name denotes. A name is a submodule only when root/.gitmodules lists that exact path.
+// Otherwise, when root itself holds .git, root is the checkout: never a path nested under a same-named parent.
+function checkoutOf(root, repo) {
+    if (repo === 'gm') return { checkout: root, kind: 'parent' }
+    const nested = path.join(root, repo)
+    const gitmodules = readText(path.join(root, '.gitmodules')) ?? ''
+    const listed = gitmodules.split('\n').some((line) => { const m = line.match(/^\s*path\s*=\s*(.+?)\s*$/); return m !== null && m[1] === repo })
+    if (listed) return { checkout: nested, kind: 'submodule' }
+    if (fs.existsSync(path.join(root, '.git'))) return { checkout: root, kind: 'parent' }
+    return { checkout: nested, kind: 'submodule' }
+}
+
 async function writerLock(args) {
     const root = rootOf(args)
     const action = args.action.replace(/-/g, '_')
@@ -303,8 +315,7 @@ async function writerLock(args) {
     if (action === 'status') return ok(readHolder(lock) ?? 'free', [['repo', repo]])
 
     if (action === 'check') {
-        const checkout = repo === 'gm' ? root : path.join(root, repo)
-        const kind = repo === 'gm' ? 'parent' : 'submodule'
+        const { checkout, kind } = checkoutOf(root, repo)
         const where = repo + ' (' + kind + ' checkout ' + checkout + '; git cwd ' + checkout + ')'
         const place = [['checkout', checkout], ['kind', kind], ['git_cwd', checkout]]
         // The fetch is retried once and reported on its own line; a fetch error never changes the dirty count.
