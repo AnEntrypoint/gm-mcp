@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { GM_SKILL_BODY } from './skill-verb.js'
 
 const numberLike = z.union([z.number(), z.string()])
 const booleanLike = z.union([z.boolean(), z.string()])
@@ -919,6 +920,7 @@ const REGISTRY_ROWS = [
     { canonical: 'shell' },
     { canonical: 'zsh' },
     { canonical: 'ps1' },
+    { canonical: 'gm_skill', hyphen: true, description: 'The gm skills this bundle carries, answered from the bundle itself: no name lists every skill with its description and installed path, a name returns that skill\'s SKILL.md text paged by line. Use it when a host froze its skill list before gm installed the skills, so no gm skill is visible in this session; the reply is the same text the skill would have loaded.', body: GM_SKILL_BODY },
 ]
 
 export const VERB_TABLE = REGISTRY_ROWS.map((row) => ({

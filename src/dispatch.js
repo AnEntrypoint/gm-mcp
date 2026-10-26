@@ -9,6 +9,7 @@ import path from 'node:path'
 import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import * as yaml from 'js-yaml'
 import { appendDiagnostic } from './server-log.js'
+import { gmSkillReply } from './skill-verb.js'
 import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessAnnouncement } from './bundle-drift.js'
 import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuationReserveFor, continuedReply, setContinuationStopped, withoutContinuationBlock } from './continuation.js'
@@ -3238,6 +3239,11 @@ function projectHealthFields(text, fields) {
 
 export async function gmDispatch(args, signal, responseValueObserver) {
     await preloadVerbTable()
+    // gm-skill never reaches the runner: the skills ride in this bundle, so a session whose host enumerated its
+    // skill roots before gm wrote them can still read them.
+    if (args?.verb === 'gm_skill' || args?.verb === 'gm-skill') {
+        return gmSkillReply({ body: isPlainObject(args?.body) ? args.body : {}, maxChars: typeof args?.max_chars === 'number' ? args.max_chars : undefined })
+    }
     const quiet = prdAddQuiet(args)
     const healthFields = healthFieldsOf(args)
     if (quiet) args = { ...args, body: withoutBodyKey(args.body, 'quiet') }
