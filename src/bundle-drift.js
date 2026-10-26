@@ -143,9 +143,10 @@ export function bundleDrift({ transport } = {}) {
         installed_version: installedState?.version ?? null,
         installed_sha256: installedState?.sha256 ?? null,
     }
-    if (!installedState) return { ...base, stale: false, reloadable: false, refusal: { code: 'installed-bundle-absent', reason: `${runningState.path} is not readable` } }
+    if (!installedState) return { ...base, stale: false, stale_reason: null, reloadable: false, refusal: { code: 'installed-bundle-absent', reason: `${runningState.path} is not readable` } }
     const stale = runningState.sha256 !== installedState.sha256
-    if (!stale) return { ...base, stale: false, reloadable: false, refusal: null }
+    const stale_reason = !stale ? null : installedState.version === runningState.version ? 'sha' : 'version'
+    if (!stale) return { ...base, stale: false, stale_reason, reloadable: false, refusal: null }
     const refused = reloadRefusal(runningState, installedState)
     const unhanded = refused.code === null && !HANDOVER_TRANSPORTS.has(kind)
         ? { code: 'no-handover', reason: `a ${kind} server cannot replace itself without dropping its client, so a relaunch serves the installed bundle` }
@@ -154,6 +155,7 @@ export function bundleDrift({ transport } = {}) {
     return {
         ...base,
         stale: true,
+        stale_reason,
         reloadable: refusal.code === null,
         refusal_code: refusal.code,
         refusal_reason: refusal.reason,
@@ -221,6 +223,7 @@ export function bundleHealthBlock(state = bundleDrift()) {
         installed_version: state.installed_version,
         installed_sha256: shortHash(state.installed_sha256),
         stale: state.stale === true,
+        stale_reason: state.stale_reason ?? null,
         reloadable: state.reloadable === true,
         refusal: state.refusal_code ?? null,
     }

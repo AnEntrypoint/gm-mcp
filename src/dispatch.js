@@ -2847,7 +2847,7 @@ function bundleNoticeTail(verb, drift) {
     const installedPath = drift.installed_path ?? drift.path
     const block = yaml.dump({
         bundle_stale: true,
-        bundle_stale_reason: drift.installed_version === drift.running_version ? 'sha-only (same version, rebuilt bundle)' : 'version-differs',
+        bundle_stale_reason: drift.stale_reason ?? null,
         bundle_served_version: drift.running_version,
         bundle_served_sha: drift.running_sha256,
         bundle_installed_version: drift.installed_version,
@@ -3183,6 +3183,9 @@ function healthBundleFields(drift) {
         bundle_served_version: drift.running_version,
         bundle_installed_version: drift.installed_version,
         bundle_stale: drift.stale === true,
+        bundle_stale_reason: drift.stale_reason ?? null,
+        bundle_served_sha: drift.running_sha256 ? drift.running_sha256.slice(0, 12) : null,
+        bundle_installed_sha: drift.installed_sha256 ? drift.installed_sha256.slice(0, 12) : null,
         bundle_served_path: drift.path ?? null,
         bundle_installed_path: drift.installed_path ?? null,
     }
