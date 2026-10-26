@@ -255,6 +255,11 @@ async function measuredTable() {
 
 const GM_RUNTIME_UNTRACKED = /^\?\? \.(gm|agentplug|agentplug-kv)\//;
 
+async function fastForwardsOrigin(dir, originPin, lanePin) {
+    const r = await run('git', ['merge-base', '--is-ancestor', originPin, lanePin], { cwd: dir, env: NO_PROMPT })
+    return r.status === 0
+}
+
 function porcelainReason(code) {
     if (code === '??') return 'untracked'
     if (code === 'UU' || code.includes('U')) return 'conflicted'
@@ -745,7 +750,8 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
         const originPin = gitlinkOf(await indexed(['ls-files', '-s', '--', p]))
         if (lanePin !== null) {
             if (lanePin === basePin || lanePin === originPin) continue
-            if (originPin !== null && originPin !== basePin) { conflicts.push({ path: p, cause: `submodule moved on origin/main to ${originPin}; the lane pins ${lanePin}` }); continue }
+            // origin's pin moved past the fork point: the lane's pin wins when it descends from origin's pin (a fast-forward), since the bump only moves forward.
+            if (originPin !== null && originPin !== basePin && !(await fastForwardsOrigin(path.join(repo, p), originPin, lanePin))) { conflicts.push({ path: p, cause: `submodule moved on origin/main to ${originPin}; the lane pins ${lanePin}, which does not descend from it` }); continue }
             if ((await indexed(['update-index', '--add', '--cacheinfo', `160000,${lanePin},${p}`])).status !== 0) return refused('index_failed', `update-index failed for ${p}; nothing pushed`)
             continue
         }
