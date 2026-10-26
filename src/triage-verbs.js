@@ -14,6 +14,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { lastTableError, readProcessTableAsync } from './process-table.js'
 import { appendDiagnostic } from './server-log.js'
@@ -211,6 +212,14 @@ function writeAtomic(file, data) {
 
 function utcStamp(now = new Date()) {
     return now.toISOString().slice(0, 19).replace(/[-:]/g, '')
+}
+
+function gmInstallRoot() {
+    let found = null
+    for (let dir = path.dirname(fileURLToPath(import.meta.url)); ; dir = path.dirname(dir)) {
+        if (isFile(path.join(dir, 'scripts', 'check-staged-secrets.mjs'))) found = dir
+        if (path.dirname(dir) === dir) return found ?? dir
+    }
 }
 
 function rootOf(args) {
@@ -612,7 +621,8 @@ async function publishOnOrigin(args) {
     const paths = [...new Set([...(await listedPaths(args, root, repo)).map(publishPath), ...Object.keys(pins)])]
     // The checker lives in the gm checkout's scripts/; a submodule checkout publishes with that root as cwd, or with its own scripts/.
     const checkerIn = (base) => path.join(base, 'scripts', 'check-staged-secrets.mjs')
-    const checker = [root, repo].map(checkerIn).find(isFile) ?? checkerIn(root)
+    const gmRoot = gmInstallRoot()
+    const checker = [gmRoot, repo].map(checkerIn).find(isFile) ?? checkerIn(gmRoot)
     const rowRel = path.posix.join('.gm', 'prd', path.basename(rowFileOf(repo, row)))
     const store = fs.existsSync(rowFileOf(repo, row)) ? repo : root
     const removedRowFile = paths.some((p) => p.startsWith('.gm/prd/') && p.includes(row) && !isFile(path.join(repo, p)))
@@ -1865,7 +1875,7 @@ export const TRIAGE_VERBS = [
             dry_run: z.boolean().optional().describe('Build and check the commit, then stop before the push.'),
             witness: z.string().optional().describe('Dispatch id of the live witness that closes the row: must appear in the .gm/exec-spool/.dispatch-ledger.json of repo_dir or of cwd. Required when this publish closes a row (a status is given, or the row file under .gm/prd/ is removed). A closing publish keeps the row file in repo_dir: its commit removes it from origin.'),
             status: z.enum(['resolved', 'stale']).optional().describe('Status the closing commit records. Required with witness.'),
-            cwd: z.string().optional().describe('gm checkout root: the secrets checker is read from <cwd>/scripts. Required. The row store is <repo_dir>/.gm/prd when that holds the row, else <cwd>/.gm/prd. The witness ledger is read from <repo_dir>/.gm or <cwd>/.gm.'),
+            cwd: z.string().optional().describe('gm checkout root. Required. The secrets checker is read from the gm install (scripts/check-staged-secrets.mjs), else from repo_dir. The row store is <repo_dir>/.gm/prd when that holds the row, else <cwd>/.gm/prd. The witness ledger is read from <repo_dir>/.gm or <cwd>/.gm.'),
         },
         handler: toolReply('publish_on_origin', publishOnOrigin),
     },
