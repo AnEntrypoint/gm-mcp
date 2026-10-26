@@ -3127,13 +3127,25 @@ function closeReferenceRefusal(args) {
 // A close is recorded by a commit in the store's log whose body carries Row, Witness and Status trailers (publish_on_origin writes them).
 const CLOSE_TRAILERS = 'Row: <id>, Witness: <dispatch id>, Status: resolved|stale'
 
-function rowCloseCommitRecorded(root, id) {
-    const log = runGit(root, ['log', '--format=%B%x1e', '--fixed-strings', `--grep=Row: ${id}`, '-n', '500'])
+function trailerLogHas(dir, ref, id) {
+    const log = runGit(dir, ['log', ref, '--format=%B%x1e', '--fixed-strings', `--grep=Row: ${id}`, '-n', '500'])
     if (!log.ok) return false
     return log.out.split('\x1e').some((body) => {
         const lines = body.split('\n').map((line) => line.trim())
         return lines.includes(`Row: ${id}`) && lines.some((line) => /^Witness: \S/.test(line)) && lines.some((line) => /^Status: (resolved|stale)$/.test(line))
     })
+}
+
+function submoduleDirs(root) {
+    const cfg = runGit(root, ['config', '--file', '.gitmodules', '--get-regexp', '^submodule\\..*\\.path$'])
+    if (!cfg.ok) return []
+    return cfg.out.split('\n').map((line) => line.slice(line.indexOf(' ') + 1)).filter(Boolean).map((rel) => `${root}/${rel}`)
+}
+
+// The parent's HEAD log, or any submodule's origin/main log: a close committed inside a submodule is recorded there.
+function rowCloseCommitRecorded(root, id) {
+    if (trailerLogHas(root, 'HEAD', id)) return true
+    return submoduleDirs(root).some((dir) => trailerLogHas(dir, 'origin/main', id))
 }
 
 function closeTrailerRefusal(args) {
