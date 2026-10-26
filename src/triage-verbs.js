@@ -675,6 +675,8 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
             const ours = fs.readFileSync(full)
             const fork = from.status === 0 ? from.stdout : null
             const onOrigin = theirs.status === 0 ? theirs.stdout : null
+            // A gitignored path that origin/main and the fork point both lack is local state: it is never staged, so a ledger-only close builds a commit with no tracked change.
+            if (fork === null && onOrigin === null && (await plain(['check-ignore', '-q', '--', p])).status === 0) continue
             if (fork !== null && onOrigin === null) {
                 if (sameBytes(ours, fork)) continue
                 return refused('merge_conflict', `${p} was deleted on origin/main and changed in the lane; nothing pushed`, [['path', p], ['fork', base]])
@@ -739,7 +741,8 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     const unintended = changed.filter((name) => !paths.includes(name) && name !== 'skills/manifest.sha256')
     if (unintended.length > 0) return refused('unintended_paths', 'commit changes paths outside the list; nothing pushed', [['commit', sha]], unintended)
 
-    const scan = noTrackedChange ? { status: 0 } : isFile(checker) ? await run(process.execPath, [checker], { cwd: repo, env: indexEnv }) : refused('checker_missing', `secrets checker not found at ${checker}; nothing pushed`)
+    if (!noTrackedChange && !isFile(checker)) return refused('checker_missing', `secrets checker not found at ${checker}; nothing pushed`)
+    const scan = noTrackedChange ? { status: 0 } : await run(process.execPath, [checker], { cwd: repo, env: indexEnv })
     if (scan.status !== 0) {
         const output = `${utf8(scan.stdout)}\n${utf8(scan.stderr)}`.split('\n').filter((line) => line.trim() !== '')
         return refused('secrets_check_failed', 'secrets check failed; nothing pushed', [['commit', sha], ['secrets', output.at(-1) ?? '']])

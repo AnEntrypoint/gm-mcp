@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.341 - publish_on_origin ledger-only closes commit their trailers
+
+`publish_on_origin` no longer crashes with `internal` (`Cannot read properties of undefined (reading 'toString')`) when a publish has no tracked change and the secrets checker is absent. A gitignored path that neither the fork point nor origin/main holds is local state: it is skipped, never staged, so a ledger-only close (`Witness` and `Status` trailers, no file change) commits its trailers. A real change with no checker refuses `checker_missing` with a clear message instead. `BUNDLE_VERSION` and `package.json` move to 0.2.341.
+
 ## 0.2.339 - publish_base merges from the fork point, an empty fs_write replacement is a blank line
 
 `publish_on_origin` no longer refuses a `publish_base` that is not an ancestor of HEAD. The three-way base is `merge-base(HEAD, publish_base)`, which is `publish_base` itself when it is an ancestor; only a pair with no common ancestor refuses (`no_merge_base`, naming both shas). `fs_write` exact-line form: an empty `replacement` puts one blank line in `startLine..endLine` (it used to delete them), and `delete: true` removes the range and reads no replacement. A trailing newline is still not doubled. `BUNDLE_VERSION` and `package.json` move to 0.2.339.
