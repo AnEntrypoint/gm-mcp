@@ -16,7 +16,7 @@ import { bindSpoolDispatch, closeRowId, ensureReferenceGate, prdAddQuiet, readRo
 import { prdFeedFor } from './prd-feed.js'
 import { bootstrapReply } from './live-state.js'
 import { maybeStartDevSync } from './dev-sync.js'
-import { gitToplevel, runGit } from './git-adapter.js'
+import { gitToplevel, recoverStaleIndexLock, runGit } from './git-adapter.js'
 import { sweepOrphansAfterRespawn } from './triage-verbs.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { execFile } from './process-port.js'
@@ -747,6 +747,37 @@ async function planGitAdd(args) {
 function withGitAddNote(text, note) {
     if (note === null || typeof text !== 'string' || text.trimStart().startsWith('{')) return text
     return `${text.endsWith('\n') ? text : text + '\n'}git_add_staged: ${note.staged}\ngit_add_skipped_excluded_or_transient: ${note.skipped}\n`
+}
+
+const GIT_READ_VERBS = new Set(['git_status', 'git_log', 'git_diff', 'git_show', 'git_poll', 'git_fetch', 'git_remote', 'git_worktree_list', 'git_stash_list'])
+
+function withIndexLockNote(text, note) {
+    if (note === null || typeof text !== 'string' || text.trimStart().startsWith('{')) return text
+    return `${text.endsWith('\n') ? text : text + '\n'}git_index_lock_quarantined: ${note}\n`
+}
+
+function indexLockTargets(args) {
+    const scope = resolveDispatchRoot(args?.cwd)
+    if (scope.error || !scope.root) return []
+    const body = isPlainObject(args?.body) ? args.body : {}
+    const named = [body.cwd, body.repo_dir].filter((value) => typeof value === 'string' && value.trim() !== '')
+    return [...new Set([scope.root, ...named.map((value) => path.resolve(scope.root, value.trim()))])]
+}
+
+function guardStaleIndexLocks(args) {
+    if (typeof args?.verb !== 'string' || !args.verb.startsWith('git_') || GIT_READ_VERBS.has(args.verb)) return { refusal: null, note: null }
+    const notes = []
+    for (const target of indexLockTargets(args)) {
+        const lock = recoverStaleIndexLock(target)
+        if (lock.state === 'quarantined') {
+            notes.push(`${lock.lock} was a stale 0-byte index.lock (${Math.round(lock.age_ms / 60000)} min old, no holder), moved to ${lock.quarantined}`)
+            appendDiagnostic('index-lock-quarantined', { verb: args.verb, lock: lock.lock, quarantined: lock.quarantined, age_ms: lock.age_ms })
+        } else if (lock.state === 'refused') {
+            appendDiagnostic('index-lock-refused', { verb: args.verb, lock: lock.lock, reason: lock.reason, owners: lock.owners })
+            return { refusal: yaml.dump({ ok: false, verb: args.verb, error_code: 'index_lock_held', lock: lock.lock, reason: lock.reason, size: lock.size, age_ms: lock.age_ms, owners: lock.owners, hint: 'a git process holds this index.lock, or it is under 1 h old or non-empty so it cannot be judged stale; nothing was changed. Re-dispatch once that writer finishes.' }, { lineWidth: 100 }), note: null }
+        }
+    }
+    return { refusal: null, note: notes.length > 0 ? notes.join('; ') : null }
 }
 
 export function shapeGitDiffReply(verb, body, out) {
@@ -3225,6 +3256,10 @@ export async function gmDispatch(args, signal, responseValueObserver) {
         args = planned.args
         gitAddNote = planned.note ?? null
     }
+    let indexLockNote = null
+    const indexLockGate = guardStaleIndexLocks(args)
+    if (indexLockGate.refusal !== null) return indexLockGate.refusal
+    indexLockNote = indexLockGate.note
     if (args?.verb === CONTINUATION_STOP_VERB) {
         const key = continuationKeyOf(args)
         setContinuationStopped(key, true)
@@ -3251,7 +3286,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
         const waits = CI_STATUS_VERBS.has(args?.verb) && isPlainObject(args?.body) && args.body.wait === true
         const polled = waits ? await runCiStatusWithWait(args, signal, responseValueObserver) : await runDispatch(args, signal, responseValueObserver)
         const raw = CI_STATUS_VERBS.has(args?.verb) ? await withFailingJobLogs(args, polled, signal, responseValueObserver) : polled
-        const healthed = args?.verb === 'health' ? withHealthBundleFields(raw) : withGitAddNote(raw, gitAddNote)
+        const healthed = args?.verb === 'health' ? withHealthBundleFields(raw) : withIndexLockNote(withGitAddNote(raw, gitAddNote), indexLockNote)
         const reply = withStaleBundleNotice(args?.verb, projectHealthFields(healthed, healthFields), sessionId)
         if (typeof reply === 'string') replyDispatchId = /^dispatch_id: (\S+)/m.exec(reply)?.[1] ?? null
         if (VERBATIM_REPLY_VERBS.has(args?.verb)) return reply
