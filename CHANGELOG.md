@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.2.341 - publish_on_origin ledger-only closes commit their trailers
+## 0.2.343 - fs_write exact-line form witnessed live
+
+fs_write with path, startLine, endLine and replacement replaces exactly those lines and refuses out-of-range bounds (witness dispatch 1793048351089-1283-3a2a3460f4e2b002; served bundle b6e9bf590260).
 
 `publish_on_origin` no longer crashes with `internal` (`Cannot read properties of undefined (reading 'toString')`) when a publish has no tracked change and the secrets checker is absent. A gitignored path that neither the fork point nor origin/main holds is local state: it is skipped, never staged, so a ledger-only close (`Witness` and `Status` trailers, no file change) commits its trailers. A real change with no checker refuses `checker_missing` with a clear message instead. `BUNDLE_VERSION` and `package.json` move to 0.2.341.
 
