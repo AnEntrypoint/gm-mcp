@@ -321,7 +321,7 @@ async function writerLock(args) {
             const pinned = await run('git', ['-C', checkout, 'ls-tree', 'HEAD', '--', rel], { env: NO_PROMPT })
             const head = await run('git', ['-C', dir, 'rev-parse', 'HEAD'], { env: NO_PROMPT })
             if (pinned.status !== 0 || head.status !== 0) return false
-            if (utf8(pinned.stdout).trim().split(/s+/)[2] !== utf8(head.stdout).trim()) return false
+            if (utf8(pinned.stdout).trim().split(/\s+/)[2] !== utf8(head.stdout).trim()) return false
             const inner = await run('git', ['-C', dir, 'status', '--porcelain', '--ignore-submodules=untracked'], { env: NO_PROMPT })
             return inner.status === 0 && utf8(inner.stdout).split('\n').filter((line) => line !== '').every((line) => line.slice(3).startsWith('.gm/'))
         }
@@ -337,8 +337,8 @@ async function writerLock(args) {
         const dirtyPaths = dirtyLines.map((line) => `${line.slice(0, 2).trim()} ${line.slice(3)} (${porcelainReason(line.slice(0, 2))})`)
         const ignoredField = [['runtime_ignored', runtimeIgnored.length ? runtimeIgnored.join(', ') + ' (only .gm/ changes; ignored by default)' : 'none']]
         const counted = await run('git', ['-C', checkout, 'rev-list', '--left-right', '--count', 'origin/main...HEAD'], { env: NO_PROMPT })
-        const [behind, ahead] = counted.status === 0 ? utf8(counted.stdout).trim().split(/s+/) : []
-        const aheadKnown = /^d+$/.test(ahead ?? '')
+        const [behind, ahead] = counted.status === 0 ? utf8(counted.stdout).trim().split(/\s+/) : []
+        const aheadKnown = /^\d+$/.test(ahead ?? '')
         const result = where + ': dirty=' + dirty + ' ahead=' + (aheadKnown ? ahead : 'unknown') + ' behind=' + (behind ?? 'unknown')
         const fields = [fetchState, ...place, ...ignoredField]
         if (dirty > 0) return refused('not_clean', result + '; dirty paths: ' + dirtyPaths.join('; '), [...fields, ['dirty_paths', dirtyPaths.join(' | ')]])
