@@ -255,6 +255,15 @@ async function measuredTable() {
 
 const GM_RUNTIME_UNTRACKED = /^\?\? \.(gm|agentplug|agentplug-kv)\//;
 
+function porcelainReason(code) {
+    if (code === '??') return 'untracked'
+    if (code === 'UU' || code.includes('U')) return 'conflicted'
+    if (code.includes('D')) return 'deleted'
+    if (code.includes('A')) return 'added'
+    if (code.includes('M')) return 'modified'
+    return 'changed'
+}
+
 async function writerLock(args) {
     const root = rootOf(args)
     const action = args.action.replace(/-/g, '_')
@@ -292,15 +301,18 @@ async function writerLock(args) {
         const checkout = repo === 'gm' ? root : path.join(root, repo)
         const fetched = await run('git', ['fetch', '-q', 'origin', 'main'], { cwd: checkout, env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
         const fetchState = fetched.status === 0 ? ['fetch', 'ok'] : ['fetch', 'unknown (' + failureReason(fetched) + ')']
-        const status = await run('git', ['status', '--porcelain'], { cwd: checkout })
+        // Default: untracked content inside a submodule (its .gm/ runtime state) is ignored; a submodule with modified tracked content still counts.
+        const status = await run('git', ['status', '--porcelain', '--ignore-submodules=untracked'], { cwd: checkout })
         if (status.status !== 0) return refused('status_unknown', repo + ': local status unreadable (' + failureReason(status) + ')', [fetchState])
-        const dirty = utf8(status.stdout).split('\n').filter((line) => line !== '' && !line.startsWith(' D .gm/dream-rsi') && !GM_RUNTIME_UNTRACKED.test(line)).length
+        const dirtyLines = utf8(status.stdout).split('\n').filter((line) => line !== '' && !line.startsWith(' D .gm/dream-rsi') && !GM_RUNTIME_UNTRACKED.test(line))
+        const dirty = dirtyLines.length
+        const dirtyPaths = dirtyLines.map((line) => `${line.slice(0, 2).trim()} ${line.slice(3)} (${porcelainReason(line.slice(0, 2))})`)
         const counted = await run('git', ['rev-list', '--left-right', '--count', 'origin/main...HEAD'], { cwd: checkout })
         const [behind, ahead] = counted.status === 0 ? utf8(counted.stdout).trim().split(/\s+/) : []
         if (!/^\d+$/.test(ahead ?? '')) return refused('ahead_unknown', repo + ': dirty=' + dirty + ' ahead=unknown (' + failureReason(counted) + ')', [fetchState])
         const clean = dirty === 0 && ahead === '0'
         const result = repo + ': dirty=' + dirty + ' ahead=' + ahead + ' behind=' + behind
-        return clean ? ok(result, [fetchState]) : refused('not_clean', result, [fetchState])
+        return clean ? ok(result, [fetchState]) : refused('not_clean', dirtyPaths.length ? `${result}; dirty paths: ${dirtyPaths.join('; ')}` : result, [fetchState, ['dirty_paths', dirtyPaths.join(' | ')]])
     }
 
     if (action === 'quarantine_stale') {
@@ -619,10 +631,10 @@ async function publishOnOrigin(args) {
     const message = commitMessage(args.message)
     const pins = args.pins ?? {}
     const paths = [...new Set([...(await listedPaths(args, root, repo)).map(publishPath), ...Object.keys(pins)])]
-    // The checker lives in the gm checkout's scripts/; a submodule checkout publishes with that root as cwd, or with its own scripts/.
+    // The checker lives in the gm checkout's scripts/ (cwd names that checkout); the install root and repo_dir are fallbacks.
     const checkerIn = (base) => path.join(base, 'scripts', 'check-staged-secrets.mjs')
     const gmRoot = gmInstallRoot()
-    const checker = [gmRoot, repo].map(checkerIn).find(isFile) ?? checkerIn(gmRoot)
+    const checker = [root, gmRoot, repo].map(checkerIn).find(isFile) ?? checkerIn(root)
     const rowRel = path.posix.join('.gm', 'prd', path.basename(rowFileOf(repo, row)))
     const store = fs.existsSync(rowFileOf(repo, row)) ? repo : root
     const removedRowFile = paths.some((p) => p.startsWith('.gm/prd/') && p.includes(row) && !isFile(path.join(repo, p)))
@@ -720,6 +732,8 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     }
     if ((await indexed(['read-tree', 'origin/main'])).status !== 0) return refused('read_tree_failed', 'read-tree failed; nothing pushed')
 
+    // Every conflicting path is collected and refused together, so one reply names them all.
+    const conflicts = []
     for (const [index, p] of paths.entries()) {
         const full = path.join(repo, p)
         if (p === closeRow) {
@@ -731,7 +745,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
         const originPin = gitlinkOf(await indexed(['ls-files', '-s', '--', p]))
         if (lanePin !== null) {
             if (lanePin === basePin || lanePin === originPin) continue
-            if (originPin !== null && originPin !== basePin) return refused('merge_conflict', `submodule ${p} moved on origin/main to ${originPin}; the lane pins ${lanePin}; nothing pushed`)
+            if (originPin !== null && originPin !== basePin) { conflicts.push({ path: p, cause: `submodule moved on origin/main to ${originPin}; the lane pins ${lanePin}` }); continue }
             if ((await indexed(['update-index', '--add', '--cacheinfo', `160000,${lanePin},${p}`])).status !== 0) return refused('index_failed', `update-index failed for ${p}; nothing pushed`)
             continue
         }
@@ -747,14 +761,15 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
             if (fork === null && onOrigin === null && (await plain(['check-ignore', '-q', '--', p])).status === 0) continue
             if (fork !== null && onOrigin === null) {
                 if (sameBytes(ours, fork)) continue
-                return refused('merge_conflict', `${p} was deleted on origin/main and changed in the lane; nothing pushed`, [['path', p], ['fork', base]])
+                conflicts.push({ path: p, cause: 'deleted on origin/main and changed in the lane' })
+                continue
             }
             let merged
             if ((fork === null && onOrigin === null) || [ours, fork, onOrigin].some(isBinary)) {
                 // An add (absent from the fork point and origin/main) or binary content has no line merge: the side changed against the fork point wins whole.
                 if (sameBytes(ours, onOrigin) || sameBytes(fork, onOrigin)) merged = ours
                 else if (sameBytes(ours, fork)) continue
-                else return refused('merge_conflict', `${p} is binary and changed on both the fork point and origin/main; nothing pushed`, [['path', p], ['fork', base]])
+                else { conflicts.push({ path: p, cause: 'binary, changed on both the fork point and origin/main' }); continue }
             } else {
                 fs.writeFileSync(scratch('base'), fork ?? EMPTY)
                 fs.writeFileSync(scratch('theirs'), onOrigin ?? EMPTY)
@@ -763,7 +778,8 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
                 const text = utf8(merge.stdout)
                 if (text.split('\n').some((line) => line.startsWith('<<<<<<<'))) {
                     const hunk = firstConflict(text)
-                    return refused('merge_conflict', `${p} conflicts with origin/main at lines ${hunk.from}-${hunk.to} (fork ${base}); nothing pushed`, [['path', p], ['fork', base]], hunk.lines)
+                    conflicts.push({ path: p, cause: `conflicts with origin/main at lines ${hunk.from}-${hunk.to}` })
+                    continue
                 }
                 if (merge.status !== 0) return refused('merge_failed', `merge-file failed on ${p}; nothing pushed`, [['path', p], ['fork', base]])
                 merged = merge.stdout
@@ -776,6 +792,11 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
         } else if (originPin === null && !isDirectory(full)) {
             if ((await indexed(['update-index', '--force-remove', p])).status !== 0) return refused('index_failed', `update-index failed for ${p}; nothing pushed`)
         }
+    }
+
+    if (conflicts.length > 0) {
+        const list = conflicts.map((c) => `${c.path} (${c.cause})`).join('; ')
+        return refused('merge_conflict', `${conflicts.length} path(s) conflict with origin/main (fork ${base}): ${list}; nothing pushed`, [['fork', base], ['conflicting_paths', conflicts.map((c) => c.path).join(',')]])
     }
 
     if (paths.some((p) => p.startsWith('skills/'))) {
