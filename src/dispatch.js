@@ -3236,6 +3236,14 @@ function healthBundleFields(drift) {
     }
 }
 
+function healthSourceFields(data) {
+    if (typeof data.source_sha !== 'string') return {}
+    return {
+        source_sha_repo: 'rs-plugkit',
+        source_sha_note: 'the rs-plugkit wasm build commit; resolve it with git_log in the rs-plugkit checkout, not in gm or gm-mcp',
+    }
+}
+
 function withHealthBundleFields(text) {
     if (typeof text !== 'string') return text
     const isJson = /^\s*\{/.test(text)
@@ -3247,7 +3255,7 @@ function withHealthBundleFields(text) {
     }
     if (!isPlainObject(doc)) return text
     const data = isPlainObject(doc.data) ? doc.data : {}
-    const projected = { ...doc, data: { ...data, ...healthBundleFields(bundleDrift()) } }
+    const projected = { ...doc, data: { ...data, ...healthBundleFields(bundleDrift()), ...healthSourceFields(data) } }
     return isJson ? JSON.stringify(projected) : yaml.dump(projected, { lineWidth: 100 })
 }
 
