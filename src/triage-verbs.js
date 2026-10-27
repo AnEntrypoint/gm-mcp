@@ -750,6 +750,8 @@ async function publishOnOrigin(args) {
     const unreferenced = closing ? referenceGateRefusal(store, row, 'publish_on_origin closing commit') : null
     if (unreferenced !== null) return refused('references_required', unreferenced)
     const closeRow = closing && paths.includes(rowRel) ? rowRel : null
+    const closeRecord = closing ? { path: path.posix.join('closes', `${row}.txt`), line: `${row} ${args.status} ${args.witness} ${new Date().toISOString()}` } : null
+    if (closeRecord !== null && !paths.includes(closeRecord.path)) paths.push(closeRecord.path)
     const trailers = closing ? ['-m', `Witness: ${args.witness}`, '-m', `Status: ${args.status}`] : []
     const fetchMs = fetchBudgetSeconds(args.fetch_timeout_seconds) * 1000
     const unreachable = await probeOrigin(repo)
@@ -766,7 +768,7 @@ async function publishOnOrigin(args) {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-publish-'))
     try {
         const givenBase = typeof args.publish_base === 'string' && args.publish_base !== '' ? args.publish_base : null
-        return await publishLane({ repo, row, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, trailers, closeRow, fetchMs, pins })
+        return await publishLane({ repo, row, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, trailers, closeRow, closeRecord, fetchMs, pins })
     } finally {
         fs.rmSync(work, { recursive: true, force: true })
     }
@@ -812,7 +814,7 @@ async function rebaseCommitOntoTip({ repo, commit, row, message, paths, checker,
     return { sha, stat }
 }
 
-async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [], closeRow = null, fetchMs = FETCH_TIMEOUT_DEFAULT_S * 1000, pins = {} }) {
+async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [], closeRow = null, closeRecord = null, fetchMs = FETCH_TIMEOUT_DEFAULT_S * 1000, pins = {} }) {
     const plain = (gitArgs, extra = {}) => run('git', gitArgs, { cwd: repo, ...extra })
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'index') }
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
@@ -920,6 +922,17 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
         const blob = await hashBlob(repo, path.join(work, 'manifest'))
         if (blob === null) return refused('hash_failed', 'empty blob sha for skills/manifest.sha256; nothing pushed')
         if ((await indexed(['update-index', '--add', '--cacheinfo', `100644,${blob},skills/manifest.sha256`])).status !== 0) return refused('index_failed', 'update-index failed for skills/manifest.sha256; nothing pushed')
+    }
+
+    // A close appends one line to closes/<row>.txt (append-only), so the closing commit always carries a non-empty change.
+    if (closeRecord !== null) {
+        const prior = await plain(['show', `origin/main:${closeRecord.path}`])
+        const existing = prior.status === 0 ? utf8(prior.stdout) : ''
+        const next = `${existing}${existing === '' || existing.endsWith('\n') ? '' : '\n'}${closeRecord.line}\n`
+        fs.writeFileSync(path.join(work, 'close-record'), next)
+        const blob = await hashBlob(repo, path.join(work, 'close-record'))
+        if (blob === null) return refused('hash_failed', `empty blob sha for ${closeRecord.path}; nothing pushed`)
+        if ((await indexed(['update-index', '--add', '--cacheinfo', `100644,${blob},${closeRecord.path}`])).status !== 0) return refused('index_failed', `update-index failed for ${closeRecord.path}; nothing pushed`)
     }
 
     // --missing-ok: a blob:none partial clone lacks the blobs of unchanged paths, and origin already holds them.
