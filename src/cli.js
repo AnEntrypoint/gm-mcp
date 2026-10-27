@@ -50,7 +50,7 @@ from a shell (or from an agent host that cannot see the MCP tools) with no MCP i
   --timing                include dispatch timing
 
 examples:
-  gm dispatch grep --body {"pattern":"foo","output_mode":"content"} --cwd <project-dir>
+  gm dispatch grep --body '{"pattern":"foo","output_mode":"content"}' --cwd <project-dir>
   gm dispatch codesearch '{"query":"chunk merger"}' --cwd <project-dir>
   gm dispatch grep '{"pattern":"foo"}' --no-ignore --cwd <project-dir>
   gm dispatch health
@@ -182,7 +182,7 @@ function parseDispatchArgv(argv) {
 
 async function dispatchCommand() {
     const argv = process.argv.slice(3)
-    if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
+    if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
         console.log(DISPATCH_USAGE)
         return 0
     }
@@ -210,7 +210,7 @@ const COMMANDS = {
     },
     'unpin-local-build': () => {
         const clearedLocalBuildPinPath = clearLocalBuildPin()
-        console.log(`gm-mcp ${BUNDLE_VERSION}: cleared the local-build pin at ${clearedLocalBuildPinPath} --the release channel may update the deployed bundle again`)
+        console.log(`gm-mcp ${BUNDLE_VERSION}: cleared the local-build pin at ${clearedLocalBuildPinPath} the release channel may update the deployed bundle again`)
         return 0
     },
     'self-update-status': async () => {
