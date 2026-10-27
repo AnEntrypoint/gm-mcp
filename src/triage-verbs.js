@@ -863,7 +863,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     if (tree.status !== 0) return refused('write_tree_failed', 'write-tree failed; nothing pushed')
     const treeSha = utf8(tree.stdout).trim()
     const noTrackedChange = treeSha === utf8((await plain(['rev-parse', 'origin/main^{tree}'])).stdout).trim()
-    if (noTrackedChange && trailers.length === 0) return refused('nothing_to_publish', `${paths.join(', ')} has no tracked change against origin/main; nothing pushed`)
+    if (noTrackedChange && trailers.length === 0) return refused('nothing_to_publish', `${paths.join(', ')} has no tracked change against origin/main; nothing pushed; the secrets checker runs only for a tracked change (resolved checker: ${checker}), so witness it with a non-empty change`)
     const noChangeNote = noTrackedChange ? ['-m', `No tracked change: row ${row} publishes no file change; none of its paths is tracked.`] : []
     const committed = await plain(['commit-tree', treeSha, '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`, ...noChangeNote, ...trailers], { env: PUBLISH_IDENTITY })
     const sha = utf8(committed.stdout).trim()
