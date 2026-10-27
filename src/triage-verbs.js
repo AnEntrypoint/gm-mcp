@@ -251,6 +251,67 @@ async function measuredTable() {
     return { rows, error }
 }
 
+// ---------------------------------------------------------------- consolidate
+
+async function submodulePaths(checkout) {
+    const gitmodules = readText(path.join(checkout, '.gitmodules')) ?? ''
+    return gitmodules.split('\n').map((line) => line.match(/^\s*path\s*=\s*(.+?)\s*$/)?.[1]).filter((p) => p && SAFE_NAME.test(p.replace(/\//g, '-')))
+}
+
+async function consolidateCheckout(checkout, label, apply, shelfDir) {
+    const git = (args) => run('git', ['-C', checkout, ...args], { env: NO_PROMPT, timeout: NETWORK_TIMEOUT_MS })
+    const fetched = await git(['fetch', '-q', 'origin', 'main'])
+    if (fetched.status !== 0) return { label, error: 'fetch_failed (' + failureReason(fetched) + ')' }
+    const remote = utf8((await git(['rev-parse', 'origin/main'])).stdout).trim()
+    const head = utf8((await git(['rev-parse', 'HEAD'])).stdout).trim()
+    const porcelain = utf8((await git(['status', '--porcelain', '--ignore-submodules=untracked'])).stdout).split('\n').filter((l) => l && !GM_RUNTIME_UNTRACKED.test(l))
+    const counts = utf8((await git(['rev-list', '--left-right', '--count', 'origin/main...HEAD'])).stdout).trim().split(/\s+/)
+    const behind = counts[0] ?? '?'
+    const ahead = counts[1] ?? '?'
+    const line = `${label}: head=${head.slice(0, 8)} origin_main=${remote.slice(0, 8)} dirty=${porcelain.length} ahead=${ahead} behind=${behind}`
+    if (!apply) return { label, line, dirty: porcelain.length, ahead, remote }
+    if (ahead !== '0') {
+        await git(['update-ref', `refs/gm-backup/local-main-${head.slice(0, 8)}`, head])
+    }
+    if (porcelain.length > 0) {
+        fs.mkdirSync(shelfDir, { recursive: true })
+        const diff = utf8((await git(['diff', 'HEAD'])).stdout)
+        fs.writeFileSync(path.join(shelfDir, `${label.replace(/[^A-Za-z0-9._-]/g, '_')}.patch`), diff)
+    }
+    const reset = await git(['reset', '--hard', 'origin/main'])
+    if (reset.status !== 0) return { label, line, error: 'reset_failed (' + failureReason(reset) + ')' }
+    return { label, line, remote }
+}
+
+async function consolidate(args) {
+    const root = rootOf(args)
+    const apply = args.dry_run === false
+    const dir = path.join(root, '.gm', 'locks')
+    if (apply && fs.existsSync(dir)) {
+        const held = fs.readdirSync(dir).filter((f) => f.endsWith('.writer'))
+        if (held.length > 0) return refused('held', 'writer lock held: ' + held.join(', '))
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const shelfDir = path.join(root, '.gm', 'shelved', stamp)
+    const reports = [await consolidateCheckout(root, 'gm', apply, shelfDir)]
+    const subs = await submodulePaths(root)
+    for (const sub of subs) {
+        const dirPath = path.join(root, sub)
+        if (!fs.existsSync(dirPath)) { reports.push({ label: sub, error: 'missing_checkout' }); continue }
+        reports.push(await consolidateCheckout(dirPath, sub, apply, shelfDir))
+    }
+    const failed = reports.filter((r) => r.error)
+    if (failed.length) return refused('consolidate_failed', failed.map((r) => `${r.label}: ${r.error}`).join('; '), [], reports.filter((r) => r.line).map((r) => r.line))
+    if (apply) {
+        for (const sub of subs) {
+            const pin = utf8((await run('git', ['-C', root, 'ls-tree', 'HEAD', '--', sub], { env: NO_PROMPT })).stdout).trim().split(/\s+/)[2]
+            const remote = reports.find((r) => r.label === sub)?.remote
+            if (pin && remote && pin !== remote) return refused('gitlink_mismatch', `${sub}: pin ${pin.slice(0, 8)} != origin/main ${remote.slice(0, 8)}`, [], reports.filter((r) => r.line).map((r) => r.line))
+        }
+    }
+    return ok((apply ? 'applied' : 'dry run') + ` ${reports.length} checkouts`, [['dry_run', String(!apply)], ['shelved', fs.existsSync(shelfDir) ? shelfDir : 'none']], reports.filter((r) => r.line).map((r) => r.line))
+}
+
 // ---------------------------------------------------------------- writer_lock (writer-lock.sh)
 
 const GM_RUNTIME_UNTRACKED = /^\?\? \.(gm|agentplug|agentplug-kv)\//;
@@ -757,8 +818,10 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
 
     const forkPoint = await plain(['merge-base', 'HEAD', 'origin/main'])
-    if (forkPoint.status !== 0) return refused('no_merge_base', 'no merge base between HEAD and origin/main; nothing pushed')
-    let base = utf8(forkPoint.stdout).trim()
+    // Unrelated histories have no fork point: the empty tree stands in as the base, so every lane path is an add and only overlapping content conflicts.
+    const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+    if (forkPoint.status !== 0 && givenBase !== null) return refused('no_merge_base', 'no merge base between HEAD and origin/main; nothing pushed')
+    let base = forkPoint.status === 0 ? utf8(forkPoint.stdout).trim() : EMPTY_TREE
     if (givenBase !== null) {
         const named = await plain(['rev-parse', '--verify', '--quiet', `${givenBase}^{commit}`])
         if (named.status !== 0) return refused('no_merge_base', `publish_base ${givenBase} names no commit; nothing pushed`)
@@ -1890,6 +1953,15 @@ export const TRIAGE_VERBS = [
             mode: z.enum(['blobless', 'shallow', 'full']).optional().describe('blobless (default): partial clone without blobs. shallow: depth 1. full: complete history.'),
         },
         handler: toolReply('git-clone', gitClone),
+    },
+    {
+        name: 'consolidate',
+        description: 'Brings the gm checkout and its submodules onto origin/main. dry_run (default true) only reports each checkout: dirty paths, ahead and behind counts, and gitlink drift. Apply (dry_run false) refuses while any writer lock is held; backs up each local main HEAD as refs/gm-backup/local-main-<sha8> when it is ahead; saves the dirty diff under <cwd>/.gm/shelved/<stamp>/; resets submodules, then the parent, to origin/main; verifies every gitlink equals its remote main tip. Reply: ok, exit_code, result, then one line per checkout.',
+        inputSchema: {
+            dry_run: z.boolean().optional().describe('true (default) reports only; false applies the reset.'),
+            cwd: z.string().optional().describe('gm checkout root that holds .gm/. Required.'),
+        },
+        handler: toolReply('consolidate', consolidate),
     },
     {
         name: 'writer_lock',
