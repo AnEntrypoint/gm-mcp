@@ -744,7 +744,8 @@ async function rebaseCommitOntoTip({ repo, commit, row, message, paths, checker,
     const changed = utf8((await plain(['diff', '--name-only', '--no-renames', '-z', tip, sha])).stdout).split('\0').filter((name) => name !== '')
     const unintended = changed.filter((name) => !paths.includes(name) && name !== 'skills/manifest.sha256')
     if (unintended.length > 0) return { refusal: refused('unintended_paths', 'rebased commit changes paths outside the list; nothing pushed', [['commit', sha]], unintended) }
-    const scan = changed.length === 0 && trailers.length > 0 ? { status: 0 } : await run(process.execPath, [checker], { cwd: repo, env: indexEnv })
+    if (changed.length === 0) return { refusal: refused('nothing_to_publish', 'rebased commit has no tracked change against origin/main; nothing pushed', [['commit', sha]]) }
+    const scan = await run(process.execPath, [checker], { cwd: repo, env: indexEnv })
     if (scan.status !== 0) return { refusal: refused('secrets_check_failed', 'secrets check failed on the rebased commit; nothing pushed', [['commit', sha]]) }
     const stat = utf8((await plain(['diff', '--stat', tip, sha])).stdout).split('\n').filter((line) => line !== '').slice(-3)
     return { sha, stat }
@@ -863,9 +864,8 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     if (tree.status !== 0) return refused('write_tree_failed', 'write-tree failed; nothing pushed')
     const treeSha = utf8(tree.stdout).trim()
     const noTrackedChange = treeSha === utf8((await plain(['rev-parse', 'origin/main^{tree}'])).stdout).trim()
-    if (noTrackedChange && trailers.length === 0) return refused('nothing_to_publish', `${paths.join(', ')} has no tracked change against origin/main; nothing pushed; the secrets checker runs only for a tracked change (resolved checker: ${checker}), so witness it with a non-empty change`)
-    const noChangeNote = noTrackedChange ? ['-m', `No tracked change: row ${row} publishes no file change; none of its paths is tracked.`] : []
-    const committed = await plain(['commit-tree', treeSha, '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`, ...noChangeNote, ...trailers], { env: PUBLISH_IDENTITY })
+    if (noTrackedChange) return refused('nothing_to_publish', `${paths.join(', ')} has no tracked change against origin/main; nothing pushed; an empty commit is never pushed, so close the row with a non-empty change or with paths that are tracked`)
+    const committed = await plain(['commit-tree', treeSha, '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`, ...trailers], { env: PUBLISH_IDENTITY })
     const sha = utf8(committed.stdout).trim()
     if (committed.status !== 0 || sha === '') return refused('commit_failed', 'commit-tree failed; nothing pushed')
 
