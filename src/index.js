@@ -9,7 +9,7 @@ import { bundleHealthBlock, bundleStalenessAnnouncement, recordDriftPair, record
 import { recordRunningImage } from './running-images.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runLeakWatchPass } from './leak-watch.js'
-
+import { runReleaseBridgeInBackground } from './release-bridge.js'
 import { housekeepInBackground } from './triage-verbs.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { installSpoolPort } from './spool-port.js'
