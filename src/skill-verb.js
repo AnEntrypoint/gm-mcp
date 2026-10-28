@@ -3,12 +3,10 @@
 // gm skill at all; this verb is how an agent in that session reads the instructions without restarting. Text is
 // paged by line and capped by characters, so a 54 KB SKILL.md never lands in one reply.
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import * as yaml from 'js-yaml'
 import { SKILLS } from './skills-snapshot.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
-import { skillInstallRoots } from './skill-install.js'
 
 const DEFAULT_PAGE_LINES = 400
 const DEFAULT_MAX_CHARS = 20000
@@ -55,25 +53,16 @@ function clipText(text, maxChars) {
     return { text: text.slice(0, end), cut: true }
 }
 
-function installedPathOf(root, name, file) {
-    return path.join(root, name, file)
-}
-
-function skillIndex(groups, roots) {
+function skillIndex(groups) {
     const skills = [...groups.entries()]
         .sort((a, b) => a[0].localeCompare(b[0]))
         .map(([name, entries]) => {
             const main = entries.find(entry => entry.file === 'SKILL.md') ?? entries[0]
-            const installed = roots
-                .map(root => ({ root, file: installedPathOf(root, name, 'SKILL.md') }))
-                .find(candidate => existsSync(candidate.file))
             return {
                 name,
                 description: descriptionOf(main.text),
                 files: entries.length,
                 bundle_sha256: main.sha256,
-                installed_path: installed?.file ?? null,
-                installed_matches_bundle: installed === undefined ? null : sha256(readFileSync(installed.file, 'utf8')) === main.sha256,
             }
         })
     return {
@@ -109,10 +98,9 @@ function pageOf(entry, offset, limit, maxChars) {
 
 export function gmSkillReply({ body = {}, maxChars = DEFAULT_MAX_CHARS } = {}) {
     const groups = byName()
-    const roots = skillInstallRoots()
     const name = typeof body.name === 'string' ? body.name.trim() : ''
     const file = typeof body.file === 'string' && body.file.trim() !== '' ? body.file.trim() : 'SKILL.md'
-    if (name === '' || truthy(body.list)) return yaml.dump(skillIndex(groups, roots), { lineWidth: 100 })
+    if (name === '' || truthy(body.list)) return yaml.dump(skillIndex(groups), { lineWidth: 100 })
     const entries = groups.get(name)
     if (!entries) {
         return yaml.dump({
@@ -139,7 +127,6 @@ export function gmSkillReply({ body = {}, maxChars = DEFAULT_MAX_CHARS } = {}) {
     const offset = toInt(body.offset ?? body.startLine ?? body.from, 1)
     const limit = toInt(body.limit ?? body.lines ?? body.count, DEFAULT_PAGE_LINES)
     const page = pageOf(entry, offset, limit, maxChars)
-    const installed = roots.map(root => installedPathOf(root, name, file)).find(candidate => existsSync(candidate))
     return yaml.dump({
         ok: true,
         verb: 'gm-skill',
@@ -147,10 +134,8 @@ export function gmSkillReply({ body = {}, maxChars = DEFAULT_MAX_CHARS } = {}) {
         name,
         file,
         sha256: entry.sha256,
-        install_roots: roots,
-        installed_path: installed ?? null,
         ...page,
-        note: 'This is the bundled text, not the file on disk. A host that enumerated its skills before gm wrote them cannot see them this session; read installed_path with fs_read for the same text from disk.',
+        note: 'Served from the gm-mcp bundle over the MCP protocol. gm writes no copy into any host skill root.',
     }, { lineWidth: 100 })
 }
 

@@ -9,8 +9,7 @@ import { bundleHealthBlock, bundleStalenessAnnouncement, recordDriftPair, record
 import { recordRunningImage } from './running-images.js'
 import { scheduleStaleDeployedBundleChecks } from './self-update.js'
 import { runLeakWatchPass } from './leak-watch.js'
-import { runReleaseBridgeInBackground } from './release-bridge.js'
-import { installSkillsAtStartup } from './skill-install.js'
+
 import { housekeepInBackground } from './triage-verbs.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 import { installSpoolPort } from './spool-port.js'
@@ -22,11 +21,6 @@ import { takeFastTransport } from './fast-stdio.js'
 import { nextPrdFor, setPrdPushSink } from './prd-feed.js'
 
 installSpoolPort(nodeSpoolPort)
-
-// Skill install runs during module evaluation, before any await and before the transport is built: a host
-// process enumerates its skill roots once at its own start, so the files have to exist by the time this
-// process yields, not at the end of main().
-installSkillsAtStartup()
 
 export { createServer } from './mcp-server.js'
 

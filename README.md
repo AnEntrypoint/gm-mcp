@@ -263,7 +263,7 @@ A stdio server cannot load a newer bundle in place, and it never exits, because 
 
 ### Self-install on a fresh machine
 
-On start the bundle installs what a host needs, with no installer. Missing gm skill files are written from the embedded snapshot to `~/.claude/skills/<name>/` and `~/.agents/skills/<name>/` (`src/skill-install.js`); an existing file is never overwritten, and a link is left alone. The agentplug runner is installed from the `AnEntrypoint/agentplug-bin` release when `~/.gm-tools/agentplug-runner` is absent, and the gm guest from `AnEntrypoint/plugkit-bin`, each checked against its sha256 and a self-check before it is renamed into place (`src/release-bridge.js`).
+On start the bundle installs the runner and guest a host needs, with no installer. The gm skill is not copied into any host skill root: it is served over MCP from the bundle (`gm_skill`, `src/skill-verb.js`), so no `~/.claude/skills` or `~/.agents/skills` file is written. The agentplug runner is installed from the `AnEntrypoint/agentplug-bin` release when `~/.gm-tools/agentplug-runner` is absent, and the gm guest from `AnEntrypoint/plugkit-bin`, each checked against its sha256 and a self-check before it is renamed into place (`src/release-bridge.js`).
 
 ### No supervisor, no boot entry
 
