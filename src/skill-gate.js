@@ -7,6 +7,7 @@
 // come from one prd-list read. When the state cannot be read every skill is listed and the reason is logged.
 // Changes are pushed as notifications/prompts/list_changed and notifications/resources/list_changed, once per change.
 import * as yaml from 'js-yaml'
+import fs from 'node:fs'
 import path from 'node:path'
 import { FSM_SUCCESSORS } from './skills-snapshot.js'
 import { gmDispatch, lastProjectRoot } from './dispatch.js'
@@ -14,7 +15,8 @@ import { SERVER_SESSION_ID, readPendingPage, withinBudget } from './prd-feed.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 
 export const GATE_POLL_MS = 3000
-const MIN_KICK_GAP_MS = 1000
+// A tick only stats the turn-state file and the PRD directory; a dispatch runs when either moved, or at this backstop.
+const FULL_REFRESH_MS = 60000
 // Reads run in the background and never hold a reply, so they get a longer budget than a live reply does: a status read queued behind a busy daemon still lands.
 const GATE_BUDGET_MS = 10000
 const ALWAYS = 'always'
@@ -24,6 +26,7 @@ const controllers = new Set()
 let timer = null
 let inFlight = null
 let lastRefreshAt = 0
+let fingerprint = null
 let explicitRoot = null
 let lastLoggedReason = null
 
@@ -109,8 +112,24 @@ function logReason(ctx) {
     if (reason) appendDiagnostic('skill-gate-all-exposed', { reason })
 }
 
+function statKey(file) {
+    try {
+        const st = fs.statSync(file)
+        return `${st.mtimeMs}:${st.size}`
+    } catch {
+        return '-'
+    }
+}
+
+// Cheap change detector: the turn-state file and the PRD directory (and the legacy prd.yml). Row edits that keep the directory mtime are caught by the backstop.
+function fingerprintOf(root) {
+    const gm = path.join(root, '.gm')
+    return [statKey(path.join(gm, 'turn-state.json')), statKey(path.join(gm, 'prd')), statKey(path.join(gm, 'prd.yml'))].join('|')
+}
+
 export function refreshSkillGate({ root } = {}) {
     if (inFlight) return inFlight
+    fingerprint = fingerprintOf(root ?? rootNow() ?? '')
     inFlight = (async () => {
         const ctx = await readContext(root ?? rootNow())
         lastRefreshAt = Date.now()
@@ -124,10 +143,18 @@ export function refreshSkillGate({ root } = {}) {
     return inFlight
 }
 
-// Called after each tool reply: remembers the cwd the caller named, and refreshes now when the last refresh is old enough.
+// Refreshes only when the fingerprint moved or the backstop is due, so a busy caller pays nothing for unchanged state.
+function refreshIfChanged(root) {
+    if (!root) return
+    const now = fingerprintOf(root)
+    if (now === fingerprint && Date.now() - lastRefreshAt < FULL_REFRESH_MS) return
+    refreshSkillGate({ root })
+}
+
+// Called after each tool reply: remembers the cwd the caller named, and refreshes when its state changed.
 export function kickSkillGate(cwd) {
     if (typeof cwd === 'string' && path.isAbsolute(cwd.trim())) explicitRoot = path.resolve(cwd.trim())
-    if (Date.now() - lastRefreshAt >= MIN_KICK_GAP_MS) refreshSkillGate()
+    refreshIfChanged(rootNow())
 }
 
 function anyConnected() {
@@ -138,7 +165,7 @@ function anyConnected() {
 function ensureTimer() {
     if (timer) return
     timer = setInterval(() => {
-        if (anyConnected()) refreshSkillGate()
+        if (anyConnected()) refreshIfChanged(rootNow())
     }, GATE_POLL_MS)
     timer.unref?.()
 }
