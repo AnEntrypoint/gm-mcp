@@ -23,9 +23,12 @@ Wraps the whole gm spool write-then-poll-for-response dispatch cycle into a sing
 
 Not published to npm -- `gm-mcp` is an unrelated package on the npm
 registry. The shipped `bin/gm-mcp-server.js` is a pre-bundled, dependency-free
-file (see Development below). The one-time install in the gm README (Install)
-fetches it to `~/.gm-tools/gm-mcp-server.mjs`, and the host registration points at that local file:
-local file with every agent host:
+file (see Development below). The one-line install in the gm README (Install)
+fetches it to `~/.gm-tools/gm-mcp-server.mjs` and registers that absolute path.
+Running the bundle with `register` does the same by hand on any OS:
+`node ~/.gm-tools/gm-mcp-server.mjs register`. It is idempotent and rewrites a
+broken `gm` entry, such as one carrying an unexpanded `$HOME` or `~`. Any other
+agent host takes the same stdio command:
 
 ```json
 {
@@ -61,8 +64,8 @@ deployed copy and prints one line. Env: `GM_MCP_SELF_UPDATE=0` disables,
 limits refreshing to the deployed copy's own process,
 `GM_MCP_BUNDLE_URL` (http(s) or `file:`) overrides the source,
 `GM_MCP_SELF_UPDATE_INTERVAL_MS` overrides the throttle. A bundle from before
-this feature cannot update itself: run `npx github:AnEntrypoint/gm --mcp-only`
-once.
+this feature cannot update itself: rerun the one-line install from the gm README
+once (it fetches the current bundle).
 
 The release channel is a plain file swap, so a release that loses a fix would
 silently undo it on the next check (exactly what happened to the
@@ -179,7 +182,7 @@ cd ~/my/project
 ```
 
 A cold start compiles wasm for tens of seconds before it claims its first
-ticket. To reinstall the runner entirely: `npx github:AnEntrypoint/gm -g`.
+ticket. To reinstall the runner entirely, rerun the one-line install from the gm README (`install.sh` or `install.ps1`).
 
 Logs, in the order worth reading:
 
