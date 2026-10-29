@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.356 - skill prompts and resources are listed only for the current gm state
+
+A skill's SKILL.md frontmatter key `exposed_when` lists tokens: a bare FSM state key (listed when the current phase is that key or one graph edge before it), `prd:pending` (listed while a PRD row is pending) or `always`. A skill without the key is always listed. prompts/list, prompts/get, resources/list and resources/read follow the rule, and a gated prompt answers that it is not a valid next step right now. The phase comes from the `phase-status` verb through gmDispatch, read in the background every 3 s and after each gm_codemode call. When the phase cannot be read, every skill is listed and a `skill-gate-all-exposed` log line says why. Changes are sent as notifications/prompts/list_changed and notifications/resources/list_changed (both capabilities declare listChanged). The gm_skill verb and gm_codemode are not gated. The snapshot embeds gm-config fsm/graph.json as FSM_SUCCESSORS for the one-step-ahead rule.
+
 ## 0.2.343 - fs_write exact-line form witnessed live
 
 fs_write with path, startLine, endLine and replacement replaces exactly those lines and refuses out-of-range bounds (witness dispatch 1793048351089-1283-3a2a3460f4e2b002; served bundle b6e9bf590260).

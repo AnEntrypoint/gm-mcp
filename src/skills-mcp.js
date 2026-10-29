@@ -2,11 +2,13 @@ import { SKILLS } from './skills-snapshot.js'
 import { gmDispatch } from './dispatch.js'
 import { liveStateText } from './live-state.js'
 import { CWD_PROMPT_ARGS, registerArgsPrompt } from './prompt-args.js'
+import { attachSkillGate, exposureTokensOf } from './skill-gate.js'
 
 // The gm skills as MCP primitives, from the snapshot embedded at build time (scripts/embed-skills.mjs).
 // Per skill: a prompt named after it (SKILL.md body, frontmatter removed) with one optional cwd argument, which adds
 // live project state read when the prompt is fetched. Per file: a resource at skill://<name>/<file>. skill://index
 // lists every skill with its description and file URIs. The content is fixed when the bundle is built; no cache is read.
+// A skill whose frontmatter has exposed_when is listed (prompt and resources) only while one of its tokens holds (skill-gate.js).
 
 const INDEX_URI = 'skill://index'
 const JSON_MIME = 'application/json'
@@ -59,7 +61,7 @@ function groupByName(records) {
 function registerFile(server, entry) {
     const uri = uriOf(entry)
     const mimeType = mimeOf(entry.file)
-    server.registerResource(
+    return server.registerResource(
         uri,
         uri,
         { title: uri, description: `File ${entry.file} of the gm skill ${entry.name}.`, mimeType },
@@ -74,7 +76,7 @@ function registerSkillPrompt(server, name, description, body, supportingUris) {
         const listing = `Supporting files for the ${name} skill, read with resources/read:\n${supportingUris.map((uri) => `- ${uri}`).join('\n')}`
         messages.push({ role: 'user', content: { type: 'text', text: listing } })
     }
-    registerArgsPrompt(server, name, { description, argsSchema: CWD_PROMPT_ARGS }, async ({ cwd } = {}) => ({
+    return registerArgsPrompt(server, name, { description, argsSchema: CWD_PROMPT_ARGS }, async ({ cwd } = {}) => ({
         messages: [...messages, { role: 'user', content: { type: 'text', text: await liveStateText(gmDispatch, cwd) } }],
     }))
 }
@@ -91,17 +93,21 @@ function registerIndex(server, index) {
 
 export function registerSkillsSurface(server) {
     const index = []
+    const records = []
     for (const [name, entries] of groupByName(SKILLS)) {
         const skillMd = entries.find((entry) => entry.file === 'SKILL.md')
         const { meta, body } = splitFrontmatter(skillMd?.text ?? '')
         const description = skillMd ? meta.description || null : null
         const uris = entries.map(uriOf)
         index.push({ name, description, files: uris })
-        for (const entry of entries) registerFile(server, entry)
+        const record = { name, tokens: exposureTokensOf(meta), prompt: null, resources: [] }
+        for (const entry of entries) record.resources.push(registerFile(server, entry))
         if (skillMd && !RESERVED_PROMPTS.has(name)) {
             const supporting = uris.filter((uri) => uri !== uriOf(skillMd))
-            registerSkillPrompt(server, name, description ?? `The gm skill ${name}.`, body, supporting)
+            record.prompt = registerSkillPrompt(server, name, description ?? `The gm skill ${name}.`, body, supporting)
         }
+        records.push(record)
     }
     registerIndex(server, index)
+    attachSkillGate(server, records)
 }
