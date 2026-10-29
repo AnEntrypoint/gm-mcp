@@ -46,7 +46,8 @@ export function pageOf(text) {
     const failure = failureOf(doc)
     if (failure !== null) return { ok: false, error: failure }
     const data = Array.isArray(doc.items) || !(doc.data && typeof doc.data === 'object') ? doc : doc.data
-    const items = Array.isArray(data.items) ? data.items : data.pending_total === 0 ? [] : null
+    // An empty list reads as zero rows: prd-list answers count:0 with no items key when nothing is pending.
+    const items = Array.isArray(data.items) ? data.items : data.pending_total === 0 || (data.count === 0 && data.pending_total === undefined) ? [] : null
     if (items === null) return { ok: false, error: 'prd-list reply has no items' }
     return {
         ok: true,
