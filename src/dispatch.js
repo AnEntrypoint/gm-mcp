@@ -2686,6 +2686,26 @@ function carriedNoFailure(out) {
         && (!isPlainObject(out.data) || carriedNoFailure(out.data))
 }
 
+// True when a rendered reply reports a failure, so the dispatch CLI never reads a refusal as success.
+// The top-level `ok` decides: every verb reply carries it, and `ok: true` wins even when the payload
+// holds an error-shaped field (a file read, a search hit). A reply with no top-level `ok` counts as a
+// failure only when it names an error; text that does not parse is judged by its first line alone.
+export function replyReportsFailure(text) {
+    if (typeof text !== 'string') return false
+    const trimmed = text.trim()
+    if (trimmed === '') return false
+    let doc
+    try {
+        doc = trimmed.startsWith('{') ? JSON.parse(trimmed) : yaml.load(trimmed)
+    } catch {
+        return /^error:/.test(trimmed)
+    }
+    if (!isPlainObject(doc)) return false
+    if (doc.ok === false) return true
+    if (doc.ok === true) return false
+    return doc.error_code !== undefined || (typeof doc.error === 'string' && doc.error.trim() !== '')
+}
+
 const DISPATCH_WAIT_DISCLOSED_AT_MS = 250
 
 function withDispatchWait(out, waitedMs, claimedAtMs, daemonSpanMs) {

@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { flagValue } from './argv.js'
-import { gmDispatch, preloadVerbTable, replyEnvelopeSelfCheck } from './dispatch.js'
+import { gmDispatch, preloadVerbTable, replyEnvelopeSelfCheck, replyReportsFailure } from './dispatch.js'
 import { runDevSync } from './dev-sync.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { clearLocalBuildPin, deployedBundleVersion, describeSelfUpdateOutcome, localBuildPinPath, noSelfUpdateFilePath, pinLocalBuild, refreshDeployedBundleNow, selfUpdateStatus } from './self-update.js'
@@ -48,6 +48,12 @@ from a shell (or from an agent host that cannot see the MCP tools) with no MCP i
   --resume <task>         resume a previous dispatch instead of writing a new request
   --full                  return the uncompacted payload
   --timing                include dispatch timing
+
+exit status:
+  0  the verb answered ok: true
+  1  the verb answered a failure (ok: false, or an error/error_code) -- the reply is still printed
+  2  the command line itself is invalid (a --body that is not JSON, a flag with no value, ...)
+  3  the verb answered an empty reply: one stderr line names the verb and cwd, stdout stays empty
 
 examples:
   gm dispatch grep --body '{"pattern":"foo","output_mode":"content"}' --cwd <project-dir>
@@ -196,8 +202,13 @@ async function dispatchCommand() {
     }
 
     const text = await gmDispatch(parsed.args)
+    if (typeof text !== 'string' || text.trim() === '') {
+        const where = typeof parsed.args.cwd === 'string' && parsed.args.cwd.trim() !== '' ? `--cwd ${parsed.args.cwd}` : `cwd ${process.cwd()}`
+        console.error(`gm-mcp dispatch: verb "${parsed.args.verb}" (${where}) answered an empty reply, so nothing was printed and the dispatch did not run to a result; check the runner for that project (dispatch status, then health) and ${logFilePath()}`)
+        return 3
+    }
     process.stdout.write(text.endsWith('\n') ? text : `${text}\n`)
-    return text.trimStart().startsWith('error:') ? 1 : 0
+    return replyReportsFailure(text) ? 1 : 0
 }
 
 const COMMANDS = {
@@ -337,6 +348,27 @@ const COMMANDS = {
 
 const command = process.argv[2]
 
+// gmDispatch can leave a runner watchdog alive, so the process exits explicitly rather than by itself.
+// process.exit drops stdout that has not drained, and stdout is a pipe for a shell caller, where write
+// is asynchronous: an empty write's callback runs only after every earlier byte reached the pipe, so a
+// reply is never cut short by the exit that follows it.
+async function exitAfterFlush(code) {
+    await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 1000)
+        timer.unref()
+        try {
+            process.stdout.write('', () => {
+                clearTimeout(timer)
+                resolve()
+            })
+        } catch {
+            clearTimeout(timer)
+            resolve()
+        }
+    })
+    process.exit(code)
+}
+
 if (command === '--help' || command === '-h') {
     console.log(`gm-mcp ${BUNDLE_VERSION}
 
@@ -375,18 +407,18 @@ stdio is the default and opens no listening port. To serve HTTP, start it by han
   gm-mcp-server.js --http   (then: claude mcp add --transport http gm ${'http://127.0.0.1:'}${defaultHttpPort()}${'/mcp'} -s user)
 
 suppress self-update without a pin by setting ${'GM_MCP_NO_SELF_UPDATE'}=1 or creating ${noSelfUpdateFilePath()}`)
-    process.exit(0)
+    await exitAfterFlush(0)
 }
 
 if (command && COMMANDS[command]) {
     try {
-        process.exit(await COMMANDS[command]())
+        await exitAfterFlush(await COMMANDS[command]())
     } catch (error) {
         const dispatchNote = error?.dispatch_id ? ` dispatch_id=${error.dispatch_id}` : ''
         console.error(`gm-mcp: ${command} failed: ${error.message}${dispatchNote} pid=${process.pid} log=${logFilePath()}`)
-        process.exit(1)
+        await exitAfterFlush(1)
     }
-}
+} else {
 
 const { main } = await import('./index.js')
 main().catch((e) => {
@@ -395,3 +427,4 @@ main().catch((e) => {
     console.error(`gm-mcp: crashed${dispatchNote} pid=${process.pid} log=${logFilePath()}`)
     process.exit(1)
 })
+}

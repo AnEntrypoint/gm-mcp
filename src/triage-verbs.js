@@ -315,6 +315,7 @@ async function consolidate(args) {
 // ---------------------------------------------------------------- writer_lock (writer-lock.sh)
 
 const GM_RUNTIME_UNTRACKED = /^\?\? \.(gm|agentplug|agentplug-kv)\//;
+const GM_RUNTIME_TRACKED = /^.. \.(gm|agentplug|agentplug-kv)\//;
 
 async function fastForwardsOrigin(dir, originPin, lanePin) {
     const r = await run('git', ['merge-base', '--is-ancestor', originPin, lanePin], { cwd: dir, env: NO_PROMPT })
@@ -402,7 +403,7 @@ async function writerLock(args) {
         const runtimeIgnored = []
         for (const line of entries) {
             const rel = line.slice(3)
-            if (kind === 'parent' && line.startsWith(' M ') && await gmRuntimeOnly(rel)) runtimeIgnored.push(rel)
+            if (GM_RUNTIME_TRACKED.test(line) || (kind === 'parent' && line.startsWith(' M ') && await gmRuntimeOnly(rel))) runtimeIgnored.push(rel)
             else dirtyLines.push(line)
         }
         const dirty = dirtyLines.length
