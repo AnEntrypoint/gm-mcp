@@ -241,11 +241,31 @@ function cutAtWordBoundary(value, budget) {
     return space > budget / 2 ? value.slice(0, space) : value.slice(0, budget)
 }
 
+const ANSI_CODE = /\u001b\[[0-9;]*[A-Za-z]/g
+const DEDUP_MIN_RUN = 3
+
+export function squeezeExecOutput(text) {
+    if (!text.includes('\u001b') && !/(^|\n)([^\n]+)\n\2(\n\2)+/.test(text)) return text
+    const lines = text.replace(ANSI_CODE, '').split('\n')
+    const out = []
+    for (let i = 0; i < lines.length;) {
+        let run = 1
+        while (i + run < lines.length && lines[i + run] === lines[i]) run++
+        if (run >= DEDUP_MIN_RUN && lines[i].trim() !== '') out.push(lines[i], `[x${run}]`)
+        else for (let r = 0; r < run; r++) out.push(lines[i])
+        i += run
+    }
+    return out.join('\n')
+}
+
 export function truncateLongText(value, key, outPath, plainTextFile, untruncatedKeys = NO_KEYS, inlineMax) {
     if (typeof value !== 'string') return value
     const budget = resolvedInlineMax(inlineMax, key)
     if (EXEC_OUTPUT_KEYS.has(key)) {
         if (value.length <= budget) return value
+        const squeezed = squeezeExecOutput(value)
+        if (squeezed.length <= budget) return squeezed
+        value = squeezed
         const where = plainTextFile
             ? `the full text is in ${plainTextFile}, plain text with a '## ${key}' section, readable directly`
             : `the full output: gm_result with this reply's dispatch_id, field '${key}'`
