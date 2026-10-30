@@ -27,7 +27,7 @@ export function registerArgsPrompt(server, name, config, callback) {
 async function getPrompt(prompts, { name, arguments: args }, extra) {
     const prompt = prompts.get(name)
     if (!prompt) throw new McpError(ErrorCode.InvalidParams, `Prompt ${name} not found`)
-    if (!prompt.enabled) throw new McpError(ErrorCode.InvalidParams, `Prompt ${name} disabled`)
+    if (!prompt.enabled) throw new McpError(ErrorCode.InvalidParams, prompt.disabledMessage ?? `Prompt ${name} disabled`)
     if (!prompt.argsSchema) return await prompt.callback(extra)
     const parsed = await z.safeParseAsync(prompt.argsSchema, args ?? {})
     if (!parsed.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for prompt ${name}: ${parsed.error.message}`)

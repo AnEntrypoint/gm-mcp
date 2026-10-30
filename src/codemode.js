@@ -1,6 +1,7 @@
 import { isPlainObject } from './plain-object.js';
 import { z } from 'zod';
 import { appendDiagnostic, describeError, logFilePath } from './server-log.js'
+import { kickSkillGate } from './skill-gate.js'
 import { canonicalToolName, nearestNames } from './verbs.js'
 import { FS_READ_RANGE_ALIASES, tableRow, verbDescriptionLead } from './verb-table.js'
 
@@ -574,7 +575,10 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             for (const key of ENVELOPE_KEYS_NESTED_CALLS_INHERIT) {
                 if (topEnvelope[key] !== undefined && folded[key] === undefined && key in tool.inputSchema) defaults[key] = topEnvelope[key]
             }
-            pending = tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then((result) => replyText(result, tool.verb ?? (typeof folded.verb === 'string' ? folded.verb : name)))
+            pending = tool.handler(validatedArgs(name, tool, { ...defaults, ...folded }), extra).then((result) => {
+                kickSkillGate(folded.cwd ?? defaults.cwd)
+                return replyText(result, tool.verb ?? (typeof folded.verb === 'string' ? folded.verb : name))
+            })
         } catch (error) {
             fail(error)
         }
@@ -720,6 +724,7 @@ export function registerCodeMode(server, tools) {
             const logs = []
             const logger = { log: (...parts) => logs.push(parts.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' ')) }
             const session_id = args.session_id || newCodemodeSessionId()
+            kickSkillGate(args.cwd)
             const replies = []
             const cap = nonNegativeNumber(args.max_chars, DEFAULT_CODEMODE_MAX_CHARS) || DEFAULT_CODEMODE_MAX_CHARS
             const stopHeartbeat = startHeartbeat(extra, Date.now())

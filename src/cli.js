@@ -10,6 +10,7 @@ import { reapReport, formatFindings } from './leak-reaper.js'
 import { formatLeakWatchLine, formatOrphanLine, formatOrphanTreeLine, leakWatchReport } from './leak-watch.js'
 import { attributePid, globalLedgerPath } from './child-ledger.js'
 import { appendDiagnostic, logFilePath } from './server-log.js'
+import { registerClaudeCode } from './register.js'
 
 function repeatedFlag(name) {
     const values = []
@@ -337,6 +338,14 @@ const COMMANDS = {
         console.log(JSON.stringify({ ...answer, ledger: globalLedgerPath(), roots: roots.map((root) => path.resolve(root)) }, null, 2))
         return attributed ? 0 : 1
     },
+    'register': async () => {
+        const bundlePath = flagValue('bundle') || process.argv[1]
+        const report = registerClaudeCode({ bundlePath })
+        const verb = report.changed.length > 0 ? 'registered' : 'already registered'
+        console.log(`gm: ${verb} ${report.bundle} as the Claude Code gm MCP server (${report.file}${report.changed.length ? `; rewrote ${report.changed.join(', ')}` : ''})`)
+        console.log(report.ok ? 'gm: verified. Restart Claude Code to load the gm tool.' : 'gm: VERIFY FAILED -- the config did not read back as expected')
+        return report.ok ? 0 : 1
+    },
     'port-pool': async () => {
         const reclaimed = await reclaimDeadPortRegistries()
         const preferred = Number(flagValue('preferred')) || defaultHttpPort()
@@ -394,6 +403,7 @@ usage:
                                    holding memory while burning no CPU
   gm-mcp-server.js attribute --pid N [--root <dir>]...
                                    print which dispatch spawned pid N (exit 1 if unattributed)
+  gm-mcp-server.js register [--bundle <path>]   register this bundle (default: the file being run, by absolute path) as Claude Code's user-scope gm MCP server; no shell expansion involved
   gm-mcp-server.js port-pool [--preferred N]
                                    reclaim dead port registries and print the port that would
                                    be allocated next (lowest free, so ports stop ratcheting)

@@ -5,6 +5,8 @@
 // invalid UTF-8 refuses the whole run: exit 1, and the snapshot file is left untouched.
 // Files over MAX_BYTES are skipped and reported. Files directly under skills/ (not inside a skill
 // directory, e.g. skill-assets.txt) are verified but not embedded.
+// Also fetches gm-config fsm/graph.json and embeds FSM_SUCCESSORS (state key -> next state keys, every edge kind), which
+// skill-gate.js uses for the one-step-ahead rule of exposed_when.
 import { createHash } from 'node:crypto'
 import { renameSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -12,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 
 const RAW_BASE = 'https://raw.githubusercontent.com/AnEntrypoint/gm/main/skills/'
 const MANIFEST_URL = `${RAW_BASE}manifest.sha256`
+const GRAPH_URL = 'https://raw.githubusercontent.com/AnEntrypoint/gm-config/main/fsm/graph.json'
 const MAX_BYTES = 512 * 1024
 const CONCURRENCY = 8
 const FETCH_TIMEOUT_MS = 30_000
@@ -51,6 +54,24 @@ async function fetchBytes(url) {
     return Buffer.from(await response.arrayBuffer())
 }
 
+// Next-state keys per state from the graph's edges (forward and backreference alike), sorted and de-duplicated.
+function successorsOf(graphText) {
+    let graph
+    try {
+        graph = JSON.parse(graphText)
+    } catch (error) {
+        throw new Refusal(`fsm graph is not JSON: ${error.message}`)
+    }
+    if (!Array.isArray(graph.states) || !Array.isArray(graph.edges)) throw new Refusal('fsm graph has no states or edges array')
+    const successors = {}
+    for (const edge of graph.edges) {
+        if (typeof edge.from !== 'string' || typeof edge.to !== 'string') throw new Refusal('fsm graph edge without string from/to')
+        ;(successors[edge.from] ??= []).push(edge.to)
+    }
+    for (const key of Object.keys(successors)) successors[key] = [...new Set(successors[key])].sort()
+    return successors
+}
+
 async function loadEntry(entry) {
     const bytes = await fetchBytes(RAW_BASE + entry.file)
     const digest = sha256Hex(bytes)
@@ -76,6 +97,8 @@ async function main() {
     const manifestBytes = await fetchBytes(MANIFEST_URL)
     const manifestSha = sha256Hex(manifestBytes)
     const entries = parseManifest(decoder.decode(manifestBytes))
+
+    const successors = successorsOf(decoder.decode(await fetchBytes(GRAPH_URL)))
 
     const failures = []
     const loaded = await mapLimit(entries, CONCURRENCY, async (entry) => {
@@ -119,6 +142,7 @@ async function main() {
         'export const SKILLS = [',
         ...embedded.map((record) => `    ${asciiJson(record)},`),
         ']',
+        `export const FSM_SUCCESSORS = ${asciiJson(successors)}`,
         '',
     ].join('\n')
     const tmp = `${OUT_PATH}.tmp-${process.pid}`
