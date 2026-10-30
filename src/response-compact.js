@@ -248,12 +248,12 @@ export function truncateLongText(value, key, outPath, plainTextFile, untruncated
         if (value.length <= budget) return value
         const where = plainTextFile
             ? `the full text is in ${plainTextFile}, plain text with a '## ${key}' section, readable directly`
-            : `the full output is in ${outPath}, in the JSON string field 'data' (parse it, then read '${key}')`
+            : `the full output: gm_result with this reply's dispatch_id, field '${key}'`
         return `${cutAtWordBoundary(value, budget)}... [OUTPUT TRUNCATED: showing ${budget} of ${value.length} chars of '${key}' -- ${where}]`
     }
     if (value.length <= budget) return value
     if (NEVER_TRUNCATE_KEYS.has(key) || untruncatedKeys.has(key)) return value
-    return `${cutAtWordBoundary(value, budget)}... [${value.length} chars total, full text at ${outPath} field '${key}']`
+    return `${cutAtWordBoundary(value, budget)}... [${value.length} chars total, full: gm_result with this reply's dispatch_id, field '${key}']`
 }
 
 function dropDuplicateRows(rows) {

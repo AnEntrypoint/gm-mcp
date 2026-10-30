@@ -198,14 +198,14 @@ async function dispatchCommand() {
     if (parsed.usageError) {
         const usageId = `usage-${process.pid}-${Date.now()}`
         appendDiagnostic('dispatch-usage-error', { usage_id: usageId, error: parsed.usageError })
-        console.error(`${parsed.usageError} usage_id=${usageId} log=${logFilePath()}`)
+        console.error(`${parsed.usageError} usage_id=${usageId}`)
         return 2
     }
 
     const text = await gmDispatch(parsed.args)
     if (typeof text !== 'string' || text.trim() === '') {
         const where = typeof parsed.args.cwd === 'string' && parsed.args.cwd.trim() !== '' ? `--cwd ${parsed.args.cwd}` : `cwd ${process.cwd()}`
-        console.error(`gm-mcp dispatch: verb "${parsed.args.verb}" (${where}) answered an empty reply, so nothing was printed and the dispatch did not run to a result; check the runner for that project (dispatch status, then health) and ${logFilePath()}`)
+        console.error(`gm-mcp dispatch: verb "${parsed.args.verb}" (${where}) answered an empty reply, so nothing was printed and the dispatch did not run to a result; check the runner for that project (dispatch status, then health)`)
         return 3
     }
     process.stdout.write(text.endsWith('\n') ? text : `${text}\n`)
@@ -425,7 +425,7 @@ if (command && COMMANDS[command]) {
         await exitAfterFlush(await COMMANDS[command]())
     } catch (error) {
         const dispatchNote = error?.dispatch_id ? ` dispatch_id=${error.dispatch_id}` : ''
-        console.error(`gm-mcp: ${command} failed: ${error.message}${dispatchNote} pid=${process.pid} log=${logFilePath()}`)
+        console.error(`gm-mcp: ${command} failed: ${error.message}${dispatchNote} pid=${process.pid}`)
         await exitAfterFlush(1)
     }
 } else {
@@ -434,7 +434,7 @@ const { main } = await import('./index.js')
 main().catch((e) => {
     console.error(e)
     const dispatchNote = e?.dispatch_id ? ` dispatch_id=${e.dispatch_id}` : ''
-    console.error(`gm-mcp: crashed${dispatchNote} pid=${process.pid} log=${logFilePath()}`)
+    console.error(`gm-mcp: crashed${dispatchNote} pid=${process.pid}`)
     process.exit(1)
 })
 }

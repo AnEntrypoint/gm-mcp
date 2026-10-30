@@ -619,7 +619,7 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
     if (text.length <= maxChars) return text
     let holder = typeof toYaml === 'function' ? replyMatchesHolder(out) : null
     const noticeDispatchId = text.match(/^[ \t-]*dispatch_id: (\S+)/m)?.[1] ?? 'not reported'
-        const buildNotice = (matchesReturned, matchesTotal, deliveredChars = text.length) => `dispatch_id: ${noticeDispatchId}\nreply_truncated: true\nreply_chars: ${deliveredChars}\nreply_max_chars: ${maxChars}\nreply_full_chars: ${text.length} (raise max_chars to at least this to read the whole reply)\nreply_requested_max_chars: ${requestedMaxChars}\nreply_overhead_chars: ${requestedMaxChars - maxChars}\n${requestedMaxChars > maxChars ? `reply_overhead_reason: continuation_reserve_chars (${CONTINUATION_RESERVE_CHARS}, held back for the continuation block)\n` : ''}spill_file: ${spillPath}\n${spillNote}${matchesCutNotice(matchesReturned, matchesTotal, maxChars)}`
+        const buildNotice = (matchesReturned, matchesTotal, deliveredChars = text.length) => `dispatch_id: ${noticeDispatchId}\nreply_truncated: true\nreply_chars: ${deliveredChars}\nreply_max_chars: ${maxChars}\nreply_full_chars: ${text.length}\nread_rest: gm_result dispatch_id=${noticeDispatchId}\n${spillNote}${matchesCutNotice(matchesReturned, matchesTotal, maxChars)}`
     let head = text
     let matchesTotal
     let matchesReturned
@@ -655,7 +655,7 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
     head = withoutLines(head, outcome)
     const fullNotice = buildNotice(matchesReturned, matchesTotal)
     const compact = fullNotice.length > maxChars / 2
-    const shortNotice = `reply_truncated: true\nreply_max_chars: ${maxChars}\nreply_full_chars: ${text.length} (raise max_chars to at least this to read the whole reply)\nspill_file: ${spillPath}\n${holder ? `matches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n` : ''}`
+    const shortNotice = `reply_truncated: true\nreply_max_chars: ${maxChars}\nreply_full_chars: ${text.length}\nread_rest: gm_result dispatch_id=${noticeDispatchId}\n${holder ? `matches_returned: ${matchesReturned}\nmatches_total: ${matchesTotal}\n` : ''}`
     const fits = (candidate) => kept.length + candidate.length <= maxChars
     const useFull = !compact && fits(fullNotice)
     let notice = useFull ? fullNotice : [shortNotice, `reply_truncated: true\nreply_full_chars: ${text.length}\n`, 'reply_truncated: true\n'].find(fits) ?? ''
@@ -2873,7 +2873,6 @@ function bundleNoticeTail(verb, drift) {
         bundle_served_sha: drift.running_sha256,
         bundle_installed_version: drift.installed_version,
         bundle_installed_sha: drift.installed_sha256,
-        bundle_served_path: drift.path ?? null,
         bundle_installed_path: installedPath,
         bundle_reloadable: drift.reloadable === true,
         bundle_action: drift.reloadable === true ? 'reload_pending' : 'none',
@@ -3251,7 +3250,6 @@ function healthBundleFields(drift) {
         bundle_stale_reason: drift.stale_reason ?? null,
         bundle_served_sha: drift.running_sha256 ? drift.running_sha256.slice(0, 12) : null,
         bundle_installed_sha: drift.installed_sha256 ? drift.installed_sha256.slice(0, 12) : null,
-        bundle_served_path: drift.path ?? null,
         bundle_installed_path: drift.installed_path ?? null,
     }
 }
@@ -3307,6 +3305,18 @@ function projectHealthFields(text, fields) {
     }
     const projected = { ...doc, data, ...(missing.length > 0 ? { fields_missing: missing } : {}) }
     return isJson ? JSON.stringify(projected) : yaml.dump(projected, { lineWidth: 100 })
+}
+
+function relativeToRoot(value, root) {
+    if (!root) return value
+    const prefix = `${root.replace(/[\\/]+$/, '')}/`
+    const walk = (node) => {
+        if (typeof node === 'string') return node.includes(prefix) ? node.split(prefix).join('') : node
+        if (Array.isArray(node)) return node.map(walk)
+        if (node && typeof node === 'object') return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, walk(v)]))
+        return node
+    }
+    return walk(value)
 }
 
 export async function gmDispatch(args, signal, responseValueObserver) {
@@ -3614,6 +3624,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (out && typeof out === 'object' && out.instruction_unchanged === true && bodyCarriesInstructionHash(normalizedBody)) {
                 out = { ...out, instruction_text_at: path.join(root, '.gm', 'next-step.md') }
             }
+            if (!full_response) out = relativeToRoot(out, root)
             if (include_timing === true || include_timing === 'true') {
                 const timingKey = isPlainObject(out) && 'mcp_timing' in out ? 'mcp_client_timing' : 'mcp_timing'
                 const { last_claimed_queue_wait_ms, ...daemonLiveness } = readDaemonLiveness(spoolDir)

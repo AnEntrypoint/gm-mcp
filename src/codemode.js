@@ -778,7 +778,7 @@ export function registerCodeMode(server, tools) {
                 const failedHead = echoed ? failedVerbLine(failedEntry) : null
                 const lead = echoed ? (failedHead === null ? [] : [failedHead]) : [...failingVerb, ...wrapper]
                 const tail = echoed ? [] : detailLines
-                const text = [...lead, `diagnostic_id: ${diagnosticId} (gm-mcp log key, not a spool dispatch id)`, `diagnostic_record: ${replyRecord}`, `log: ${logFilePath()}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
+                const text = [...lead, `diagnostic_id: ${diagnosticId}`, `session_id: ${session_id}`, ...logs, ...ids, ...tally, ...partial, ...tail].join('\n')
                 // A body that settled at least one gm call returns those results and per-call errors as one structured reply; isError is for a throw before any call.
                 return { content: [{ type: 'text', text: capWithContinuation(session_id, text, cap) }], isError: replies.length === 0 }
             } finally {
