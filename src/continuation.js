@@ -1,4 +1,5 @@
 import * as yaml from 'js-yaml'
+import { renderReply, parseReply } from './reply-format.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { isPlainObject } from './plain-object.js'
 
@@ -21,7 +22,7 @@ const WORST_CASE_CONTINUATION_BLOCK = {
     continuation: { state: 'stopped', pending_rows: 999999, idle_ms: 9999999999999, action: 'continue', max_concurrency: 4, reminder: GM_CONTINUE_REMINDER, next_prd: { id: WORST_FIELD, status: 'pending', title: WORST_FIELD }, checklist_uri: CHECKLIST_URI },
     bootstrap: { server: { version: BUNDLE_VERSION, transport: 'stdio' }, runner: { alive: false, heartbeat_age_ms: 9999999999999, heartbeat_stale: true }, pending: { count: 999999, next: { id: WORST_FIELD, status: 'pending', title: WORST_FIELD } }, checklist_uri: CHECKLIST_URI, bootstrap_complete: true, bootstrap_error: WORST_ERROR },
 }
-export const CONTINUATION_RESERVE_CHARS = yaml.dump(WORST_CASE_CONTINUATION_BLOCK, { lineWidth: 100 }).length + 1
+export const CONTINUATION_RESERVE_CHARS = renderReply(WORST_CASE_CONTINUATION_BLOCK).length + 1
 const DEFAULT_IDLE_NOTIFY_MS = 60000
 const MONITOR_TICK_MS = 15000
 const RELAY_KEY = 'relay'
@@ -135,7 +136,7 @@ export function continuedReply(key, text, now = Date.now(), force = false, prd =
     if (json && json.value && typeof json.value === 'object' && !Array.isArray(json.value)) return JSON.stringify({ ...json.value, continuation: snapshot })
     if (json) return text
     const body = textBeforeTrailingBlock(text)
-    const block = yaml.dump({ continuation: snapshot }, { lineWidth: 100 })
+    const block = renderReply({ continuation: snapshot })
     const separator = body === '' || body.endsWith('\n') ? '' : '\n'
     return `${body}${separator}${block}`
 }
@@ -165,7 +166,7 @@ export function withBlock(text, name, block) {
     if (json) return json.value !== null && typeof json.value === 'object' && !Array.isArray(json.value) ? JSON.stringify({ ...json.value, [name]: block }) : text
     const body = textBeforeTrailingBlock(text)
     const separator = body === '' || body.endsWith('\n') ? '' : '\n'
-    return `${body}${separator}${yaml.dump({ [name]: block }, { lineWidth: 100 })}${text.slice(body.length)}`
+    return `${body}${separator}${renderReply({ [name]: block })}${text.slice(body.length)}`
 }
 
 export function withBootstrap(text, block) {

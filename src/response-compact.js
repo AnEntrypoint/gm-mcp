@@ -1,5 +1,6 @@
 import { isPlainObject } from './plain-object.js';
 import * as yaml from 'js-yaml'
+import { renderReply, parseReply } from './reply-format.js'
 const NOISE_KEYS = new Set(['request_fingerprint'])
 
 function envPositiveInt(name, fallback) {
@@ -702,7 +703,7 @@ export function compactWireResponse(response, outPath, receiptVerb = response?.v
     return wireTextBytes(compacted) < wireTextBytes(response) ? compacted : response
 }
 
-const toYaml = value => yaml.dump(value, { lineWidth: 100 })
+const toYaml = value => renderReply(value)
 
 function wireTextBytes(value) {
     const text = (value.verb === 'fs_read' ? renderVerbatimFileText(value, toYaml) : undefined) ?? toYaml(value)

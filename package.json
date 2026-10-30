@@ -1,6 +1,6 @@
 {
   "name": "gm-mcp",
-  "version": "0.2.364",
+  "version": "0.2.365",
   "description": "MCP server exposing gm's spool dispatch cycle (write, poll, cleaned response) to any MCP client",
   "type": "module",
   "main": "src/index.js",
@@ -16,7 +16,9 @@
     "verify-build": "node scripts/check-bin-drift.mjs",
     "postinstall": "node scripts/install-hooks.mjs"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@toon-format/toon": "4.4.0"
+  },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "esbuild": "^0.28.2",

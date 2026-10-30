@@ -5,6 +5,7 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import * as yaml from 'js-yaml'
+import { renderReply, parseReply } from './reply-format.js'
 import { SKILLS } from './skills-snapshot.js'
 import { BUNDLE_VERSION } from './bundle-version.js'
 
@@ -100,34 +101,34 @@ export function gmSkillReply({ body = {}, maxChars = DEFAULT_MAX_CHARS } = {}) {
     const groups = byName()
     const name = typeof body.name === 'string' ? body.name.trim() : ''
     const file = typeof body.file === 'string' && body.file.trim() !== '' ? body.file.trim() : 'SKILL.md'
-    if (name === '' || truthy(body.list)) return yaml.dump(skillIndex(groups), { lineWidth: 100 })
+    if (name === '' || truthy(body.list)) return renderReply(skillIndex(groups))
     const entries = groups.get(name)
     if (!entries) {
-        return yaml.dump({
+        return renderReply({
             ok: false,
             verb: 'gm-skill',
             error: `no skill named ${name} in this bundle`,
             known: [...groups.keys()].sort(),
             next: { verb: 'gm-skill', list: true },
-        }, { lineWidth: 100 })
+        })
     }
     const entry = entries.find(candidate => candidate.file === file)
     if (!entry) {
-        return yaml.dump({
+        return renderReply({
             ok: false,
             verb: 'gm-skill',
             error: `${name} carries no file ${file}`,
             files: entries.map(candidate => candidate.file),
-        }, { lineWidth: 100 })
+        })
     }
     if (truthy(body.head) && file === 'SKILL.md') {
         // head asks for the frontmatter-only view: the description a host would show, not the prose.
-        return yaml.dump({ ok: true, verb: 'gm-skill', name, file, description: descriptionOf(entry.text) }, { lineWidth: 100 })
+        return renderReply({ ok: true, verb: 'gm-skill', name, file, description: descriptionOf(entry.text) })
     }
     const offset = toInt(body.offset ?? body.startLine ?? body.from, 1)
     const limit = toInt(body.limit ?? body.lines ?? body.count, DEFAULT_PAGE_LINES)
     const page = pageOf(entry, offset, limit, maxChars)
-    return yaml.dump({
+    return renderReply({
         ok: true,
         verb: 'gm-skill',
         bundle_version: BUNDLE_VERSION,
@@ -136,7 +137,7 @@ export function gmSkillReply({ body = {}, maxChars = DEFAULT_MAX_CHARS } = {}) {
         sha256: entry.sha256,
         ...page,
         note: 'Served from the gm-mcp bundle over the MCP protocol. gm writes no copy into any host skill root.',
-    }, { lineWidth: 100 })
+    })
 }
 
 export const GM_SKILL_BODY = {

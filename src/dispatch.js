@@ -8,6 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import * as yaml from 'js-yaml'
+import { renderReply, parseReply } from './reply-format.js'
 import { appendDiagnostic } from './server-log.js'
 import { gmSkillReply } from './skill-verb.js'
 import { recordChild } from './child-ledger.js'
@@ -289,7 +290,7 @@ export function fsWriteEnvelopeDiagnostic(verb, body) {
 // Returns the rewritten args, or a refusal reply.
 function exactLineEdit(args, root) {
     const body = args.body
-    const refuse = (message) => yaml.dump({ ok: false, verb: 'fs_write', dispatch_id: `refused-${nextN(explicitBodySessionId(body) || 'no-session')}`, error_code: 'line_edit_refused', refused: true, error: `fs_write refused: ${message}; nothing was written.` }, { lineWidth: 100 })
+    const refuse = (message) => renderReply({ ok: false, verb: 'fs_write', dispatch_id: `refused-${nextN(explicitBodySessionId(body) || 'no-session')}`, error_code: 'line_edit_refused', refused: true, error: `fs_write refused: ${message}; nothing was written.` })
     const rel = typeof body.path === 'string' ? body.path : ''
     if (!root) return refuse('no project root resolved for cwd')
     if (rel === '' || path.isAbsolute(rel) || rel.split(/[\\/]/).includes('..')) return refuse(`path ${JSON.stringify(rel)} must be project-relative with no ".." segment`)
@@ -790,7 +791,7 @@ function guardStaleIndexLocks(args) {
             appendDiagnostic('index-lock-quarantined', { verb: args.verb, lock: lock.lock, quarantined: lock.quarantined, age_ms: lock.age_ms })
         } else if (lock.state === 'refused') {
             appendDiagnostic('index-lock-refused', { verb: args.verb, lock: lock.lock, reason: lock.reason, owners: lock.owners })
-            return { refusal: yaml.dump({ ok: false, verb: args.verb, error_code: 'index_lock_held', lock: lock.lock, reason: lock.reason, size: lock.size, age_ms: lock.age_ms, owners: lock.owners, hint: 'a git process holds this index.lock, or it is under 1 h old or non-empty so it cannot be judged stale; nothing was changed. Re-dispatch once that writer finishes.' }, { lineWidth: 100 }), note: null }
+            return { refusal: renderReply({ ok: false, verb: args.verb, error_code: 'index_lock_held', lock: lock.lock, reason: lock.reason, size: lock.size, age_ms: lock.age_ms, owners: lock.owners, hint: 'a git process holds this index.lock, or it is under 1 h old or non-empty so it cannot be judged stale; nothing was changed. Re-dispatch once that writer finishes.' }), note: null }
         }
     }
     return { refusal: null, note: notes.length > 0 ? notes.join('; ') : null }
@@ -1500,7 +1501,7 @@ function withPrdListNextOffset(out) {
 export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_DEFAULT_CHARACTERS, cwd, root, projectPath }) {
     const namedRoot = [cwd, root, projectPath].find(value => typeof value === 'string' && value.trim())
     const rootDir = namedRoot ? path.resolve(namedRoot.trim()) : path.resolve(process.cwd())
-    const toYaml = value => yaml.dump(value, { lineWidth: 100 })
+    const toYaml = value => renderReply(value)
     if (typeof result_file !== 'string' || !result_file) return toYaml({ error: 'result_file required' })
     if (field !== undefined && (typeof field !== 'string' || !field)) return toYaml({ error: 'field must be a non-empty string when provided' })
     const pageOffset = wholeNumber(offset)
@@ -2696,7 +2697,7 @@ export function replyReportsFailure(text) {
     if (trimmed === '') return false
     let doc
     try {
-        doc = trimmed.startsWith('{') ? JSON.parse(trimmed) : yaml.load(trimmed)
+        doc = parseReply(trimmed)
     } catch {
         return /^error:/.test(trimmed)
     }
@@ -2866,7 +2867,7 @@ const VERBATIM_REPLY_VERBS = new Set(['fs_read', 'result', 'gm_result'])
 
 function bundleNoticeTail(verb, drift) {
     const installedPath = drift.installed_path ?? drift.path
-    const block = yaml.dump({
+    const block = renderReply({
         bundle_stale: true,
         bundle_stale_reason: drift.stale_reason ?? null,
         bundle_served_version: drift.running_version,
@@ -2879,7 +2880,7 @@ function bundleNoticeTail(verb, drift) {
         bundle_restart: drift.reloadable === true ? 'not needed: reloading between dispatches' : `restart the MCP client that launched this server (or reconnect the gm MCP server) so it relaunches from ${installedPath}`,
         one_command: drift.one_command ?? null,
         bundle_answer_from: 'served-bundle',
-    }, { lineWidth: 100 })
+    })
     if (READ_ONLY_STATUS_VERBS.has(verb)) return block + '\n'
     const line = bundleStalenessAnnouncement(drift)
     return line ? block + '\n' + line + '\n' : block + '\n'
@@ -3096,7 +3097,7 @@ async function withFailingJobLogs(args, raw, signal, observer) {
     const failing_jobs = await Promise.all(parsed.failing_jobs.map(async (job) => (
         isPlainObject(job) && job.job_id !== undefined ? { ...job, ...(await failingJobLogSummary(args, job, signal, observer)) } : job
     )))
-    return yaml.dump({ ...parsed, failing_jobs }, { lineWidth: 100 })
+    return renderReply({ ...parsed, failing_jobs })
 }
 
 function sleepUnlessAborted(ms, signal) {
@@ -3140,7 +3141,7 @@ function closeReferenceRefusal(args) {
     const message = referenceGateRefusal(resolved.root, id, args.verb)
     if (message === null) return null
     const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
-    return yaml.dump({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'references_required', refused: true, error: message }, { lineWidth: 100 })
+    return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'references_required', refused: true, error: message })
 }
 
 // A close is recorded by a commit in the store's log whose body carries Row, Witness and Status trailers (publish_on_origin writes them).
@@ -3205,7 +3206,7 @@ function closeTrailerRefusal(args) {
     if (id === null || resolved.error || !resolved.root) return null
     if (refutedStaleClose(args) || rowCloseCommitRecorded(resolved.root, id)) return null
     const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
-    return yaml.dump({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'close_commit_required', refused: true, error: `${args.verb} refused: row ${id} has no closing commit in the store's log. Commit the close with publish_on_origin (witness and status set) so its body carries ${CLOSE_TRAILERS}; nothing was closed.`, trailers_required: ['Row', 'Witness', 'Status'] }, { lineWidth: 100 })
+    return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'close_commit_required', refused: true, error: `${args.verb} refused: row ${id} has no closing commit in the store's log. Commit the close with publish_on_origin (witness and status set) so its body carries ${CLOSE_TRAILERS}; nothing was closed.`, trailers_required: ['Row', 'Witness', 'Status'] })
 }
 
 // A blocker is a note on the open row it blocks, never a row of its own: a -blocker- child whose parent row exists is refused.
@@ -3217,12 +3218,12 @@ function blockerRowRefusal(args) {
     const scope = resolveDispatchRoot(args?.cwd)
     if (scope.error || !scope.root || readRow(scope.root, parent).error_code !== undefined) return null
     const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
-    return yaml.dump({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'blocker_row_refused', refused: true, error: `${args.verb} refused: ${id} is a blocker of open row ${parent}, so nothing was filed. Annotate the parent instead: gm.prd_note({cwd, id: "${parent}", note: "<blocker>"}).`, parent }, { lineWidth: 100 })
+    return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'blocker_row_refused', refused: true, error: `${args.verb} refused: ${id} is a blocker of open row ${parent}, so nothing was filed. Annotate the parent instead: gm.prd_note({cwd, id: "${parent}", note: "<blocker>"}).`, parent })
 }
 
 function prdAddCwdRefusal(args) {
     const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
-    return yaml.dump({
+    return renderReply({
         ok: false,
         verb: 'prd-add',
         dispatch_id: `refused-${nextN(session)}`,
@@ -3230,7 +3231,7 @@ function prdAddCwdRefusal(args) {
         refused: true,
         error: 'prd-add refused: no cwd was passed. Without cwd the row would be written into the process default project ledger, so nothing was written. Pass cwd (the project root that holds .gm/prd) on every prd-add call.',
         accepted_fields: ['cwd'],
-    }, { lineWidth: 100 })
+    })
 }
 
 // health {fields}: a comma-separated string or an array of data keys to keep; null when the reply is full.
@@ -3274,7 +3275,7 @@ function withHealthBundleFields(text) {
     if (!isPlainObject(doc)) return text
     const data = isPlainObject(doc.data) ? doc.data : {}
     const projected = { ...doc, data: { ...data, ...healthBundleFields(bundleDrift()), ...healthSourceFields(data) } }
-    return isJson ? JSON.stringify(projected) : yaml.dump(projected, { lineWidth: 100 })
+    return isJson ? JSON.stringify(projected) : renderReply(projected)
 }
 
 function withoutBodyKey(body, key) {
@@ -3304,7 +3305,7 @@ function projectHealthFields(text, fields) {
         else data[key] = doc.data[key]
     }
     const projected = { ...doc, data, ...(missing.length > 0 ? { fields_missing: missing } : {}) }
-    return isJson ? JSON.stringify(projected) : yaml.dump(projected, { lineWidth: 100 })
+    return isJson ? JSON.stringify(projected) : renderReply(projected)
 }
 
 function relativeToRoot(value, root) {
@@ -3369,7 +3370,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
     if (args?.verb === CONTINUATION_STOP_VERB) {
         const key = continuationKeyOf(args)
         setContinuationStopped(key, true)
-        return continuedReply(key, yaml.dump({ ok: true, verb: CONTINUATION_STOP_VERB, session_id: key || null }, { lineWidth: 100 }))
+        return continuedReply(key, renderReply({ ok: true, verb: CONTINUATION_STOP_VERB, session_id: key || null }))
     }
     if (args?.verb === 'instruction' && typeof args?.body?.prompt === 'string' && args.body.prompt.trim() !== '') {
         setContinuationStopped(continuationKeyOf(args), false)
@@ -3422,7 +3423,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const resolvedRoot = resolveDispatchRoot(cwd)
     if (resolvedRoot.error) {
         appendDiagnostic('dispatch-root-refused', { verb, root: resolvedRoot.refused_root, reason: resolvedRoot.refused_reason })
-        return yaml.dump(resolvedRoot, { lineWidth: 100 })
+        return renderReply(resolvedRoot)
     }
     if (resolvedRoot.root_source !== 'cwd') {
         appendDiagnostic('dispatch-root-defaulted', { verb, root: resolvedRoot.root, source: resolvedRoot.root_source })
@@ -3442,7 +3443,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     pruneSpoolResponsesOnce(outDir)
     const callStartedAtMs = Date.now()
     let lastWakeSource = 'initial_check'
-    const toYaml = (obj) => yaml.dump(obj, { lineWidth: 100 })
+    const toYaml = (obj) => renderReply(obj)
 
     const isPlainText = PLAIN_TEXT_BODY_VERBS.has(verb) || typeof raw_body === 'string'
     if (!resume_task && isPlainText && typeof raw_body !== 'string') {

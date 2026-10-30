@@ -12,7 +12,7 @@ import { NOTICES } from './notices.js'
 import { CONTINUATION_RESERVE_CHARS, continuedReplyWithin } from './continuation.js'
 import { CODEMODE_HEARTBEAT_MS, DEFAULT_CODEMODE_TIMEOUT_MS } from './codemode-budget.js'
 import { browserAfterCall, screenshotPathsOf } from './browser-feed.js'
-import { load as yamlLoad } from 'js-yaml'
+import { parseReply } from './reply-format.js'
 
 let codemodeInvocationSeq = 0
 const newCodemodeSessionId = () => `mcp-codemode-${process.pid}-${Date.now()}-${++codemodeInvocationSeq}`
@@ -672,7 +672,7 @@ function replyValue(text) {
 function parsedReplyValue(text) {
     let parsed
     try {
-        parsed = yamlLoad(text)
+        parsed = parseReply(text)
     } catch {
         return replyValue(text)
     }
