@@ -951,7 +951,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     const unintended = changed.filter((name) => !paths.includes(name) && name !== 'skills/manifest.sha256')
     if (unintended.length > 0) return refused('unintended_paths', 'commit changes paths outside the list; nothing pushed', [['commit', sha]], unintended)
 
-    if (!noTrackedChange && !isFile(checker)) return refused('checker_missing', `secrets checker not found at ${checker}; nothing pushed`)
+    if (!noTrackedChange && !isFile(checker)) return refused('checker_missing', `secrets checker not found at ${checker}; nothing pushed. Remedy: copy scripts/check-staged-secrets.mjs from AnEntrypoint/gm into this repo at that path, commit it, then re-dispatch`)
     const scan = noTrackedChange ? { status: 0 } : await run(process.execPath, [checker], { cwd: repo, env: indexEnv })
     if (scan.status !== 0) {
         const output = `${utf8(scan.stdout)}\n${utf8(scan.stderr)}`.split('\n').filter((line) => line.trim() !== '')
