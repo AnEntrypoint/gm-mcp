@@ -244,9 +244,43 @@ function cutAtWordBoundary(value, budget) {
 const ANSI_CODE = /\u001b\[[0-9;]*[A-Za-z]/g
 const DEDUP_MIN_RUN = 3
 
+function uniformFlatTable(text) {
+    let value
+    try {
+        value = JSON.parse(text)
+    } catch {
+        return null
+    }
+    if (!Array.isArray(value) || value.length < 2 || !value[0] || typeof value[0] !== 'object' || Array.isArray(value[0])) return null
+    const keys = Object.keys(value[0])
+    const scalar = (v) => v === null || ['string', 'number', 'boolean'].includes(typeof v)
+    const cell = (v) => {
+        if (v === null) return 'null'
+        if (typeof v !== 'string') return String(v)
+        if (v === '' || v === 'null' || /[,\n\r"]|^\s|\s$/.test(v)) return null
+        return v
+    }
+    const rows = []
+    for (const row of value) {
+        if (!row || typeof row !== 'object' || Array.isArray(row)) return null
+        const got = Object.keys(row)
+        if (got.length !== keys.length || !keys.every((k, i) => k === got[i]) || !keys.every(k => scalar(row[k]))) return null
+        const cells = keys.map(k => cell(row[k]))
+        if (cells.includes(null)) return null
+        rows.push(`  ${cells.join(',')}`)
+    }
+    const table = `[${value.length}]{${keys.join(',')}}:\n${rows.join('\n')}`
+    return table.length < JSON.stringify(value).length ? table : null
+}
+
 export function squeezeExecOutput(text) {
-    if (!text.includes('\u001b') && !/(^|\n)([^\n]+)\n\2(\n\2)+/.test(text)) return text
-    const lines = text.replace(ANSI_CODE, '').split('\n')
+    const table = uniformFlatTable(text.trim())
+    if (table !== null) return table
+    if (!text.includes('\u001b') && !text.includes('\r') && !/(^|\n)([^\n]+)\n\2(\n\2)+/.test(text)) return text
+    const framed = text.includes('\r')
+        ? text.split('\n').map(line => (line.includes('\r') ? line.split('\r').reverse().find(seg => seg !== '') ?? '' : line)).join('\n')
+        : text
+    const lines = framed.replace(ANSI_CODE, '').split('\n')
     const out = []
     for (let i = 0; i < lines.length;) {
         let run = 1
