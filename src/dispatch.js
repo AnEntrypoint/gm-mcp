@@ -372,6 +372,28 @@ export function applyFsReadRangeFallback(verb, body, out, inlineMax) {
     return fsReadTruncation(verb, body, applyFsReadRangeFallbackRaw(verb, body, out, inlineMax))
 }
 
+const FS_READ_WHOLE_FILE_HEADROOM_CHARS = 2048
+
+function fsReadSizeBytes(out) {
+    const raw = out.size_bytes ?? (isPlainObject(out.data) ? out.data.size_bytes : undefined)
+    if (raw === undefined || raw === null) return undefined
+    const size = Number(raw)
+    return Number.isFinite(size) ? size : undefined
+}
+
+// Body signal for a reply gm-mcp cut: bytes kept, bytes in the file when known, and the call that returns the rest.
+// nextLine null means the cut fell inside one line, so only a larger max_chars can return it.
+function fsReadCutSignal(kept, nextLine, totalBytes) {
+    const signal = { has_more: true, returned_bytes: Buffer.byteLength(kept, 'utf8') }
+    if (totalBytes !== undefined) signal.total_bytes = totalBytes
+    const steps = []
+    if (nextLine !== null) steps.push(`fs_read startLine:${nextLine} reads the rest`)
+    if (totalBytes !== undefined && totalBytes + FS_READ_WHOLE_FILE_HEADROOM_CHARS <= LONG_TEXT_INLINE_MAX_CEILING) steps.push(`max_chars:${totalBytes + FS_READ_WHOLE_FILE_HEADROOM_CHARS} returns the whole file in one reply`)
+    if (steps.length === 0) steps.push('raise max_chars to return more of the line')
+    signal.read_rest = steps.join(', or ')
+    return signal
+}
+
 function fsReadUnrangedPage(out, inlineMax) {
     if (!(inlineMax > 0) || out.ok === false || typeof out.data !== 'string' || out.data.length <= inlineMax) return out
     const lines = out.data.replace(/\n$/, '').split('\n')
@@ -395,7 +417,7 @@ function fsReadUnrangedPage(out, inlineMax) {
         has_more_lines: more,
         truncated_at_bytes: more,
         offset: 0,
-        ...(more ? { next_start_line: count + 1 } : {}),
+        ...(more ? { next_start_line: count + 1, ...fsReadCutSignal(lines.slice(0, count).join('\n'), count + 1, fsReadSizeBytes(out) ?? Buffer.byteLength(out.data, 'utf8')) } : {}),
     }
 }
 
@@ -409,6 +431,7 @@ function fsReadFitReply(out, replyCap, toYaml) {
     if (lines.length === 0) return out
     const start = Number.isFinite(Number(body.start_line)) ? Number(body.start_line) : 1
     const total = Number.isFinite(Number(body.total_lines)) ? Number(body.total_lines) : start - 1 + lines.length
+    const fileBytes = fsReadSizeBytes(out) ?? (start === 1 && total === lines.length ? Buffer.byteLength(body[key], 'utf8') : undefined)
     const cutAt = (count) => {
         const cut = count < lines.length
         const fields = {
@@ -419,7 +442,7 @@ function fsReadFitReply(out, replyCap, toYaml) {
             total_lines: total,
             has_more_lines: cut,
             truncated_at_bytes: cut,
-            ...(cut ? { next_start_line: start + count } : {}),
+            ...(cut ? { next_start_line: start + count, ...fsReadCutSignal(lines.slice(0, count).join('\n'), start + count, fileBytes) } : {}),
         }
         return {
             ...out,
@@ -438,7 +461,7 @@ function fsReadFitReply(out, replyCap, toYaml) {
     if (low === 1 && renderVerbatimFileText(cutAt(1), toYaml).length > replyCap) {
         // One line longer than the cap: cut it by characters, so the reply keeps verbatim text and marks the line partial.
         const cutChars = (count) => {
-            const fields = { [key]: lines[0].slice(0, count), start_line: start, end_line: start, returned_lines: 1, total_lines: total, has_more_lines: true, truncated_at_bytes: true, partial_line: true }
+            const fields = { [key]: lines[0].slice(0, count), start_line: start, end_line: start, returned_lines: 1, total_lines: total, has_more_lines: true, truncated_at_bytes: true, partial_line: true, ...fsReadCutSignal(lines[0].slice(0, count), null, fileBytes) }
             return { ...out, ...(nested ? { data: { ...body, ...fields } } : fields), truncated: true }
         }
         let lo = 0
@@ -673,8 +696,9 @@ function capReplyText(text, maxChars, spillPath, out, toYaml, spillNote = '', re
     return `${kept}${head}${notice}`.slice(0, maxChars)
 }
 
-function shapeGitStatusReply(verb, body, out) {
+function shapeGitStatusReply(verb, body, out, fullResponse = false) {
     if (verb !== 'git_status' || !isPlainObject(out)) return out
+    if (!fullResponse) out = capGitStatusLists(body, out)
     if (!Array.isArray(out.first_paths)) return out
     const limit = Number(body?.limit)
     const hasLimit = body?.limit !== undefined && Number.isFinite(limit) && limit >= 0
@@ -686,6 +710,27 @@ function shapeGitStatusReply(verb, body, out) {
         return { ...out, first_paths: out.first_paths.slice(0, limit), first_paths_omitted: out.first_paths.length - limit }
     }
     return out
+}
+
+// rs-plugkit lists each git_status category up to `limit` (default 10). A call without limit asks for one above the full-list
+// threshold, so up to GIT_STATUS_FULL_LIST_MAX changed paths list in full; above it each list is cut back to the default here.
+const GIT_STATUS_LIST_CEILING = 51
+const GIT_STATUS_FULL_LIST_MAX = 50
+const GIT_STATUS_CAPPED_LIST_LEN = 10
+const GIT_STATUS_LIST_KEYS = ['modified', 'untracked', 'deleted', 'staged']
+
+function capGitStatusLists(body, out) {
+    if (body?.summary === true || body?.limit !== undefined) return out
+    const changed = Number(out.counts?.changed_paths)
+    if (!(changed > GIT_STATUS_FULL_LIST_MAX)) return out
+    const cut = GIT_STATUS_LIST_KEYS.filter((key) => Array.isArray(out[key]) && out[key].length > GIT_STATUS_CAPPED_LIST_LEN)
+    const capped = {
+        ...out,
+        paging: out.paging ?? `changed_paths ${changed} is above ${GIT_STATUS_FULL_LIST_MAX}, so each list shows its first ${GIT_STATUS_CAPPED_LIST_LEN}; counts are complete. Narrow with paths:[<prefix or glob>] or raise limit:<n>.`,
+    }
+    for (const key of cut) capped[key] = out[key].slice(0, GIT_STATUS_CAPPED_LIST_LEN)
+    if (cut.length > 0) Object.assign(capped, { truncated: true, truncated_lists: cut })
+    return capped
 }
 
 const GIT_ADD_BLANKET_LIMIT = 50
@@ -3558,6 +3603,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (stored) return toYaml(stored)
         } else {
             const { lane_wait_ms: _publicLaneWait, ...callerBody } = normalizedBody
+            if (verb === 'git_status' && callerBody.summary !== true && callerBody.limit === undefined) callerBody.limit = GIT_STATUS_LIST_CEILING
             if (verb === 'prd-list' && prdListQuery(normalizedBody)) {
                 delete callerBody.query
                 callerBody.limit ??= PRD_LIST_QUERY_SCAN_LIMIT
@@ -3615,7 +3661,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
             if (verb === 'prd-list' && isPlainObject(out) && out.ledger === undefined) out = { ...out, ledger: root, ledger_source: resolvedRoot.root_source }
-            out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, await gitShowCaptureFallback(verb, normalizedBody, out, root))))
+            out = withCheckoutCreateHint(verb, normalizedBody, shapeGitStatusReply(verb, normalizedBody, shapeGitDiffReply(verb, normalizedBody, await gitShowCaptureFallback(verb, normalizedBody, out, root)), full_response))
             out = withCodesearchDualPathScope(codesearchDualScope, out)
             out = withRuleExcludedMatchesDropped(verb, out)
             out = withCodesearchKCut(codesearchKDefaulted, verb, out)
