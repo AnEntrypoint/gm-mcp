@@ -431,7 +431,7 @@ function fsReadFitReply(out, replyCap, toYaml) {
     if (lines.length === 0) return out
     const start = Number.isFinite(Number(body.start_line)) ? Number(body.start_line) : 1
     const total = Number.isFinite(Number(body.total_lines)) ? Number(body.total_lines) : start - 1 + lines.length
-    const fileBytes = fsReadSizeBytes(out) ?? (start === 1 && total === lines.length ? Buffer.byteLength(body[key], 'utf8') : undefined)
+    const fileBytes = fsReadSizeBytes(out) ?? (typeof out.total_bytes === 'number' ? out.total_bytes : start === 1 && total === lines.length ? Buffer.byteLength(body[key], 'utf8') : undefined)
     const cutAt = (count) => {
         const cut = count < lines.length
         const fields = {
