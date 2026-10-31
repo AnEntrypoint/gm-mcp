@@ -419,6 +419,14 @@ const FS_WRITE_BODY = {
         append: { type: 'boolean', description: 'Appends instead of replacing.' },
     },
 }
+const FS_EDIT_BODY = {
+    required: ['path', 'old', 'new'],
+    fields: {
+        path: { type: 'string', description: 'Project-relative path. allowOutsideRoot never widens an edit.' },
+        old: { type: 'string', description: 'Exact text to replace. It must occur exactly once in the file; zero or several matches refuse with invalid_args and the match count, and nothing is written.' },
+        new: { type: 'string', description: 'Replacement text. Empty deletes old.' },
+    },
+}
 const FS_READDIR_BODY = {
     required: [],
     fields: {
@@ -428,6 +436,7 @@ const FS_READDIR_BODY = {
         recursive: { type: 'boolean', description: 'Walk subdirectories too. Implies mtime.' },
         mtime: { type: 'boolean', description: 'Return {path, isDirectory, size, mtime_ms} per entry instead of bare names; path is relative to the listed directory.' },
         max_entries: { type: 'integer', description: 'Cap on entries collected. Walks default to 1000 and cap at 5000; the reply then sets partial_reason max_entries.' },
+        include_hidden: { type: 'boolean', description: 'A recursive walk skips dot-directories and exec-spool unless this is true.' },
         allowOutsideRoot: { type: 'boolean', aliases: ['allow_outside_root', 'allowAbsolute'], description: 'Widens the read to another root.' },
     },
 }
@@ -746,6 +755,7 @@ const EXPANSION_AUDIT_BODY = {
 const REGISTRY_ROWS = [
     { canonical: 'fs_read', aliases: FS_READ_RANGE_ALIASES, fields: FS_READ_RANGE_FIELDS, description: FS_READ_DESCRIPTION, body: FS_READ_BODY },
     { canonical: 'fs_write', body: FS_WRITE_BODY },
+    { canonical: 'fs_edit', body: FS_EDIT_BODY },
     { canonical: 'fs_readdir', description: FS_READDIR_PATH_RULE, body: FS_READDIR_BODY },
     { canonical: 'fs_stat', body: FS_STAT_BODY },
     { canonical: 'fetch', aliases: FETCH_KEYS, fields: FETCH_FIELDS, description: FETCH_DESCRIPTION, body: FETCH_BODY },
