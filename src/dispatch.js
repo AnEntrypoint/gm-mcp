@@ -6,7 +6,7 @@ import { spoolFs as fs, spoolSpawn as spawn } from './spool-port.js'
 import { claimByCreate, claimByLink, readJsonOrNull, readLockHolderPid, readOwnerText, readPidTsLock, readStatusJson, readTextOrNull, reclaimLockByRename, replaceLockText, writeTextAtomically as writeFileAtomically, SPOOL_DIR_MODE, SPOOL_FILE_MODE } from './spool-store.js'
 import os from 'node:os'
 import path from 'node:path'
-import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import * as yaml from 'js-yaml'
 import { renderReply, parseReply } from './reply-format.js'
 import { appendDiagnostic } from './server-log.js'
@@ -1627,6 +1627,35 @@ function withPrdListNextOffset(out) {
     const offset = Number(out.offset) || 0
     const count = Number(out.count) || 0
     return count > 0 ? { ...out, next_offset: offset + count } : out
+}
+
+// A close that origin/main records (closes/<id>.txt) while this checkout is behind leaves the local open row
+// (.gm/prd/<id>.yml) pending. Such a row leaves the open statuses here and, under completed or all, reads completed
+// with the close's witness. Reads origin/main as last fetched; it fetches nothing.
+const PRD_OPEN_STATUSES = ['pending', 'ready', 'blocked']
+function withOriginClosedRows(out, root, body) {
+    if (!isPlainObject(out) || out.ok === false || !Array.isArray(out.items)) return out
+    const prdDir = path.join(root, '.gm', 'prd')
+    if (!existsSync(prdDir)) return out
+    const closed = new Map()
+    for (const file of readdirSync(prdDir)) {
+        if (!file.endsWith('.yml')) continue
+        const id = file.slice(0, -'.yml'.length)
+        const record = originCloseRecord(root, 'origin/main', id)
+        if (record !== null) closed.set(id, record)
+    }
+    if (closed.size === 0) return out
+    const status = typeof body?.status === 'string' ? body.status : 'pending'
+    const open = out.items.filter((row) => !(isPlainObject(row) && closed.has(row.id) && PRD_OPEN_STATUSES.includes(row.status)))
+    const removed = out.items.length - open.length
+    const listed = new Set(open.map((row) => row?.id))
+    const completed = status === 'completed' || status === 'all'
+        ? [...closed].filter(([id]) => !listed.has(id)).map(([id, record]) => ({ id, status: 'completed', witness: record.witness, close_status: record.status, closed_on_origin: `origin/main closes/${id}.txt` }))
+        : []
+    if (removed === 0 && completed.length === 0) return out
+    const items = [...open, ...completed]
+    const pendingTotal = typeof out.pending_total === 'number' ? Math.max(0, out.pending_total - removed) : out.pending_total
+    return { ...out, items, count: items.length, pending_total: pendingTotal }
 }
 
 export function gmResult({ result_file, field, offset = 0, limit = RESULT_CHUNK_DEFAULT_CHARACTERS, cwd, root, projectPath }) {
@@ -3292,14 +3321,20 @@ function closeWitnessGateRefusal(args) {
 // A close is recorded by the closing commit, which appends "<row> <status> <witness> <timestamp>" to closes/<row>.txt (publish_on_origin writes it).
 const CLOSE_RECORD = 'closes/<row>.txt line: <row> resolved|stale <dispatch id> <timestamp>'
 
-function closeRecordLogged(dir, ref, id) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) return false
+// The closes/<row>.txt line that closes id on ref: { row, status, witness, ts }, or null.
+function originCloseRecord(dir, ref, id) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) return null
     const record = runGit(dir, ['show', `${ref}:closes/${id}.txt`])
-    if (!record.ok) return false
-    return record.out.split('\n').some((line) => {
-        const [row, status, witness] = line.trim().split(' ')
-        return row === id && (status === 'resolved' || status === 'stale') && Boolean(witness)
-    })
+    if (!record.ok) return null
+    for (const line of record.out.split('\n')) {
+        const [row, status, witness, ts] = line.trim().split(' ')
+        if (row === id && (status === 'resolved' || status === 'stale') && witness) return { row, status, witness, ts: ts ?? null }
+    }
+    return null
+}
+
+function closeRecordLogged(dir, ref, id) {
+    return originCloseRecord(dir, ref, id) !== null
 }
 
 function submoduleDirs(root) {
@@ -3765,7 +3800,7 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
                 for (const key of ['complete', 'complete_reason', 'exhaustive']) if (key in out && key in data) delete data[key]
                 out = { ...out, data }
             }
-            if (verb === 'prd-list') out = withPrdListQueryFilter(withPrdListNextOffset(out), prdListQuery(normalizedBody))
+            if (verb === 'prd-list') out = withPrdListQueryFilter(withPrdListNextOffset(withOriginClosedRows(out, root, normalizedBody)), prdListQuery(normalizedBody))
             if (!full_response) out = withQuietAdmission(withNoticeCodes(out))
             if (ownerTransport && ownerTransport !== 'header-v1' && isPlainObject(out)) out = { ...out, owner_transport: ownerTransport }
             if (!full_response) out = carriedNoFailure(out) ? compactWireResponse(out, outPath) : omitRepeatedFaultStdout(out, outPath)
