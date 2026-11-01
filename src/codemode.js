@@ -591,6 +591,15 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             return replyOf(text)
         }, fail)
     }
+    const tryCall = async (verb, args = {}, envelope = undefined) => {
+        const resolved = resolve(verb)
+        if (!resolved) return isolatedFailure(unknownNameError(verb, names))
+        try {
+            return await call(resolved, args, envelope)
+        } catch (error) {
+            return isolatedFailure(error)
+        }
+    }
     let envelopeCache
     const dispatchEnvelopeSchema = () => {
         if (envelopeCache !== undefined) return envelopeCache
@@ -607,7 +616,8 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
     }
     const api = {
         list: (options) => listEntries(tools, options),
-        help: () => ({ notices: NOTICES, list_options: { filter: 'substring of name, verb, alias or description', names_only: 'true returns names only', max_desc: `description chars (default ${DEFAULT_LIST_DESC_CHARS}, 0 = full)` }, codemode_max_chars: `reply cap (default ${DEFAULT_CODEMODE_MAX_CHARS})`, [DISPATCH_ENVELOPE_NAME]: dispatchEnvelopeSchema() }),
+        try: tryCall,
+        help: () => ({ notices: NOTICES, list_options: { filter: 'substring of name, verb, alias or description', names_only: 'true returns names only', max_desc: `description chars (default ${DEFAULT_LIST_DESC_CHARS}, 0 = full)` }, codemode_max_chars: `reply cap (default ${DEFAULT_CODEMODE_MAX_CHARS})`, isolated_call: 'gm.try(verb, args) returns the reply, or {error, error_code, dispatch_id} when that one call fails, and the rest of the body keeps running; gm.<verb>() still throws', [DISPATCH_ENVELOPE_NAME]: dispatchEnvelopeSchema() }),
         describe: (nameOrArgs) => {
             const name = isPlainObject(nameOrArgs) ? nameOrArgs.name : nameOrArgs
             const resolved = resolve(name)
@@ -642,6 +652,15 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             return typeof property === 'string' && (property in target || resolve(property) !== null)
         },
     })
+}
+
+function isolatedFailure(error) {
+    const text = describeError(error)
+    return {
+        error: text,
+        error_code: /error_code[:=]\s*(\S+)/.exec(text)?.[1] ?? null,
+        dispatch_id: /dispatch_id[:=]\s*(\S+)/.exec(text)?.[1] ?? null,
+    }
 }
 
 function jsonText(value) {
