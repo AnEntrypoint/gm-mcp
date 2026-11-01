@@ -86,7 +86,8 @@ export const GUEST_ACCEPTED_FIELDS = {
     ],
     "git_branch": [
         "remote",
-        "all"
+        "all",
+        "rename"
     ],
     "git_checkout": [
         "ref",
