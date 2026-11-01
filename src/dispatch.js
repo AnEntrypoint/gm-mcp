@@ -3037,7 +3037,7 @@ function bundleNoticeTail(verb, drift) {
         bundle_installed_path: installedPath,
         bundle_reloadable: drift.reloadable === true,
         bundle_action: drift.reloadable === true ? 'reload_pending' : 'none',
-        bundle_restart: drift.reloadable === true ? 'not needed: reloading between dispatches' : `restart the MCP client that launched this server (or reconnect the gm MCP server) so it relaunches from ${installedPath}`,
+        bundle_restart: drift.reloadable === true ? 'not needed: reloading between dispatches' : `run /mcp and reconnect the gm client so it relaunches from ${installedPath}`,
         one_command: drift.one_command ?? null,
         bundle_answer_from: 'served-bundle',
     })
