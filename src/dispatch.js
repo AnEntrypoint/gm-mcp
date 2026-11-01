@@ -3208,15 +3208,16 @@ function closeReferenceRefusal(args) {
     return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'references_required', refused: true, error: message })
 }
 
-// A close is recorded by a commit in the store's log whose body carries Row, Witness and Status trailers (publish_on_origin writes them).
-const CLOSE_TRAILERS = 'Row: <id>, Witness: <dispatch id>, Status: resolved|stale'
+// A close is recorded by the closing commit, which appends "<row> <status> <witness> <timestamp>" to closes/<row>.txt (publish_on_origin writes it).
+const CLOSE_RECORD = 'closes/<row>.txt line: <row> resolved|stale <dispatch id> <timestamp>'
 
-function trailerLogHas(dir, ref, id) {
-    const log = runGit(dir, ['log', ref, '--format=%B%x1e', '--fixed-strings', `--grep=Row: ${id}`, '-n', '500'])
-    if (!log.ok) return false
-    return log.out.split('\x1e').some((body) => {
-        const lines = body.split('\n').map((line) => line.trim())
-        return lines.includes(`Row: ${id}`) && lines.some((line) => /^Witness: \S/.test(line)) && lines.some((line) => /^Status: (resolved|stale)$/.test(line))
+function closeRecordLogged(dir, ref, id) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) return false
+    const record = runGit(dir, ['show', `${ref}:closes/${id}.txt`])
+    if (!record.ok) return false
+    return record.out.split('\n').some((line) => {
+        const [row, status, witness] = line.trim().split(' ')
+        return row === id && (status === 'resolved' || status === 'stale') && Boolean(witness)
     })
 }
 
@@ -3226,14 +3227,14 @@ function submoduleDirs(root) {
     return cfg.out.split('\n').map((line) => line.slice(line.indexOf(' ') + 1)).filter(Boolean).map((rel) => `${root}/${rel}`)
 }
 
-// The parent's HEAD log, or any submodule's origin/main log: a close committed inside a submodule is recorded there.
+// The parent's HEAD, or any submodule's origin/main: a close committed inside a submodule is recorded there.
 function rowCloseCommitRecorded(root, id) {
-    if (trailerLogHas(root, 'HEAD', id)) return true
-    return submoduleDirs(root).some((dir) => trailerLogHas(dir, 'origin/main', id))
+    if (closeRecordLogged(root, 'HEAD', id)) return true
+    return submoduleDirs(root).some((dir) => closeRecordLogged(dir, 'origin/main', id))
 }
 
 // A stale close records a refuted premise, not a content change, so it needs no closing commit. It is accepted only when its witness
-// is a ledgered dispatch of this project and its resolution states the refutation. A resolved close still needs the commit trailer.
+// is a ledgered dispatch of this project and its resolution states the refutation. A resolved close still needs its closes/<row>.txt record in a commit.
 function ledgerHasDispatch(root, dispatchId) {
     let text
     try {
@@ -3264,13 +3265,13 @@ function refutedStaleClose(args) {
     return ledgerHasDispatch(resolved.root, witness)
 }
 
-function closeTrailerRefusal(args) {
+function closeRecordRefusal(args) {
     const id = closeRowId(args)
     const resolved = resolveDispatchRoot(args?.cwd)
     if (id === null || resolved.error || !resolved.root) return null
     if (refutedStaleClose(args) || rowCloseCommitRecorded(resolved.root, id)) return null
     const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
-    return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'close_commit_required', refused: true, error: `${args.verb} refused: row ${id} has no closing commit in the store's log. Commit the close with publish_on_origin (witness and status set) so its body carries ${CLOSE_TRAILERS}; nothing was closed.`, trailers_required: ['Row', 'Witness', 'Status'] })
+    return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'close_commit_required', refused: true, error: `${args.verb} refused: row ${id} has no closing commit in the store's log. Commit the close with publish_on_origin (witness and status set) so the commit records ${CLOSE_RECORD}; nothing was closed.`, record_required: 'closes/<row>.txt' })
 }
 
 // A blocker is a note on the open row it blocks, never a row of its own: a -blocker- child whose parent row exists is refused.
@@ -3411,7 +3412,7 @@ export async function gmDispatch(args, signal, responseValueObserver) {
         if (refusal !== null) return refusal
     }
     if (CLOSE_VERBS.has(args?.verb) && !args?.resume_task) {
-        const refusal = closeReferenceRefusal(args) ?? closeTrailerRefusal(args)
+        const refusal = closeReferenceRefusal(args) ?? closeRecordRefusal(args)
         if (refusal !== null) return refusal
     }
     if ((args?.verb === 'codesearch' || args?.verb === 'code_search') && typeof args?.max_chars !== 'number' && typeof args?.body?.max_chars === 'number') args = { ...args, max_chars: args.body.max_chars }

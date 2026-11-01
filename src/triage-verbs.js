@@ -753,7 +753,6 @@ async function publishOnOrigin(args) {
     const closeRow = closing && paths.includes(rowRel) ? rowRel : null
     const closeRecord = closing ? { path: path.posix.join('closes', `${row}.txt`), line: `${row} ${args.status} ${args.witness} ${new Date().toISOString()}` } : null
     if (closeRecord !== null && !paths.includes(closeRecord.path)) paths.push(closeRecord.path)
-    const trailers = closing ? ['-m', `Witness: ${args.witness}`, '-m', `Status: ${args.status}`] : []
     const fetchMs = fetchBudgetSeconds(args.fetch_timeout_seconds) * 1000
     const unreachable = await probeOrigin(repo)
     if (unreachable !== null) return refused(unreachable.code, `${unreachable.cause}; nothing pushed; resume state: none`)
@@ -769,7 +768,7 @@ async function publishOnOrigin(args) {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-publish-'))
     try {
         const givenBase = typeof args.publish_base === 'string' && args.publish_base !== '' ? args.publish_base : null
-        return await publishLane({ repo, row, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, trailers, closeRow, closeRecord, fetchMs, pins })
+        return await publishLane({ repo, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, closeRow, closeRecord, fetchMs, pins })
     } finally {
         fs.rmSync(work, { recursive: true, force: true })
     }
@@ -782,7 +781,7 @@ function gitlinkOf(result) {
 
 // Replays the one commit built on the old origin/main onto the current tip with git's three-way merge (merge-tree --write-tree).
 // Only that commit's change moves; the lane's edits are not re-run. A conflict is refused with its paths and nothing is pushed.
-async function rebaseCommitOntoTip({ repo, commit, row, message, paths, checker, work, trailers }) {
+async function rebaseCommitOntoTip({ repo, commit, message, paths, checker, work }) {
     const plain = (gitArgs, extra = {}) => run('git', gitArgs, { cwd: repo, ...extra })
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'rebase-index') }
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
@@ -802,7 +801,7 @@ async function rebaseCommitOntoTip({ repo, commit, row, message, paths, checker,
     }
     const tree = lines[0].trim()
     if ((await indexed(['read-tree', tree])).status !== 0) return { refusal: refused('read_tree_failed', 'read-tree failed on the rebased tree; nothing pushed') }
-    const committed = await plain(['commit-tree', tree, '-p', tip, '-m', message, '-m', `Row: ${row}`, ...trailers], { env: PUBLISH_IDENTITY })
+    const committed = await plain(['commit-tree', tree, '-p', tip, '-m', message], { env: PUBLISH_IDENTITY })
     const sha = utf8(committed.stdout).trim()
     if (committed.status !== 0 || sha === '') return { refusal: refused('commit_failed', 'commit-tree failed for the rebased commit; nothing pushed') }
     const changed = utf8((await plain(['diff', '--name-only', '--no-renames', '-z', tip, sha])).stdout).split('\0').filter((name) => name !== '')
@@ -815,7 +814,7 @@ async function rebaseCommitOntoTip({ repo, commit, row, message, paths, checker,
     return { sha, stat }
 }
 
-async function publishLane({ repo, row, message, paths, givenBase, dryRun, checker, work, trailers = [], closeRow = null, closeRecord = null, fetchMs = FETCH_TIMEOUT_DEFAULT_S * 1000, pins = {} }) {
+async function publishLane({ repo, message, paths, givenBase, dryRun, checker, work, closeRow = null, closeRecord = null, fetchMs = FETCH_TIMEOUT_DEFAULT_S * 1000, pins = {} }) {
     const plain = (gitArgs, extra = {}) => run('git', gitArgs, { cwd: repo, ...extra })
     const indexEnv = { GIT_INDEX_FILE: path.join(work, 'index') }
     const indexed = (gitArgs) => run('git', gitArgs, { cwd: repo, env: indexEnv })
@@ -942,7 +941,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
     const treeSha = utf8(tree.stdout).trim()
     const noTrackedChange = treeSha === utf8((await plain(['rev-parse', 'origin/main^{tree}'])).stdout).trim()
     if (noTrackedChange) return refused('nothing_to_publish', `${paths.join(', ')} has no tracked change against origin/main; nothing pushed; an empty commit is never pushed, so close the row with a non-empty change or with paths that are tracked`)
-    const committed = await plain(['commit-tree', treeSha, '-p', 'origin/main', '-m', message, '-m', `Row: ${row}`, ...trailers], { env: PUBLISH_IDENTITY })
+    const committed = await plain(['commit-tree', treeSha, '-p', 'origin/main', '-m', message], { env: PUBLISH_IDENTITY })
     const sha = utf8(committed.stdout).trim()
     if (committed.status !== 0 || sha === '') return refused('commit_failed', 'commit-tree failed; nothing pushed')
 
@@ -966,7 +965,7 @@ async function publishLane({ repo, row, message, paths, givenBase, dryRun, check
         // origin moved between the build and the push: replay this one commit onto the new tip and push it once more; the lane's edits are not re-run.
         const refetched = await plain(FETCH_ARGV, { env: NO_PROMPT, timeout: fetchMs })
         if (refetched.status !== 0) return refused('push_refused', 'push refused and refetch failed; nothing landed', [['commit', sha]])
-        const rebased = await rebaseCommitOntoTip({ repo, commit: sha, row, message, paths, checker, work, trailers })
+        const rebased = await rebaseCommitOntoTip({ repo, commit: sha, message, paths, checker, work })
         if (rebased.refusal) return rebased.refusal
         landedSha = rebased.sha
         stat = rebased.stat
@@ -2011,10 +2010,10 @@ export const TRIAGE_VERBS = [
     },
     {
         name: 'publish_on_origin',
-        description: 'Publishes the listed paths of repo_dir onto origin/main (listed by paths, by paths_file, or, with publish_base and no paths, by the computed changed set: HEAD against the worktree plus untracked files, minus .git, .gm and regenerable dirs, filtered by include and exclude globs) as one commit, without touching its working tree, index or local main (replaces scripts/triage/publish-on-origin.sh). Steps: fetch origin main; build a temporary index from origin/main; three-way merge each listed file (base = the fork point: merge-base(HEAD, origin/main), or merge-base(HEAD, publish_base) when publish_base is given and is not origin/main; theirs = origin/main; ours = the lane file; a conflict refuses with its path and line span; a path origin deleted refuses unless the lane left it unchanged); regenerate skills/manifest.sha256 when a skills/ path is listed; commit-tree with "Row: <row>"; refuse a commit that changes any path outside the list; run <cwd>/scripts/check-staged-secrets.mjs on that index; push sha:refs/heads/main; confirm the sha is on origin/main. dry_run stops before the push. Reply: ok, exit_code, result, commit, then the last three diff stat lines. Refusals return as data with error_code: fetch_timeout, fetch_failed (with the transport cause), merge_conflict, no_merge_base (publish_base and HEAD share no ancestor), unintended_paths, secrets_check_failed, push_refused, not_on_origin and others; nothing is pushed on a refusal.',
+        description: 'Publishes the listed paths of repo_dir onto origin/main (listed by paths, by paths_file, or, with publish_base and no paths, by the computed changed set: HEAD against the worktree plus untracked files, minus .git, .gm and regenerable dirs, filtered by include and exclude globs) as one commit, without touching its working tree, index or local main (replaces scripts/triage/publish-on-origin.sh). Steps: fetch origin main; build a temporary index from origin/main; three-way merge each listed file (base = the fork point: merge-base(HEAD, origin/main), or merge-base(HEAD, publish_base) when publish_base is given and is not origin/main; theirs = origin/main; ours = the lane file; a conflict refuses with its path and line span; a path origin deleted refuses unless the lane left it unchanged); regenerate skills/manifest.sha256 when a skills/ path is listed; commit-tree of the caller message alone, with no trailers; refuse a commit that changes any path outside the list; run <cwd>/scripts/check-staged-secrets.mjs on that index; push sha:refs/heads/main; confirm the sha is on origin/main. dry_run stops before the push. Reply: ok, exit_code, result, commit, then the last three diff stat lines. Refusals return as data with error_code: fetch_timeout, fetch_failed (with the transport cause), merge_conflict, no_merge_base (publish_base and HEAD share no ancestor), unintended_paths, secrets_check_failed, push_refused, not_on_origin and others; nothing is pushed on a refusal.',
         inputSchema: {
             repo_dir: z.string().describe('Checkout whose files are published: an absolute path, or relative to cwd.'),
-            row: z.string().describe('Row id, written into the commit as "Row: <row>".'),
+            row: z.string().describe('Row id: names the row file under .gm/prd and its closes/<row>.txt record; the commit body carries no row line.'),
             message: z.string().describe('Commit subject and body.'),
             paths: z.array(z.string()).optional().describe('Repository-relative paths the lane edited. Omit with publish_base to publish the computed changed set; omit with paths_file too. Each must exist as a file (published), be a submodule pin in the index or HEAD of the lane (published as that commit sha at mode 160000), or be absent (removed from the index unless origin/main pins it as a submodule, which is then left alone).'),
             pins: z.record(z.string(), z.string().regex(/^[0-9a-f]{40}$/)).optional().describe('Submodule pins to advance: a map of submodule path to the full 40-hex sha of its commit on that submodule\'s origin/main. Each path is published as that sha at mode 160000 and is added to paths; a sha that is not on that origin/main refuses the publish.'),
@@ -2025,7 +2024,7 @@ export const TRIAGE_VERBS = [
             exclude: z.array(z.string()).optional().describe('Glob list the computed changed set must not match. Used only when paths and paths_file are omitted.'),
             dry_run: z.boolean().optional().describe('Build and check the commit, then stop before the push. Needs origin/main in repo_dir, which a fixture repo has no way to get (git_remote never adds origin, git_init has no bare option). The planted-secret witness needs no origin: in a git repo with a HEAD commit and a staged planted key, run node <gm checkout>/scripts/check-staged-secrets.mjs; it prints RESULT: FAIL and the rule name (aws-access-key-id for AKIA keys).'),
             witness: z.string().optional().describe('Dispatch id of the live witness that closes the row: must appear in the .gm/exec-spool/.dispatch-ledger.json of repo_dir or of cwd. Required when this publish closes a row (a status is given, or the row file under .gm/prd/ is removed). A closing publish keeps the row file in repo_dir: its commit removes it from origin. A closing publish also needs references on the row: fill them with gm prd-references({cwd, id, references: [{url, why}]}) (https url), or add a row body line "No public references: <reason of at least 10 characters>"; otherwise it refuses references_required.'),
-            status: z.enum(['resolved', 'stale']).optional().describe('Status the closing commit records. Required with witness.'),
+            status: z.enum(['resolved', 'stale']).optional().describe('Status the closing commit records in closes/<row>.txt. Required with witness.'),
             cwd: z.string().optional().describe('gm checkout root. Required. The secrets checker is read from the gm install (scripts/check-staged-secrets.mjs), else from repo_dir. The row store is <repo_dir>/.gm/prd when that holds the row, else <cwd>/.gm/prd. The witness ledger is read from <repo_dir>/.gm or <cwd>/.gm.'),
         },
         handler: toolReply('publish_on_origin', publishOnOrigin),
