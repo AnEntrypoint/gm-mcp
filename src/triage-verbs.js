@@ -751,6 +751,7 @@ async function publishOnOrigin(args) {
     const closeRow = closing && paths.includes(rowRel) ? rowRel : null
     const closeRecord = closing ? { path: path.posix.join('closes', `${row}.txt`), line: `${row} ${args.status} ${args.witness} ${new Date().toISOString()}` } : null
     if (closeRecord !== null && !paths.includes(closeRecord.path)) paths.push(closeRecord.path)
+    const commitText = closeRecord === null ? message : `${message}\n\nRow: ${row}\nWitness: ${args.witness}\nStatus: ${args.status}`
     const fetchMs = fetchBudgetSeconds(args.fetch_timeout_seconds) * 1000
     const unreachable = await probeOrigin(repo)
     if (unreachable !== null) return refused(unreachable.code, `${unreachable.cause}; nothing pushed; resume state: none`)
@@ -767,7 +768,7 @@ async function publishOnOrigin(args) {
     try {
         const checker = servedChecker(work)
         const givenBase = typeof args.publish_base === 'string' && args.publish_base !== '' ? args.publish_base : null
-        return await publishLane({ repo, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, closeRow, closeRecord, fetchMs, pins })
+        return await publishLane({ repo, message: commitText, paths, givenBase, dryRun: args.dry_run === true, checker, work, closeRow, closeRecord, fetchMs, pins })
     } finally {
         fs.rmSync(work, { recursive: true, force: true })
     }
@@ -2009,7 +2010,7 @@ export const TRIAGE_VERBS = [
     },
     {
         name: 'publish_on_origin',
-        description: 'Publishes the listed paths of repo_dir onto origin/main (listed by paths, by paths_file, or, with publish_base and no paths, by the computed changed set: HEAD against the worktree plus untracked files, minus .git, .gm and regenerable dirs, filtered by include and exclude globs) as one commit, without touching its working tree, index or local main (replaces scripts/triage/publish-on-origin.sh). Steps: fetch origin main; build a temporary index from origin/main; three-way merge each listed file (base = the fork point: merge-base(HEAD, origin/main), or merge-base(HEAD, publish_base) when publish_base is given and is not origin/main; theirs = origin/main; ours = the lane file; a conflict refuses with its path and line span; a path origin deleted refuses unless the lane left it unchanged); regenerate skills/manifest.sha256 when a skills/ path is listed; commit-tree of the caller message alone, with no trailers; refuse a commit that changes any path outside the list; run <cwd>/scripts/check-staged-secrets.mjs on that index; push sha:refs/heads/main; confirm the sha is on origin/main. dry_run stops before the push. Reply: ok, exit_code, result, commit, then the last three diff stat lines. Refusals return as data with error_code: fetch_timeout, fetch_failed (with the transport cause), merge_conflict, no_merge_base (publish_base and HEAD share no ancestor), unintended_paths, secrets_check_failed, push_refused, not_on_origin and others; nothing is pushed on a refusal.',
+        description: 'Publishes the listed paths of repo_dir onto origin/main (listed by paths, by paths_file, or, with publish_base and no paths, by the computed changed set: HEAD against the worktree plus untracked files, minus .git, .gm and regenerable dirs, filtered by include and exclude globs) as one commit, without touching its working tree, index or local main (replaces scripts/triage/publish-on-origin.sh). Steps: fetch origin main; build a temporary index from origin/main; three-way merge each listed file (base = the fork point: merge-base(HEAD, origin/main), or merge-base(HEAD, publish_base) when publish_base is given and is not origin/main; theirs = origin/main; ours = the lane file; a conflict refuses with its path and line span; a path origin deleted refuses unless the lane left it unchanged); regenerate skills/manifest.sha256 when a skills/ path is listed; commit-tree of the caller message, a closing publish appending a blank line and Row, Witness and Status trailers; refuse a commit that changes any path outside the list; run <cwd>/scripts/check-staged-secrets.mjs on that index; push sha:refs/heads/main; confirm the sha is on origin/main. dry_run stops before the push. Reply: ok, exit_code, result, commit, then the last three diff stat lines. Refusals return as data with error_code: fetch_timeout, fetch_failed (with the transport cause), merge_conflict, no_merge_base (publish_base and HEAD share no ancestor), unintended_paths, secrets_check_failed, push_refused, not_on_origin and others; nothing is pushed on a refusal.',
         inputSchema: {
             repo_dir: z.string().describe('Checkout whose files are published: an absolute path, or relative to cwd.'),
             row: z.string().describe('Row id: names the row file under .gm/prd and its closes/<row>.txt record; the commit body carries no row line.'),
