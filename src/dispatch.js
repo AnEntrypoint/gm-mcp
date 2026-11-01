@@ -794,6 +794,35 @@ function isDirectoryUnder(root, rel) {
     }
 }
 
+// A submodule checkout holds a .git file; a plain directory has a .git directory or none.
+function isSubmoduleDir(root, rel) {
+    try {
+        return statSync(path.join(path.resolve(root, rel), '.git')).isFile()
+    } catch {
+        return false
+    }
+}
+
+// A gitlink stages only when the submodule HEAD differs from the sha the parent pins: git_diff then shows two different
+// "Subproject commit" lines. Uncommitted edits inside the submodule add a "-dirty" suffix to the HEAD line and stage nothing.
+async function submoduleGitlinkMoved(args, sessionId, dir) {
+    const text = String(await runDispatch({ verb: 'git_diff', body: { paths: [dir] }, session_id: sessionId, cwd: args.cwd, full_response: true }))
+    const pinned = /-Subproject commit ([0-9a-f]{40})/.exec(text)
+    const head = /\+Subproject commit ([0-9a-f]{40})/.exec(text)
+    return pinned !== null && head !== null && pinned[1] !== head[1]
+}
+
+function gitlinkPinnedReply(pinned) {
+    return pinned.map((d) => `git_add: nothing to stage for ${d}: its HEAD matches the sha the parent pins, and uncommitted edits inside a submodule are not staged; commit inside ${d} and move the pin to stage it\n`).join('')
+}
+
+function gitlinkOnlyPlan(args, entries, gitlinks) {
+    if (gitlinks.moved.length === 0) return { done: gitlinkPinnedReply(gitlinks.pinned) }
+    const { files, ...rest } = isPlainObject(args.body) ? args.body : {}
+    const paths = [...new Set(entries.filter((p) => !GIT_ADD_ROOT_NAMES.has(p) && !gitlinks.pinned.includes(p)))]
+    return { args: { ...args, body: { ...rest, paths } }, note: { staged: paths.length, skipped: 0 } }
+}
+
 // A git_status exclusion rule (".gm", ".agentplug*") or the gm runtime directory. A rule matches its own path prefix only.
 function isExcludedOrTransient(rel, rules) {
     if (rel === '.gm' || rel.startsWith('.gm/')) return true
@@ -838,7 +867,15 @@ async function planGitAdd(args) {
     const dirs = entries.filter((p) => !GIT_ADD_ROOT_NAMES.has(p) && isDirectoryUnder(root, p))
     if (blanket.length === 0 && dirs.length === 0) return { args }
     if (sessionId === null) return { args }
-    const lists = await gitWorkingTreeLists(args, sessionId, blanket.length > 0 ? [] : dirs)
+    const submodules = dirs.filter((d) => isSubmoduleDir(root, d))
+    const gitlinks = { moved: [], pinned: [] }
+    for (const d of submodules) {
+        if (await submoduleGitlinkMoved(args, sessionId, d)) gitlinks.moved.push(d)
+        else gitlinks.pinned.push(d)
+    }
+    const plainDirs = dirs.filter((d) => !submodules.includes(d))
+    if (blanket.length === 0 && plainDirs.length === 0) return gitlinkOnlyPlan(args, entries, gitlinks)
+    const lists = await gitWorkingTreeLists(args, sessionId, blanket.length > 0 ? [] : plainDirs)
     if (lists === null) return { refusal: `git_add refused: git_status could not list the working tree under ${[...blanket, ...dirs].map((p) => `"${p || '.'}"`).join(', ')}, so the paths to stage cannot be counted. Name the paths explicitly.` }
     const candidates = [...new Set(lists.changed)]
     const kept = candidates.filter((rel) => !isExcludedOrTransient(rel, lists.excluded))
@@ -847,8 +884,9 @@ async function planGitAdd(args) {
         const tops = [...new Set(kept.map((rel) => rel.split('/')[0]))].slice(0, 8)
         return { refusal: `git_add refused: the blanket path would stage ${kept.length} paths (limit ${GIT_ADD_BLANKET_LIMIT}); ${skipped} excluded or transient paths were skipped. Name the directories to stage in body.paths, for example ${JSON.stringify(tops)}.` }
     }
-    const explicit = entries.filter((p) => !GIT_ADD_ROOT_NAMES.has(p) && !dirs.includes(p))
+    const explicit = entries.filter((p) => !GIT_ADD_ROOT_NAMES.has(p) && !plainDirs.includes(p) && !gitlinks.pinned.includes(p))
     const paths = [...new Set([...explicit, ...kept])]
+    if (paths.length === 0 && gitlinks.pinned.length > 0) return { done: gitlinkPinnedReply(gitlinks.pinned) }
     if (paths.length === 0) return { done: `git_add: nothing to stage; ${skipped} excluded or transient paths were skipped\n` }
     const { files, ...rest } = body
     return { args: { ...args, body: { ...rest, paths } }, note: { staged: paths.length, skipped } }

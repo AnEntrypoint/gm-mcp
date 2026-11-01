@@ -577,7 +577,7 @@ const GIT_REMOTE_BODY = {
     required: [],
     fields: {
         action: { type: 'string', description: 'add or remove; omit to list the configured remotes.' },
-        name: { type: 'string', description: 'Remote name for add or remove. origin is never added, removed or changed.' },
+        name: { type: 'string', description: 'Remote name for add or remove. origin is never removed by git_remote; add creates it only while no origin exists.' },
         url: { type: 'string', description: 'https URL with a host and no user:password for add. Required with action add.' },
     },
 }
