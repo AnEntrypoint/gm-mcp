@@ -409,7 +409,7 @@ const FS_READ_BODY = {
 const FS_WRITE_BODY = {
     required: ['path'],
     fields: {
-        path: { type: 'string', description: 'Project-relative path. allowOutsideRoot never widens a write.' },
+        path: { type: 'string', description: 'Relative to the project root, or absolute inside it (rewritten to relative); a path outside the root is refused. allowOutsideRoot never widens a write.' },
         content: { type: 'string|array', aliases: ['data', 'text'], description: 'Complete file content as a string, or an array of lines joined with newlines (plus a trailing newline). Required unless the exact-line form is used.' },
         startLine: { type: 'integer', description: 'Exact-line form: first line of the existing file to replace, 1-based. Requires replacement or delete: true; endLine is then required too.' },
         endLine: { type: 'integer', description: 'Exact-line form: last line replaced, 1-based and inclusive. endLine = startLine - 1 inserts replacement before startLine.' },
@@ -422,7 +422,7 @@ const FS_WRITE_BODY = {
 const FS_EDIT_BODY = {
     required: ['path', 'old', 'new'],
     fields: {
-        path: { type: 'string', description: 'Project-relative path. allowOutsideRoot never widens an edit.' },
+        path: { type: 'string', description: 'Relative to the project root, or absolute inside it (rewritten to relative); a path outside the root is refused. allowOutsideRoot never widens an edit.' },
         old: { type: 'string', description: 'Exact text to replace. It must occur exactly once in the file; zero or several matches refuse with invalid_args and the match count, and nothing is written.' },
         new: { type: 'string', description: 'Replacement text. Empty deletes old.' },
     },

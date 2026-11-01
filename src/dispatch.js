@@ -242,14 +242,26 @@ function fsReadRequestedRange(body) {
     return { start: fsReadLineNumber(body[startKey]) ?? 1, end, count, startKey }
 }
 
+const PROJECT_RELATIVE_PATH_VERBS = new Set(['fs_read', 'fs_write', 'fs_edit'])
+const WRITE_PATH_VERBS = new Set(['fs_write', 'fs_edit'])
+
 export function fsReadProjectRelativeBody(verb, body, cwd) {
-    if (verb !== 'fs_read' || !isPlainObject(body)) return body
+    if (!PROJECT_RELATIVE_PATH_VERBS.has(String(verb).replace(/-/g, '_')) || !isPlainObject(body)) return body
     if (typeof body.path !== 'string' || !path.isAbsolute(body.path)) return body
     const root = resolveDispatchRoot(cwd).root
     if (!root) return body
     const rel = path.relative(root, path.resolve(body.path))
     if (!rel || path.isAbsolute(rel) || rel.split(path.sep).includes('..')) return body
     return { ...body, path: rel.split(path.sep).join('/') }
+}
+
+// An absolute write path outside the project root is refused once, naming the root; allowOutsideRoot never widens a write.
+export function outsideRootWriteRefusal(verb, body, cwd) {
+    if (!WRITE_PATH_VERBS.has(String(verb).replace(/-/g, '_')) || !isPlainObject(body)) return null
+    if (typeof body.path !== 'string' || !path.isAbsolute(body.path)) return null
+    const root = resolveDispatchRoot(cwd).root
+    if (!root || isWithinDir(root, path.resolve(body.path))) return null
+    return `${verb} path ${body.path} is outside the project root ${root}: a write path is relative to the project root, or absolute inside it`
 }
 
 const SIBLING_ROOT_READ_VERBS = ['fs_stat', 'fs_readdir']
@@ -2315,9 +2327,9 @@ function timeoutInputDiagnostic(verb, raw_body, timeout_seconds) {
         if (!Number.isFinite(seconds)) return 'timeout_seconds must be a finite number of seconds'
         if (seconds <= 0) return `timeout_seconds must be a positive number of seconds (got ${timeout_seconds})`
         const milliseconds = seconds * 1000
-        const bound = Math.min(MAX_TIMER_TIMEOUT_MS, Math.max(pollTimeoutCeilingMs(), EXEC_HARD_CEILING_MS))
+        const bound = Math.min(MAX_TIMER_TIMEOUT_MS, pollTimeoutCeilingMs())
         if (seconds > 0 && (!Number.isSafeInteger(milliseconds) || milliseconds > bound)) {
-            return `timeout_seconds must not exceed ${bound / 1000} seconds (poll ceiling ${pollTimeoutCeilingMs() / 1000} s, GM_MCP_POLL_TIMEOUT_CEILING_MS overrides it)`
+            return `timeout_seconds must not exceed the poll ceiling of ${bound / 1000} s (GM_MCP_POLL_TIMEOUT_CEILING_MS overrides it): a dispatch that outlives its poll keeps running, so send a timeout_seconds within the ceiling and resume it with resume_task`
         }
     }
     if (!TIMEOUT_MS_PREFIX_VERBS.has(verb) || typeof raw_body !== 'string' || !TIMEOUT_MS_PREFIX_LINE.test(raw_body)) return undefined
@@ -3570,6 +3582,8 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
             codesearchKDefaulted = withDefaultK.defaulted
             const siblingRefusal = outsideRootReadRefusal(verb, withDefaultK.body, cwd)
             if (siblingRefusal) return `error: ${siblingRefusal}`
+            const outsideWriteRefusal = outsideRootWriteRefusal(verb, withDefaultK.body, cwd)
+            if (outsideWriteRefusal) return `error: ${outsideWriteRefusal}`
             const parentSegmentRefusal = parentSegmentReadRefusal(verb, withDefaultK.body)
             if (parentSegmentRefusal) return `error: ${parentSegmentRefusal}`
             normalizedBody = withAssertedInstructionHash(verb, fsReadRangeCanonicalBody(verb, fsReadProjectRelativeBody(verb, withDefaultK.body, cwd)))

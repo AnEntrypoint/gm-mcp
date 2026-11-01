@@ -316,12 +316,23 @@ export function refuseUndeclaredBodyKeys(name, verb, folded) {
     throw new Error(`${name} body has undeclared key ${unknown.join(', ')} -- declared body fields: ${canonical.join(', ')}${aliasClause}${hint}${outputHint}${bodyKeyHint}${cwdHint}${prdHint}${resolveHint}`)
 }
 
+function refuseFsWriteMissingKeys(name, body) {
+    const hasPath = body.path !== undefined
+    const hasContent = ['content', 'data', 'text'].some((key) => body[key] !== undefined)
+    const hasLineForm = body.startLine !== undefined || body.endLine !== undefined || body.replacement !== undefined || body.delete !== undefined
+    const lineFormComplete = body.startLine !== undefined && body.endLine !== undefined && (body.replacement !== undefined || body.delete !== undefined)
+    if (hasPath && (hasContent || lineFormComplete)) return
+    if (hasPath && !hasLineForm && !hasContent) throw new Error(`${name} body needs content for a whole-file write -- required keys: path, plus content (or data or text, a string or an array of lines), or startLine and endLine with replacement (or delete: true)`)
+    throw new Error(`${name} body fields required -- send body.path, plus body.content (or data or text, a string or an array of lines), or body.startLine and body.endLine with body.replacement (or body.delete: true)`)
+}
+
 export function refuseMissingRequiredBodyKeys(name, verb, folded) {
     if (!verb || !folded || typeof folded !== 'object') return
     const schema = verbBodySchema(verb)
     if (!schema.declared) return
     const body = isPlainObject(folded.body) ? folded.body : {}
     const claimOnly = verb === 'git_commit' && [true, 'true'].includes(body.claim_only)
+    if (verb === 'fs_write') return refuseFsWriteMissingKeys(name, body)
     const missing = schema.required.filter((field) => {
         if (field === 'session_id') return false
         if (claimOnly && field === 'message') return false
@@ -405,7 +416,7 @@ function listSummary(row, maxDesc) {
     return clipDescription(own, maxDesc)
 }
 
-function capCodemodeText(text, cap, reserve = 0) {
+function capCodemodeText(text, cap, reserve = 0, spilledFile = null) {
     const room = Math.max(1, cap - reserve)
     if (text.length <= room) return text
     const scope = scanScope(text)
@@ -414,14 +425,14 @@ function capCodemodeText(text, cap, reserve = 0) {
     const lastHit = dispatchHits.at(-1)
     const dispatchId = lastHit ? (lastHit[1] ?? lastHit[2]) : null
     // A spool path that sits past the cut (a cut partial section's spill notice, for one) is still the path the caller needs, so fall back to the full text.
-    const spoolFile = spoolFileAt(scope, room) ?? spoolFileAt(scope, scope.length, false) ?? null
+    const spoolFile = spoolFileAt(scope, room) ?? spoolFileAt(scope, scope.length, false) ?? spilledFile
     const notice = `\nreply_truncated: true\nreply_chars: ${text.length}\nreply_max_chars: ${cap}\ndispatch_id: ${dispatchId ?? 'not reported'}\nspool_file: ${spoolFile ?? 'not reported'}\n`
     const flagged = text.replace(/^(\s*)truncated: false$/gm, "$1truncated: true")
     return `${flagged.slice(0, Math.max(0, room - notice.length))}${notice}`
 }
 
-function capWithContinuation(session_id, text, cap) {
-    return continuedReplyWithin(session_id, text, cap, (body, room) => capCodemodeText(body, cap, cap - room))
+function capWithContinuation(session_id, text, cap, spilledFile = null) {
+    return continuedReplyWithin(session_id, text, cap, (body, room) => capCodemodeText(body, cap, cap - room, spilledFile))
 }
 
 const PARTIAL_REPLY_MIN_CHARS = 200
@@ -583,12 +594,13 @@ function bindings(tools, { session_id, cwd, ...topEnvelope }, extra, sink = null
             fail(error)
         }
         const replyOf = topEnvelope.parsed === true ? parsedReplyValue : replyValue
-        if (!entry) return pending.then(replyOf)
+        const verbName = tools.get(name)?.verb ?? name
+        if (!entry) return pending.then((text) => replyOf(text, verbName))
         return pending.then((text) => {
             entry.text = text
             entry.dispatch_id = dispatchIdOf(text)
             if (feedContext) entry.images = browserAfterCall(feedContext, text, extra?.sendNotification)
-            return replyOf(text)
+            return replyOf(text, verbName)
         }, fail)
     }
     const tryCall = async (verb, args = {}, envelope = undefined) => {
@@ -684,18 +696,34 @@ function jsonText(value) {
     return text === undefined ? textOf(value) : text
 }
 
-function replyValue(text) {
-    return Object.assign(new String(text), { text: String(text) })
+const MATCH_ROW_VERBS = new Set(['codesearch', 'code_search', 'search', 'grep', 'rg'])
+
+// A search reply's rows ride as a tabular block or a YAML list; the String object exposes them as a parsed array so r.matches works without parsed:true.
+function matchRowsOf(text, verb) {
+    if (!MATCH_ROW_VERBS.has(verb) || !/^matches(\[\d+\])?(\{[^}\n]*\})?:/m.test(text)) return null
+    try {
+        const rows = parseReply(text)?.matches
+        return Array.isArray(rows) ? rows : null
+    } catch {
+        return null
+    }
 }
 
-function parsedReplyValue(text) {
+function replyValue(text, verb) {
+    const reply = Object.assign(new String(text), { text: String(text) })
+    const matches = matchRowsOf(String(text), verb)
+    if (matches !== null) reply.matches = matches
+    return reply
+}
+
+function parsedReplyValue(text, verb) {
     let parsed
     try {
         parsed = parseReply(text)
     } catch {
-        return replyValue(text)
+        return replyValue(text, verb)
     }
-    if (!isPlainObject(parsed)) return replyValue(text)
+    if (!isPlainObject(parsed)) return replyValue(text, verb)
     if (!('text' in parsed)) Object.defineProperty(parsed, 'text', { value: text, enumerable: false })
     return parsed
 }
@@ -758,7 +786,9 @@ export function registerCodeMode(server, tools) {
                 const reply = joined.trim() === '' ? EMPTY_REPLY_MARKER : joined
                 const images = replies.flatMap((entry) => entry.images ?? [])
                 const objectReturn = value !== null && typeof value === 'object'
-                return { content: [{ type: 'text', text: objectReturn ? capCodemodeText(reply, cap) : capWithContinuation(session_id, reply, cap) }, ...images] }
+                // An over-cap return is spilled whole, so the cut notice names a file holding the rest.
+                const spilledFile = reply.length > cap ? spillPartialReply(args.cwd || process.cwd(), `codemode-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`, 0, reply) : null
+                return { content: [{ type: 'text', text: objectReturn ? capCodemodeText(reply, cap, 0, spilledFile) : capWithContinuation(session_id, reply, cap, spilledFile) }, ...images] }
             } catch (error) {
                 const detail = describeError(error)
                 const diagnosticId = `codemode-${process.pid}-${Date.now()}-${++codemodeThrowSeq}`
