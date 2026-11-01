@@ -88,13 +88,25 @@ export function withinBudget(promise, ms, fallback) {
     return Promise.race([promise.catch(() => fallback), budget]).finally(() => clearTimeout(timer))
 }
 
+const landedPendingByRoot = new Map()
+
+function rootKey(cwd) {
+    return typeof cwd === 'string' ? cwd.trim() : ''
+}
+
+// The last next-row lookup that landed for cwd, {next_prd, pending_total, at}, or null. Stays after the reply that asked has gone.
+export function cachedPendingFor(cwd) {
+    return landedPendingByRoot.get(rootKey(cwd)) ?? null
+}
+
 // {next_prd, pending_total} with the first pending row (null when none), or {} when the lookup failed or missed budgetMs (NEXT_PRD_BUDGET_MS by default).
-// A lookup that finishes late still updates the push state.
+// A lookup that finishes late still updates the push state and the cache read by cachedPendingFor.
 export function nextPrdFor(dispatch, { cwd, session_id, budgetMs = NEXT_PRD_BUDGET_MS } = {}) {
     const lookup = readPendingPage(dispatch, { limit: 1, cwd, session_id }).then((page) => {
         if (!page.ok) return {}
         const row = page.items[0] ?? null
         noteNextRow(row)
+        landedPendingByRoot.set(rootKey(cwd), { next_prd: row, pending_total: page.pending_total, at: Date.now() })
         return { next_prd: row, pending_total: page.pending_total }
     })
     return withinBudget(lookup, budgetMs, {})

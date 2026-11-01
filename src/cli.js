@@ -43,7 +43,7 @@ from a shell (or from an agent host that cannot see the MCP tools) with no MCP i
   --no-ignore             include gitignored files: sets body no_ignore for the search verbs
                           (grep, rg, codesearch, code_search)
   --session-id <id>       gm session id (default: gm-cli-<pid>-<now>)
-  --timeout <seconds>     give up after this many seconds (default 120)
+  --timeout <seconds>     give up after this many seconds (default 300)
   --poll <seconds>        spool poll interval (default 0.25)
   --max-chars <n>         trim long text fields to n characters
   --resume <task>         resume a previous dispatch instead of writing a new request

@@ -3,7 +3,7 @@ import path from 'node:path'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { servingTransportKind } from './bundle-drift.js'
 import { BOOTSTRAP_ERROR_CHARS, CHECKLIST_URI, claimBootstrap, pendingRowsOf, withBootstrap } from './continuation.js'
-import { SERVER_SESSION_ID, failureOf, nextPrdFor, withinBudget } from './prd-feed.js'
+import { SERVER_SESSION_ID, cachedPendingFor, failureOf, nextPrdFor, withinBudget } from './prd-feed.js'
 import { appendDiagnostic, describeError } from './server-log.js'
 
 // Live project state for the session bootstrap (the first reply of a session that names a cwd) and for the skill prompts.
@@ -57,16 +57,22 @@ async function statusRead(dispatch, { cwd, session_id, budgetMs = LIVE_BUDGET_MS
 }
 
 
-// {count, next, error} from a next-row lookup. count prefers the lookup's pending total, then the reply's own count.
-function pendingOf(found, pendingRows, budgetMs = LIVE_BUDGET_MS) {
+// {count, next, stale, as_of_ms} from a next-row lookup. A lookup that missed its budget serves the last one that landed
+// for the root, marked stale with its age; with none, next stays null and the count is the continuation's own.
+function pendingOf(found, pendingRows, cached) {
     const count = found.pending_total ?? pendingRows ?? null
-    if (found.next_prd === undefined) return { count, next: null, error: timedOut('next pending row lookup', budgetMs) }
-    return { count, next: found.next_prd, error: null }
+    if (found.next_prd !== undefined) return { count, next: found.next_prd, stale: false, as_of_ms: null }
+    if (cached) return { count: cached.pending_total ?? pendingRows ?? null, next: cached.next_prd, stale: true, as_of_ms: cached.at }
+    return { count, next: null, stale: true, as_of_ms: null }
+}
+
+function pendingBlock(pending) {
+    return { count: pending.count, next: pending.next, stale: pending.stale, as_of_ms: pending.as_of_ms }
 }
 
 async function bootstrapNextRow(dispatch, { cwd, session_id, feed }) {
     if (feed?.next_prd !== undefined) return feed
-    return nextPrdFor(dispatch, { cwd, session_id, budgetMs: BOOTSTRAP_BUDGET_MS })
+    return nextPrdFor(dispatch, { cwd, session_id, budgetMs: LIVE_BUDGET_MS })
 }
 
 // The bootstrap block for cwd. A feed result that answered is reused; a missed or absent one is read again under BOOTSTRAP_BUDGET_MS. Never throws.
@@ -74,7 +80,7 @@ async function bootstrapBlock(dispatch, { cwd, session_id, feed, pendingRows }) 
     const base = {
         server: { version: BUNDLE_VERSION, transport: servingTransportKind() },
         runner: UNKNOWN_RUNNER,
-        pending: { count: pendingRows, next: null },
+        pending: { count: pendingRows, next: null, stale: true, as_of_ms: null },
         checklist_uri: CHECKLIST_URI,
         bootstrap_complete: true,
     }
@@ -83,12 +89,11 @@ async function bootstrapBlock(dispatch, { cwd, session_id, feed, pendingRows }) 
             statusRead(dispatch, { cwd, session_id, budgetMs: BOOTSTRAP_BUDGET_MS }),
             bootstrapNextRow(dispatch, { cwd, session_id, feed }),
         ])
-        const pending = pendingOf(found, pendingRows, BOOTSTRAP_BUDGET_MS)
-        const errors = [status.ok ? null : `runner: ${status.error}`, pending.error ? `pending: ${pending.error}` : null].filter(Boolean)
+        const errors = status.ok ? [] : [`runner: ${status.error}`]
         return {
             ...base,
             runner: status.ok ? status.runner : UNKNOWN_RUNNER,
-            pending: { count: pending.count, next: pending.next },
+            pending: pendingBlock(pendingOf(found, pendingRows, cachedPendingFor(cwd))),
             ...(errors.length > 0 ? { bootstrap_error: clipText(errors.join('; ')) } : {}),
         }
     } catch (error) {
@@ -127,13 +132,18 @@ function runnerLine(status) {
     return `runner: ${alive ? 'alive' : 'not alive'}, heartbeat ${age === null ? 'missing' : `${age} ms old`}`
 }
 
+function staleSuffix(pending) {
+    if (!pending.stale) return ''
+    if (pending.as_of_ms === null) return ' (stale, never read)'
+    return ` (stale, read ${Math.round((Date.now() - pending.as_of_ms) / 1000)} s ago)`
+}
+
 function pendingLine(pending) {
-    if (pending.error) return `pending rows: state unavailable (${clipText(pending.error)})`
-    return `pending rows: ${pending.count ?? 'unknown'}`
+    return `pending rows: ${pending.count ?? 'unknown'}${staleSuffix(pending)}`
 }
 
 function nextLine(pending) {
-    if (pending.error) return 'next pending row: state unavailable'
+    if (pending.as_of_ms === null && pending.next === null && pending.stale) return 'next pending row: not read yet'
     const row = pending.next
     return row ? `next pending row: ${row.id} (${row.status}): ${row.title}` : 'next pending row: none'
 }
@@ -150,7 +160,7 @@ export async function liveStateText(dispatch, cwd) {
             statusRead(dispatch, { cwd: root }),
             nextPrdFor(dispatch, { cwd: root, session_id: SERVER_SESSION_ID }),
         ])
-        const pending = pendingOf(found, null)
+        const pending = pendingOf(found, null, cachedPendingFor(root))
         return [runnerLine(status), pendingLine(pending), nextLine(pending)].join('\n')
     } catch (error) {
         return `state unavailable: ${clipText(describeError(error))}`

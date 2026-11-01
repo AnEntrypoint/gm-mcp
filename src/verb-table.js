@@ -261,7 +261,7 @@ const PRD_ADD_BODY = {
         witness_plan: { type: 'string', description: 'The observation that would close the row. Persisted on the row and served by prd-list and {"full":true}.' },
         status: { type: 'string', enum: ['pending', 'ready', 'completed', 'blocked'], description: 'Row status; defaults to pending.' },
         blockedBy: { type: 'array', description: 'Row ids this row waits on.' },
-        overwrite: { type: 'boolean', description: 'Rescopes an existing row; refused when that row is closed.' },
+        overwrite: { type: 'boolean', description: 'Accepted for compatibility and ignored: prd-add upserts by id, replying created, updated or conflict.' },
         repair: { type: 'boolean', description: 'Repairs the PRD store before the add.' },
         owner: { type: 'string', description: 'Accountable lane or session that must act on the finding. Defaults to the filer session_id.' },
         disposition: { type: 'string', enum: ['open', 'accepted', 'rejected', 'deferred'], description: 'Inspection disposition of the finding; a reason belongs in description.' },
@@ -286,7 +286,7 @@ const PRD_ADD_TYPES = {
 }
 const PRD_ADD_KEYS = ['id', 'subject', 'description', 'acceptance_criteria', 'witness_plan', 'status', 'blockedBy', 'overwrite', 'repair', 'owner', 'disposition', 'recheck_by', 'origin']
 const PRD_ADD_FIELDS = aliasFields('prd_add', PRD_ADD_TYPES, PRD_ADD_KEYS)
-const PRD_ADD_DESCRIPTION = ` ${PRD_ADD_KEYS.join(', ')} are accepted at the top level and folded into body, so {"subject":"<row intent>","description":"<row prose>"} and body:{"subject":"...","description":"..."} are the same call; a key named in both takes its value from body. description is the row prose: it is persisted on the row as description, never as the dispatch body. Without an id or any subject/title/name/task/goal/description/notes text the row is refused.`
+const PRD_ADD_DESCRIPTION = ` ${PRD_ADD_KEYS.join(', ')} are accepted at the top level and folded into body, so {"subject":"<row intent>","description":"<row prose>"} and body:{"subject":"...","description":"..."} are the same call; a key named in both takes its value from body. description is the row prose: it is persisted on the row as description, never as the dispatch body. Without an id or any subject/title/name/task/goal/description/notes text the row is refused. The same id upserts: a new id replies created, an open row with that id is merged and replies updated, and an id whose row is closed replies conflict and writes nothing.`
 const PRD_RESOLVE_BODY = {
     required: ['id'],
     fields: {
@@ -424,8 +424,10 @@ const FS_EDIT_BODY = {
     required: ['path', 'old', 'new'],
     fields: {
         path: { type: 'string', description: 'Relative to the project root, or absolute inside it (rewritten to relative); a path outside the root is refused. allowOutsideRoot never widens an edit.' },
-        old: { type: 'string', description: 'Exact text to replace. It must occur exactly once in the file; zero or several matches refuse with invalid_args and the match count, and nothing is written.' },
+        old: { type: 'string', description: 'Exact text to replace. It must occur exactly once in the file unless occurrence or line picks one; zero or several unpicked matches refuse with invalid_args and the match count, and nothing is written.' },
         new: { type: 'string', description: 'Replacement text. Empty deletes old.' },
+        occurrence: { type: 'integer', description: '1-based index of the match to replace when old occurs several times. An index past the last match refuses and nothing is written.' },
+        line: { type: 'integer', description: '1-based line where the match to replace starts. Picks among several matches; no match starting on that line refuses and nothing is written.' },
     },
 }
 const FS_READDIR_BODY = {

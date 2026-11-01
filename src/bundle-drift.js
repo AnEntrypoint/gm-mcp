@@ -130,7 +130,7 @@ export function bundleDrift() {
         reloadable: false,
         refusal_code: 'no-handover',
         refusal_reason: 'this process keeps the bundle it launched with',
-        one_command: `restart the gm MCP client (or reconnect the gm MCP server) so it relaunches from ${installedState.path}`,
+        one_command: `run /mcp and reconnect the gm client so it relaunches from ${installedState.path}`,
     }
 }
 
@@ -152,7 +152,7 @@ export function bundleStalenessLine(state = bundleDrift()) {
     const installed = `${state.installed_version ?? 'unknown version'} (sha ${shortHash(state.installed_sha256)})`
     const running = `${state.running_version} (sha ${shortHash(state.running_sha256)})`
     const runningPath = state.path && state.path !== installedPath ? ` (serving from ${state.path})` : ''
-    return `gm-mcp: this server is serving bundle ${running}${runningPath} but ${installed} is installed at ${installedPath} -- restart required (${state.refusal_reason}): restart the MCP client that launched this server (or reconnect the gm MCP server) so it relaunches from ${installedPath}`
+    return `gm-mcp: this server is serving bundle ${running}${runningPath} but ${installed} is installed at ${installedPath} -- restart required (${state.refusal_reason}): run /mcp and reconnect the gm client so it relaunches from ${installedPath}`
 }
 
 export function bundleStalenessNotice(state = bundleDrift()) {

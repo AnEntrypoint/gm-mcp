@@ -52,7 +52,7 @@ export const FAST_MANIFEST = {
        "type": "boolean"
       },
       "timeout_seconds": {
-       "description": "Dispatch envelope key folded into every gm call that declares it: poll budget in seconds (default 120, ceiling 600; override the ceiling with GM_MCP_POLL_TIMEOUT_CEILING_MS). A timeout keeps the dispatch running; resume it with resume_task.",
+       "description": "Dispatch envelope key folded into every gm call that declares it: poll budget in seconds (default 300, ceiling 600; override the ceiling with GM_MCP_POLL_TIMEOUT_CEILING_MS). A dispatch still running at the budget moves to background: the reply names its task id, resume it with resume_task.",
        "type": "number"
       },
       "full_response": {

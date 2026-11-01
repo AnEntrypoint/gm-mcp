@@ -2351,7 +2351,7 @@ const TIMEOUT_MS_PREFIX_LINE = /^\s*timeout(?:Ms|_ms)=/
 
 const TIMEOUT_MS_PREFIX_VALUE = /^\s*timeout(?:Ms|_ms)=([0-9]+)[ \t]*(?:\r?\n|$)/
 
-const DEFAULT_TIMEOUT_SECONDS = 120
+const DEFAULT_TIMEOUT_SECONDS = 300
 
 const EXEC_DEFAULT_LIMIT_SECONDS = 300
 
