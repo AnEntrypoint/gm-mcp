@@ -585,10 +585,26 @@ function commitMessage(value) {
     return value
 }
 
-// A closing witness must be a dispatch the spool ledger recorded (one JSON object per line, keyed dispatch_id).
-function isLedgerWitness(root, id) {
+// A closing witness must be a verb dispatch the spool ledger recorded under one of the roots, and not one the resolving session
+// produced. The store applies the same rule to a close (prd.rs close_witness_refusal), so both run before any write or push.
+// Null when the witness may close the row; otherwise the reason.
+export function closeWitnessRefusal(roots, witness, session) {
+    const entry = roots.map((root) => ledgerEntry(root, witness)).find((found) => found !== null) ?? null
+    if (entry === null) return `witness_dispatch_id ${witness} is not recorded in this project's dispatch ledger, so it is not a live run`
+    if (typeof session === 'string' && session !== '' && entry.session_id === session) return `witness_dispatch_id ${witness} was produced by the resolving session; the witness must come from a separate SESSION_ID`
+    return null
+}
+
+function ledgerEntry(root, dispatchId) {
     const ledger = readText(path.join(root, '.gm', 'exec-spool', '.dispatch-ledger.json'))
-    return ledger !== null && ledger.includes(`"dispatch_id":"${id}"`)
+    if (ledger === null) return null
+    for (const line of ledger.split('\n')) {
+        if (!line.includes(dispatchId)) continue
+        let entry
+        try { entry = JSON.parse(line) } catch { continue }
+        if (entry.dispatch_id === dispatchId && 'verb' in entry) return entry
+    }
+    return null
 }
 
 function isExecutable(file) {
@@ -742,9 +758,11 @@ async function publishOnOrigin(args) {
     const store = fs.existsSync(rowFileOf(repo, row)) ? repo : root
     const removedRowFile = paths.some((p) => p.startsWith('.gm/prd/') && p.includes(row) && !isFile(path.join(repo, p)))
     const closing = args.witness !== undefined || args.status !== undefined || removedRowFile
-    if (closing && (!CLOSE_STATUSES.includes(args.status) || !WITNESS_ID.test(String(args.witness ?? '')) || ![repo, root].some((base) => isLedgerWitness(base, args.witness)))) {
+    if (closing && (!CLOSE_STATUSES.includes(args.status) || !WITNESS_ID.test(String(args.witness ?? '')))) {
         return refused('witness_required', `closing row ${row} needs witness (a dispatch id in the .gm/exec-spool/.dispatch-ledger.json of repo_dir or cwd) and status resolved or stale; nothing pushed`)
     }
+    const witnessRefusal = closing ? closeWitnessRefusal([repo, root], String(args.witness), args.session_id) : null
+    if (witnessRefusal !== null) return refused('witness_refused', `${witnessRefusal}; nothing pushed`)
     if (closing) await ensureReferenceGate(store)
     const unreferenced = closing ? referenceGateRefusal(store, row, 'publish_on_origin closing commit') : null
     if (unreferenced !== null) return refused('references_required', unreferenced)

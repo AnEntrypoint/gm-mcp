@@ -19,7 +19,7 @@ import { prdFeedFor } from './prd-feed.js'
 import { bootstrapReply } from './live-state.js'
 import { maybeStartDevSync } from './dev-sync.js'
 import { gitToplevel, recoverStaleIndexLock, runGit } from './git-adapter.js'
-import { sweepOrphansAfterRespawn } from './triage-verbs.js'
+import { closeWitnessRefusal, sweepOrphansAfterRespawn } from './triage-verbs.js'
 import { hiddenDetachedOptions } from './hidden-spawn.js'
 import { execFile } from './process-port.js'
 import { cleanResponse, compactWireResponse, omitRepeatedFaultStdout, renderVerbatimFileText, untruncatedKeysFor, withCodesearchCompleteness, withNoticeCodes, withSearchIncompleteness, PLAIN_TEXT_OUTPUT_INLINE_MAX, FILE_READ_INLINE_MAX, LONG_TEXT_INLINE_MAX_CEILING, VERBATIM_TEXT_MARKER } from './response-compact.js'
@@ -3275,6 +3275,20 @@ function closeReferenceRefusal(args) {
     return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'references_required', refused: true, error: message })
 }
 
+// The witness check runs before the reference gate, which writes grandfather notes, so a refused witness leaves the store untouched.
+function closeWitnessGateRefusal(args) {
+    const body = isPlainObject(args?.body) ? args.body : {}
+    const witness = [body.witness_dispatch_id, body.dispatch_id].find((value) => typeof value === 'string' && value.trim() !== '')
+    if (witness === undefined) return null
+    const resolved = resolveDispatchRoot(args?.cwd ?? body.cwd)
+    if (resolved.error || !resolved.root) return null
+    const callerSession = [body.session_id, args.session_id].find((value) => typeof value === 'string' && value.trim() !== '')
+    const reason = closeWitnessRefusal([resolved.root], witness.trim(), callerSession?.trim())
+    if (reason === null) return null
+    const session = explicitBodySessionId(body) || (typeof args.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
+    return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'witness_refused', refused: true, error: `${args.verb} refused: ${reason}. Nothing was written.`, witness_dispatch_id: witness.trim() })
+}
+
 // A close is recorded by the closing commit, which appends "<row> <status> <witness> <timestamp>" to closes/<row>.txt (publish_on_origin writes it).
 const CLOSE_RECORD = 'closes/<row>.txt line: <row> resolved|stale <dispatch id> <timestamp>'
 
@@ -3471,6 +3485,10 @@ export async function gmDispatch(args, signal, responseValueObserver) {
         args = edited
     }
     if (PRD_ADD_VERBS.has(args?.verb) && !args?.resume_task && !(typeof args?.cwd === 'string' && args.cwd.trim())) return prdAddCwdRefusal(args)
+    if (CLOSE_VERBS.has(args?.verb) && !args?.resume_task) {
+        const witnessRefusal = closeWitnessGateRefusal(args)
+        if (witnessRefusal !== null) return witnessRefusal
+    }
     if ((PRD_ADD_VERBS.has(args?.verb) || CLOSE_VERBS.has(args?.verb)) && !args?.resume_task) {
         const scope = resolveDispatchRoot(args?.cwd)
         const failure = scope.error || !scope.root ? null : await ensureReferenceGate(scope.root)
