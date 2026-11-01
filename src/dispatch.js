@@ -859,7 +859,7 @@ function withGitAddNote(text, note) {
     return `${text.endsWith('\n') ? text : text + '\n'}git_add_staged: ${note.staged}\ngit_add_skipped_excluded_or_transient: ${note.skipped}\n`
 }
 
-const GIT_READ_VERBS = new Set(['git_status', 'git_log', 'git_diff', 'git_show', 'git_poll', 'git_fetch', 'git_remote', 'git_worktree_list', 'git_stash_list'])
+const GIT_READ_VERBS = new Set(['git_status', 'git_log', 'git_tree', 'git_diff', 'git_show', 'git_poll', 'git_fetch', 'git_remote', 'git_worktree_list', 'git_stash_list'])
 
 function withIndexLockNote(text, note) {
     if (note === null || typeof text !== 'string' || text.trimStart().startsWith('{')) return text
