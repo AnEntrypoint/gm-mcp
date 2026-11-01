@@ -300,7 +300,7 @@ export function refuseUndeclaredBodyKeys(name, verb, folded) {
     if (verb === 'fs_read') for (const alias of FS_READ_RANGE_ALIASES) known.add(alias)
     const unknown = Object.keys(body).filter((key) => !known.has(key))
     if (unknown.length === 0) return
-    const hint = verb.startsWith('codeinsight') || verb.startsWith('callers') || verb.startsWith('callees') || verb.startsWith('impact') ? ' -- codeinsight answers structure: use {symbol, verb:"find"|"callers"|...} for symbols, or gm.codesearch({query}) for text' : ''
+    const hint = verb.startsWith('codeinsight') || verb.startsWith('callers') || verb.startsWith('callees') || verb.startsWith('impact') ? ' -- codeinsight answers structure: use {symbol, verb:"find"|"callers"|...} for symbols, or gm.codesearch({query: "<text>", mode: "literal"}) for text' : ''
     const canonical = verb === 'fs_read' ? [...Object.keys(schema.fields).filter((key) => !FS_READ_RANGE_ALIASES.includes(key)), 'startLine', 'endLine'] : Object.keys(schema.fields)
     const cwdHint = verb === 'git_pull' ? ' -- git_pull has no path key: name the checkout with cwd=<directory> (a submodule directory works)' : ''
     const resolveHint = verb === 'prd-resolve' ? ' -- prd-resolve accepted keys: id, status (resolved|stale), resolution, witness_evidence, witness_dispatch_id, cwd' : ''
