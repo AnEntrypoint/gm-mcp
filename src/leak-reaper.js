@@ -7,7 +7,7 @@ import { attributePid, attributeRows } from './child-ledger.js'
 import { pidAlive } from './dispatch.js'
 import { classifyGmServerCommand } from './gm-cmdline.js'
 import { listeningPidOf, portAcceptsConnection } from './ports.js'
-import { readProcessTableAsync, windowsTableSpawnCount } from './process-table.js'
+import { readProcessTableAsync, windowsTableSpawnCount, withWindowsTablePass } from './process-table.js'
 import {
     establishedConnectionCount,
     instanceFilePath,
@@ -411,7 +411,11 @@ function removeFile(filePath) {
     }
 }
 
-export async function reapReport({ roots = [], apply = false, liveSessionIds = null, kinds = DEFAULT_LEAK_KINDS, now = Date.now(), unattributed = unattributedScanEnabled() } = {}) {
+export function reapReport(options = {}) {
+    return withWindowsTablePass(() => reapPass(options))
+}
+
+async function reapPass({ roots = [], apply = false, liveSessionIds = null, kinds = DEFAULT_LEAK_KINDS, now = Date.now(), unattributed = unattributedScanEnabled() } = {}) {
     const started = Date.now()
     const tableSpawnsBefore = windowsTableSpawnCount()
     const unattributedEnabled = unattributed !== false && unattributed !== null

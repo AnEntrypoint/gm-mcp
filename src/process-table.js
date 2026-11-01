@@ -147,7 +147,28 @@ export function windowsTableSpawnCount() {
     return windowsTableSpawns
 }
 
+// A reap pass (reapReport) runs inside withWindowsTablePass, which holds the table its first read starts for the whole
+// pass, so a pass longer than WINDOWS_TABLE_TTL_MS still spawns powershell once.
+let windowsPassTable = null
+
+export async function withWindowsTablePass(run) {
+    if (process.platform !== 'win32' || windowsPassTable !== null) return run()
+    windowsPassTable = { rows: null }
+    try {
+        return await run()
+    } finally {
+        windowsPassTable = null
+    }
+}
+
 function sharedWindowsRows() {
+    if (windowsPassTable !== null) {
+        if (windowsPassTable.rows === null) {
+            windowsTableSpawns += 1
+            windowsPassTable.rows = windowsRowsAsync()
+        }
+        return windowsPassTable.rows
+    }
     const now = Date.now()
     if (windowsTable === null || now - windowsTable.at > WINDOWS_TABLE_TTL_MS) {
         windowsTableSpawns += 1
