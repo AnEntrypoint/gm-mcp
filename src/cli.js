@@ -8,6 +8,7 @@ import { clearLocalBuildPin, deployedBundleVersion, describeSelfUpdateOutcome, l
 import { defaultHttpPort, httpMcpUrl, probeHealth, allocateHttpPort, reclaimDeadPortRegistries, PORT_POOL_FROM, PORT_POOL_TO } from './singleton.js'
 import { reapReport, formatFindings } from './leak-reaper.js'
 import { formatLeakWatchLine, formatOrphanLine, formatOrphanTreeLine, leakWatchReport } from './leak-watch.js'
+import { runJanitorPass } from './janitor.js'
 import { attributePid, globalLedgerPath } from './child-ledger.js'
 import { appendDiagnostic, logFilePath } from './server-log.js'
 import { registerClaudeCode } from './register.js'
@@ -281,6 +282,18 @@ const COMMANDS = {
         console.log(text)
         return 0
     },
+    'janitor': async () => {
+        const apply = process.argv.includes('--apply')
+        const report = await runJanitorPass({ apply, force: true })
+        if (process.argv.includes('--json')) {
+            console.log(JSON.stringify(report, null, 2))
+        } else {
+            for (const item of report.items ?? []) console.log('  ' + (apply ? 'REMOVED ' : 'REMOVE  ') + item.kind + ' ' + item.path + ' (' + item.bytes + ' bytes) -- ' + item.reason)
+            console.log('janitor (' + (apply ? 'APPLY' : 'DRY-RUN') + ') -- ' + (report.candidates ?? 0) + ' candidate(s), ' + (report.candidate_bytes ?? 0) + ' bytes; removed ' + (report.removed ?? 0) + ', freed ' + (report.bytes_freed ?? 0) + ' bytes, failed ' + (report.failed ?? 0) + '; event ' + report.event_id)
+            if (!apply && (report.candidates ?? 0) > 0) console.log('(dry run: nothing was removed -- re-run with --apply)')
+        }
+        return report.outcome === 'failed' ? 1 : 0
+    },
     'http-status': async () => {
         const port = defaultHttpPort()
         const health = await probeHealth(port)
@@ -319,7 +332,7 @@ const COMMANDS = {
                 console.log(`\n(report only: an orphan is a process gm never spawned, so nothing here retires it -- classify pid(s) ${report.orphans.items.map((item) => item.pid).join(',')} by hand, thresholds ${JSON.stringify(report.orphans.thresholds)})`)
             }
             if (!apply && report.population.retireable > 0) {
-                console.log(`\n(report only: nothing was signalled -- re-run with --apply, or set GM_MCP_LEAK_AUTO_APPLY=1 to let the hourly pass retire them)`)
+                console.log(`\n(report only: nothing was signalled -- re-run with --apply; the hourly pass retires them unless GM_MCP_LEAK_AUTO_APPLY is 0)`)
             }
         }
         return 0
@@ -401,6 +414,11 @@ usage:
                                    retireable, how many duplicate supervisors a port has,
                                    and which heavyweight orphans (ppid 1, not ours) are
                                    holding memory while burning no CPU
+  gm-mcp-server.js janitor [--apply] [--json]
+                                   the sweep the hourly pass runs: scratch under /tmp/gm-scratch older than 24 h (a KEEP
+                                   manifest per owner dir is honoured), legacy /tmp build scatter, .bak-* and log rotations
+                                   beyond .1, claim and guard records of dead pids, and old install dirs whose owner is dead
+                                   and that have been idle for 7 days; without --apply it only lists what it WOULD remove
   gm-mcp-server.js attribute --pid N [--root <dir>]...
                                    print which dispatch spawned pid N (exit 1 if unattributed)
   gm-mcp-server.js register [--bundle <path>]   register this bundle (default: the file being run, by absolute path) as Claude Code's user-scope gm MCP server; no shell expansion involved

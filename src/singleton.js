@@ -96,6 +96,27 @@ function dropSingletonStateForPort(port) {
     if (Number(recorded?.port) === Number(port)) dropSingletonState()
 }
 
+// Removes the registry record of one port. A file goes only when every pid it names is dead by kill -0; a file that names
+// a live pid, or that cannot be read, stays.
+export function dropHttpRecord(port) {
+    const files = [
+        [instanceFilePath(port), readStateFile(instanceFilePath(port), null), ['pid', 'supervisor_pid', 'server_pid']],
+        [supervisorStateFilePath(port), readStateFile(supervisorStateFilePath(port), null), ['pid', 'server_pid']],
+        [stateFilePath(), readStateFile(stateFilePath(), port), ['pid']],
+    ]
+    let removed = true
+    for (const [file, state, keys] of files) {
+        if (state === null) continue
+        const pids = keys.map((key) => Number(state[key])).filter((pid) => Number.isInteger(pid) && pid > 0)
+        if (pids.some((pid) => pidAlive(pid) !== false)) {
+            removed = false
+            continue
+        }
+        removed = dropFile(file) && removed
+    }
+    return removed
+}
+
 export async function probeHealth(port, timeoutMs = PROBE_TIMEOUT_MS) {
     const controller = new AbortController()
     const deadline = setTimeout(() => controller.abort(), timeoutMs)

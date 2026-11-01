@@ -292,9 +292,9 @@ gm-mcp: leak watch -- 27 gm-mcp process(es) on this host (warn at 8); 19 server(
 the count becomes memory pressure. It is a warning, never a kill: nothing is
 refused a start.
 
-**Retiring is opt-in and narrower than the reaper's own `retire` verdict.** By
-default the pass reports and stops. `GM_MCP_LEAK_AUTO_APPLY=1` lets it signal,
-and then only an unattributed **stdio** server that is also:
+**Retiring is on by default and narrower than the reaper's own `retire` verdict.** The
+pass signals only what the rules below allow (`GM_MCP_LEAK_AUTO_APPLY=0` turns it off),
+limited to an unattributed **stdio** server that is also:
 
 - not the pid answering `/health` and not the owner of a registered port's
   listening socket, one shared HTTP server carries every session on the box;
@@ -335,7 +335,8 @@ empty rather than wrongly quiet about a number it never measured.
 |---|---|---|
 | `GM_MCP_LEAK_WATCH` | `0`/`false`/`no`/`off` disables the hourly pass | unset (on) |
 | `GM_MCP_LEAK_POPULATION_WARN` | process count at which the pass goes loud | `8` |
-| `GM_MCP_LEAK_AUTO_APPLY` | any value but `0`/`false`/`no`/`off` arms auto-retire | unset (report only) |
+| `GM_MCP_LEAK_AUTO_APPLY` | `0`/`false`/`no`/`off` turns auto-retire off | unset (on) |
+| `GM_MCP_JANITOR` | `0`/`false`/`no`/`off` turns the hourly janitor sweep off | unset (on) |
 | `GM_MCP_LEAK_ORPHANS` | `0`/`false`/`no`/`off` disables the orphan scan | unset (on) |
 | `GM_MCP_LEAK_ORPHAN_RSS_MB` | RSS floor at which a reparented process is heavyweight | `150` |
 | `GM_MCP_LEAK_ORPHAN_DUTY` | CPU-seconds-per-second-alive below which it counts as idle | `0.02` |

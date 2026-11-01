@@ -5,10 +5,11 @@ import path from 'node:path'
 
 import { attributePid, attributeRows } from './child-ledger.js'
 import { pidAlive } from './dispatch.js'
-import { classifyGmServerCommand } from './gm-cmdline.js'
-import { listeningPidOf, portAcceptsConnection } from './ports.js'
+import { classifyGmServerCommand, classifyRunnerCommand } from './gm-cmdline.js'
+import { listeningPidOf, portAcceptsConnection, portListenerState } from './ports.js'
 import { readProcessTableAsync, windowsTableSpawnCount, withWindowsTablePass } from './process-table.js'
 import {
+    dropHttpRecord,
     establishedConnectionCount,
     instanceFilePath,
     launchedEntryPath,
@@ -20,6 +21,8 @@ import {
     supervisorStateFilePath,
 } from './singleton.js'
 import { ageMsSince } from './timestamp.js'
+import { agentplugDir } from './paths.js'
+import { lockPidOf } from './janitor.js'
 
 const BROWSER_NAMES = new Set(['chrome', 'chrome.exe', 'msedge', 'msedge.exe', 'firefox', 'firefox.exe'])
 export const DEFAULT_LEAK_KINDS = ['exec']
@@ -125,6 +128,26 @@ function verdictOf(predicates, extra = {}) {
     return { verdict: VERDICT.RETIRE, predicates, ...extra }
 }
 
+// The recorded server pid is dead, so the registry record is stale. Retiring it removes the record and signals nothing.
+// A listener on the port or a live supervisor keeps it, and an unmeasured listener leaves the verdict unknown.
+async function staleRecordFinding(port, serverPid, instance, now) {
+    const listener = await portListenerState(port)
+    const supervisorPid = liveSupervisorPid(port, instance, now)
+    return verdictOf([
+        measure('attributed', 'registry', true),
+        measure('server-dead', false, true),
+        measure('no-listener', listener.measured ? (listener.hasListener ? 'listener-' + listener.ownerPid : false) : null, listener.measured === true && listener.hasListener === false),
+        measure('no-live-supervisor', supervisorPid === null ? true : supervisorPid, supervisorPid === null),
+    ], {
+        source: 'http-instance',
+        port,
+        pid: serverPid,
+        stale_record: true,
+        supervisor_pid: supervisorPid,
+        note: 'recorded server pid ' + serverPid + ' is dead, so the registry record is stale',
+    })
+}
+
 export async function assessHttpInstances({ now = Date.now(), roots = [] } = {}) {
     const findings = []
     for (const port of registeredHttpPorts()) {
@@ -143,6 +166,10 @@ export async function assessHttpInstances({ now = Date.now(), roots = [] } = {})
                 note: 'no recorded server pid for this registry',
                 listener_pid: listener,
             })
+            continue
+        }
+        if (pidAlive(serverPid) === false) {
+            findings.push(await staleRecordFinding(port, serverPid, instance, now))
             continue
         }
         const ownerPid = await portOwnerPid(port)
@@ -328,6 +355,7 @@ export async function assessUnattributedServers({ roots = [], liveSessionIds = n
     const ownedPorts = []
     for (const port of registeredHttpPorts()) ownedPorts.push({ port, owner: await portOwnerPid(port) })
 
+    const rowByPid = new Map(table.map((entry) => [Number(entry.pid), entry]))
     const findings = []
     for (const { pid, row, info } of candidates) {
         const ledgerRows = ledgerByPid.get(pid) ?? []
@@ -351,6 +379,8 @@ export async function assessUnattributedServers({ roots = [], liveSessionIds = n
         const chain = info.transport === 'stdio'
             ? await liveMcpClientInParentChain(pid, parentPid, table)
             : { value: 'not-a-stdio-server', client: false }
+        const parentRow = rowByPid.get(parentPid)
+        const supervisedBy = parentRow !== undefined && classifyGmServerCommand(parentRow.command)?.transport === 'supervisor' ? parentPid : null
         const alive = pidAlive(pid)
         const notBrowser = (await isProtectedBrowser(pid)) === false
         const predicates = [
@@ -361,6 +391,7 @@ export async function assessUnattributedServers({ roots = [], liveSessionIds = n
             measure('orphan-evidence', evidence === '' ? null : evidence, evidence !== ''),
             measure('no-live-lane', laneValue, lanePass),
             measure('no-live-mcp-client', chain.value, chain.value !== null && chain.client === false),
+            measure('not-supervised-child', supervisedBy === null ? 'no-supervisor-parent' : 'supervisor-' + supervisedBy, supervisedBy === null),
             measure('not-user-browser', notBrowser, notBrowser),
         ]
         findings.push(verdictOf(predicates, {
@@ -411,6 +442,132 @@ function removeFile(filePath) {
     }
 }
 
+// Runner and guard rule. A runner process is stale unless it is the pid its install dir's daemon-owner.lock names, and a
+// guard process is stale unless it is the pid in daemon-guard.lock. A lock that is missing or names a dead pid, and a process
+// whose install dir cannot be read, make that process unknown, so nothing is signalled for it.
+const GRACE_MS = 30 * 1000
+const GRACE_POLL_MS = 250
+
+// install_dir() is AGENTPLUG_HOME when it is set, else $HOME/.agentplug. Linux reads the start environment from /proc.
+export function installDirOfPid(pid) {
+    let raw
+    try {
+        raw = readFileSync('/proc/' + pid + '/environ', 'utf8')
+    } catch {
+        return null
+    }
+    const vars = new Map()
+    for (const entry of raw.split('\0')) {
+        const at = entry.indexOf('=')
+        if (at > 0) vars.set(entry.slice(0, at), entry.slice(at + 1))
+    }
+    const override = (vars.get('AGENTPLUG_HOME') || '').trim()
+    if (override !== '') return path.resolve(override)
+    const home = vars.get('HOME') || ''
+    return home !== '' ? path.join(home, '.agentplug') : null
+}
+
+// An exited but unreaped process still answers kill -0; its /proc stat reads state Z.
+function gone(pid) {
+    if (pidAlive(pid) === false) return true
+    try {
+        return /^\d+ \([^)]*\) Z/.test(readFileSync('/proc/' + pid + '/stat', 'utf8'))
+    } catch {
+        return false
+    }
+}
+
+export function assessRunnerProcesses({ processes = [] } = {}) {
+    const ownDir = agentplugDir()
+    const ownOwner = lockPidOf(ownDir, 'daemon-owner.lock')
+    const findings = []
+    for (const row of processes) {
+        const info = classifyRunnerCommand(row.command)
+        if (info === null) continue
+        const pid = Number(row.pid)
+        if (!Number.isInteger(pid) || pid <= 0) continue
+        const lockName = info.kind === 'guard' ? 'daemon-guard.lock' : 'daemon-owner.lock'
+        const dir = installDirOfPid(pid) ?? (ownOwner === pid ? ownDir : null)
+        const lockPid = dir === null ? null : lockPidOf(dir, lockName)
+        const lockLive = lockPid !== null && pidAlive(lockPid) === true
+        findings.push(verdictOf([
+            measure('attributed', dir, dir !== null),
+            measure('lock-holder-live', lockLive ? lockPid : null, lockLive),
+            measure('not-lock-holder', pid === lockPid ? 'holder' : 'not-holder', pid !== lockPid),
+            measure('not-self', pid !== process.pid, pid !== process.pid),
+        ], {
+            source: info.kind,
+            pid,
+            install_dir: dir,
+            lock: dir === null ? null : path.join(dir, lockName),
+            lock_pid: lockPid,
+        }))
+    }
+    return findings
+}
+
+// Retires what the reaper judged. Registry records go through dropHttpRecord, runner and guard processes get SIGTERM and
+// then SIGKILL after GRACE_MS, and other processes get the signal retirePid has always sent.
+export async function applyRetirements(findings) {
+    const retired = []
+    const graceful = []
+    for (const finding of findings) {
+        if (finding.verdict !== VERDICT.RETIRE) continue
+        if (finding.source === 'lease') {
+            removeFile(finding.lease_file)
+            retired.push({ ...finding, action: 'lease-record-removed' })
+            continue
+        }
+        if (finding.stale_record === true) {
+            retired.push({ ...finding, action: dropHttpRecord(finding.port) ? 'record-removed' : 'record-removal-failed' })
+            continue
+        }
+        if (finding.source === 'runner' || finding.source === 'guard') {
+            graceful.push(finding)
+            continue
+        }
+        const signalled = await retirePid(finding.pid)
+        retired.push({ ...finding, action: signalled ? 'signalled' : 'signal-refused' })
+    }
+    if (graceful.length > 0) retired.push(...(await retireWithGrace(graceful)))
+    return retired
+}
+
+async function retireWithGrace(findings) {
+    if (process.platform === 'win32') {
+        const done = []
+        for (const finding of findings) done.push({ ...finding, action: (await retirePid(finding.pid)) ? 'signalled' : 'signal-refused' })
+        return done
+    }
+    const out = findings.map((finding) => {
+        let sent = true
+        try {
+            process.kill(finding.pid, 'SIGTERM')
+        } catch {
+            sent = false
+        }
+        return { ...finding, action: sent ? 'sigterm-sent' : 'signal-refused' }
+    })
+    const deadline = Date.now() + GRACE_MS
+    while (Date.now() < deadline && out.some((entry) => entry.action === 'sigterm-sent' && !gone(entry.pid))) {
+        await new Promise((resolve) => setTimeout(resolve, GRACE_POLL_MS))
+    }
+    for (const entry of out) {
+        if (entry.action !== 'sigterm-sent') continue
+        if (gone(entry.pid)) {
+            entry.action = 'terminated'
+            continue
+        }
+        try {
+            process.kill(entry.pid, 'SIGKILL')
+            entry.action = 'killed-after-grace'
+        } catch {
+            entry.action = 'kill-refused'
+        }
+    }
+    return out
+}
+
 export function reapReport(options = {}) {
     return withWindowsTablePass(() => reapPass(options))
 }
@@ -419,25 +576,15 @@ async function reapPass({ roots = [], apply = false, liveSessionIds = null, kind
     const started = Date.now()
     const tableSpawnsBefore = windowsTableSpawnCount()
     const unattributedEnabled = unattributed !== false && unattributed !== null
-    const table = Array.isArray(unattributed) ? unattributed : (unattributedEnabled ? await readProcessTableAsync() : [])
+    const table = Array.isArray(unattributed) ? unattributed : await readProcessTableAsync()
     const findings = [
         ...(await assessHttpInstances({ roots, now })),
         ...(await assessLeases({ roots })),
         ...(await assessAttributedChildren({ roots, liveSessionIds, kinds })),
         ...(unattributedEnabled ? await assessUnattributedServers({ roots, liveSessionIds, now, processes: table }) : []),
+        ...assessRunnerProcesses({ processes: table }),
     ]
-    const retired = []
-    for (const finding of findings) {
-        if (finding.verdict !== VERDICT.RETIRE) continue
-        if (!apply) continue
-        if (finding.source === 'lease') {
-            removeFile(finding.lease_file)
-            retired.push({ ...finding, action: 'lease-record-removed' })
-            continue
-        }
-        const signalled = await retirePid(finding.pid)
-        retired.push({ ...finding, action: signalled ? 'signalled' : 'signal-refused' })
-    }
+    const retired = apply ? await applyRetirements(findings) : []
     const counts = { retire: 0, keep: 0, unknown: 0 }
     for (const finding of findings) counts[finding.verdict] += 1
     return {

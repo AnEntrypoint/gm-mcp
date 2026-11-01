@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs'
 
 import { attributeRows, leaseRoots } from './child-ledger.js'
 import { classifyGmServerCommand } from './gm-cmdline.js'
-import { MCP_CLIENT_PATTERNS, reapReport, VERDICT } from './leak-reaper.js'
+import { applyRetirements, MCP_CLIENT_PATTERNS, reapReport, VERDICT } from './leak-reaper.js'
+import { runJanitorPass } from './janitor.js'
 import { listeningPidOf } from './ports.js'
 import { orphanFindings, orphanRssTotalMb } from './orphan-scan.js'
 import { liveSessionNameOf, readProcessTableAsync } from './process-table.js'
@@ -32,19 +33,13 @@ function envSaysOff(name) {
     return raw !== undefined && OFF_VALUES.has(raw.trim().toLowerCase())
 }
 
-function envSaysOn(name) {
-    const raw = process.env[name]
-    if (raw === undefined) return false
-    const value = raw.trim().toLowerCase()
-    return value !== '' && !OFF_VALUES.has(value)
-}
-
 export function leakWatchEnabled() {
     return !envSaysOff(LEAK_WATCH_ENV)
 }
 
+// Auto-retire is on unless GM_MCP_LEAK_AUTO_APPLY holds an off value (0, false, no, off), as GM_MCP_REAP_UNATTRIBUTED does.
 export function autoApplyEnabled() {
-    return envSaysOn(AUTO_APPLY_ENV)
+    return !envSaysOff(AUTO_APPLY_ENV)
 }
 
 export function populationWarnAt() {
@@ -251,6 +246,8 @@ export async function leakWatchReport({ roots = null, processes = null, now = Da
     const skipped = []
     let appliedCount = 0
     if (apply) {
+        const direct = retireable.filter((entry) => entry.stale_record === true || entry.source === 'runner' || entry.source === 'guard')
+        for (const entry of await applyRetirements(direct)) applied.push({ pid: entry.pid, port: entry.port, source: entry.source, action: entry.action })
         for (const finding of retireable.filter((entry) => entry.source === 'unattributed-server')) {
             const parentPid = Number(finding.parent_pid)
             const ancestors = ancestorVerdict(walk(finding.pid, Number.isInteger(parentPid) && parentPid > 0 ? parentPid : null))
@@ -292,7 +289,7 @@ export function formatLeakWatchLine(report) {
     let line = `gm-mcp: leak watch -- ${parts.join('; ')}`
     if (population.above_warn) line += ' -- ABOVE the population warning threshold'
     if (report.auto_apply.applied.length > 0) {
-        line += `; retired ${report.auto_apply.applied.map((entry) => entry.pid).join(',')} automatically`
+        line += `; retired ${report.auto_apply.applied.map((entry) => (entry.port !== undefined ? 'record on port ' + entry.port : entry.pid)).join(', ')} automatically`
     } else if (report.population.retireable > 0) {
         const entry = safeEntryPath()
         line += `; retire them with "node ${entry ?? '~/.gm-tools/gm-mcp-server.mjs'} reap --apply"`
@@ -320,6 +317,7 @@ export function formatOrphanTreeLine(tree) {
 }
 
 export async function runLeakWatchPass(options = {}) {
+    await runJanitorPass({ apply: true })
     if (!leakWatchEnabled()) return { outcome: 'disabled' }
     const apply = typeof options.apply === 'boolean' ? options.apply : autoApplyEnabled()
     let report
