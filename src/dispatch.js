@@ -3256,9 +3256,11 @@ function submoduleDirs(root) {
     return cfg.out.split('\n').map((line) => line.slice(line.indexOf(' ') + 1)).filter(Boolean).map((rel) => `${root}/${rel}`)
 }
 
-// The parent's HEAD, or any submodule's origin/main: a close committed inside a submodule is recorded there.
+// The parent's or any submodule's origin/main after a fetch: a close is judged against what was published, never against local history,
+// so a close on origin counts while local main is behind, and a close only in a local commit does not.
 function rowCloseCommitRecorded(root, id) {
-    if (closeRecordLogged(root, 'HEAD', id)) return true
+    runGit(root, ['fetch', '--quiet', 'origin', 'main'])
+    if (closeRecordLogged(root, 'origin/main', id)) return true
     return submoduleDirs(root).some((dir) => closeRecordLogged(dir, 'origin/main', id))
 }
 
