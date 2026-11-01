@@ -38,7 +38,7 @@ function watchForStaleBundle({ transportKind = 'stdio' } = {}) {
             appendDiagnostic('bundle-stale-no-handover', { ...state, transport: transportKind })
         }
         return null
-    }, { transport: transportKind })
+    }, { transport: transportKind, consolidateRoot: () => lastProjectRoot() })
 }
 
 export async function main() {

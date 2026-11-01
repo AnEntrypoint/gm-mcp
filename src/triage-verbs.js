@@ -285,7 +285,7 @@ async function consolidateCheckout(checkout, label, apply, shelfDir) {
     return { label, line, remote }
 }
 
-async function consolidate(args) {
+export async function consolidate(args) {
     const root = rootOf(args)
     const apply = args.dry_run === false
     const dir = path.join(root, '.gm', 'locks')

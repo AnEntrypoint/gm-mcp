@@ -1,12 +1,16 @@
 import { createHash } from 'node:crypto'
-import { readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import path from 'node:path'
 import { BUNDLE_VERSION } from './bundle-version.js'
 import { parseBundleVersion } from './self-update.js'
 import { canonicalEntryPath, launchedEntryPath, serverEntryPath } from './singleton.js'
 import { appendDiagnostic } from './server-log.js'
+import { consolidate } from './triage-verbs.js'
 
 const DEFAULT_INTERVAL_MS = 30_000
 const FIRST_CHECK_DELAY_MS = 5_000
+const CONSOLIDATE_INTERVAL_MS = 10 * 60_000
+const CONSOLIDATE_CLEAN_LINE = /dirty=0 ahead=0 behind=0/
 const BUNDLE_SHEBANG = '#!/usr/bin/env node'
 const BUNDLE_VERSION_ASSIGNMENT = /BUNDLE_VERSION\s*=\s*["']([^"']+)["']/
 
@@ -179,7 +183,7 @@ export function bundleHealthBlock(state = bundleDrift()) {
     }
 }
 
-export function startBundleDriftWatch(onDrift, { intervalMs = bundleDriftIntervalMs(), transport } = {}) {
+export function startBundleDriftWatch(onDrift, { intervalMs = bundleDriftIntervalMs(), transport, consolidateRoot } = {}) {
     runningBundle()
     let checking = false
     const tick = async () => {
@@ -206,6 +210,36 @@ export function startBundleDriftWatch(onDrift, { intervalMs = bundleDriftInterva
     const first = setTimeout(() => { void tick() }, Math.min(intervalMs, FIRST_CHECK_DELAY_MS))
     first.unref?.()
     const timer = setInterval(() => { void tick() }, intervalMs)
+    timer.unref?.()
+    const stopConsolidate = consolidateRoot ? startConsolidateCheck(consolidateRoot) : () => {}
+    return () => {
+        clearTimeout(first)
+        clearInterval(timer)
+        stopConsolidate()
+    }
+}
+
+// Dry-run consolidate of the served checkout, every CONSOLIDATE_INTERVAL_MS. A checkout that is dirty, ahead or behind of
+// origin/main is announced in the diagnostic log. Apply stays an explicit consolidate call, since it resets the checkout.
+function startConsolidateCheck(rootOf) {
+    let checking = false
+    const tick = async () => {
+        const root = rootOf()
+        if (checking || !root || !existsSync(path.join(root, '.git'))) return
+        checking = true
+        try {
+            const reply = await consolidate({ cwd: root, dry_run: true })
+            const drifted = reply.lines.filter((line) => !CONSOLIDATE_CLEAN_LINE.test(line))
+            if (reply.exit !== 0 || drifted.length > 0) appendDiagnostic('consolidate-drift', { root, exit: reply.exit, result: reply.result, lines: drifted })
+        } catch (error) {
+            appendDiagnostic('consolidate-check-failed', { root, error: error?.message ? String(error.message) : String(error) })
+        } finally {
+            checking = false
+        }
+    }
+    const first = setTimeout(() => { void tick() }, FIRST_CHECK_DELAY_MS)
+    first.unref?.()
+    const timer = setInterval(() => { void tick() }, CONSOLIDATE_INTERVAL_MS)
     timer.unref?.()
     return () => {
         clearTimeout(first)
