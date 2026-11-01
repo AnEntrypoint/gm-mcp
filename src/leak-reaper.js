@@ -477,7 +477,19 @@ function gone(pid) {
     }
 }
 
-export function assessRunnerProcesses({ processes = [] } = {}) {
+// Runner and guard rule. A runner or guard process is retired only when every condition holds. A failed condition keeps the
+// process, and protected_by names it:
+//   not-holder       the pid is not the one its install dir's lock names (daemon-owner.lock, or daemon-guard.lock for a guard)
+//   holder-alive     that lock names a live pid
+//   older-10m        the process has run at least RUNNER_MIN_AGE_S seconds (ps etimes)
+//   not-reserved     the pid is not named in daemon-handoff-reservation.json
+//   no-recent-swap   last-completed-runner-swap.json was not recorded within RUNNER_QUIET_MS
+//   no-recent-exit   daemon-intentional-exit.json was not recorded within RUNNER_QUIET_MS
+// A value that cannot be read counts as a failed condition, so it keeps the process.
+const RUNNER_MIN_AGE_S = 600
+const RUNNER_QUIET_MS = 10 * 60 * 1000
+
+export async function assessRunnerProcesses({ processes = [], now = Date.now() } = {}) {
     const ownDir = agentplugDir()
     const ownOwner = lockPidOf(ownDir, 'daemon-owner.lock')
     const findings = []
@@ -489,21 +501,57 @@ export function assessRunnerProcesses({ processes = [] } = {}) {
         const lockName = info.kind === 'guard' ? 'daemon-guard.lock' : 'daemon-owner.lock'
         const dir = installDirOfPid(pid) ?? (ownOwner === pid ? ownDir : null)
         const lockPid = dir === null ? null : lockPidOf(dir, lockName)
-        const lockLive = lockPid !== null && pidAlive(lockPid) === true
-        findings.push(verdictOf([
-            measure('attributed', dir, dir !== null),
-            measure('lock-holder-live', lockLive ? lockPid : null, lockLive),
-            measure('not-lock-holder', pid === lockPid ? 'holder' : 'not-holder', pid !== lockPid),
+        const lockAlive = lockPid !== null && pidAlive(lockPid) === true
+        const elapsed = await elapsedSecondsOf(pid)
+        const reserved = dir === null ? null : readJson(path.join(dir, 'daemon-handoff-reservation.json'))
+        const swapAt = dir === null ? null : recentRecordOf(path.join(dir, 'last-completed-runner-swap.json'), now)
+        const exitAt = dir === null ? null : recentRecordOf(path.join(dir, 'daemon-intentional-exit.json'), now)
+        const predicates = [
+            measure('attributed', dir ?? 'install-dir-unreadable', dir !== null),
             measure('not-self', pid !== process.pid, pid !== process.pid),
-        ], {
+            measure('not-holder', pid === lockPid ? 'holder' : 'not-holder', pid !== lockPid),
+            measure('holder-alive', lockAlive ? lockPid : 'lock-missing-or-dead', lockAlive),
+            measure('older-10m', elapsed ?? 'etimes-unreadable', elapsed !== null && elapsed >= RUNNER_MIN_AGE_S),
+            measure('not-reserved', Number(reserved?.pid) === pid ? 'reserved' : 'not-reserved', Number(reserved?.pid) !== pid),
+            measure('no-recent-swap', swapAt ?? 'none', swapAt === null),
+            measure('no-recent-exit', exitAt ?? 'none', exitAt === null),
+        ]
+        findings.push(verdictOf(predicates, {
             source: info.kind,
             pid,
             install_dir: dir,
             lock: dir === null ? null : path.join(dir, lockName),
             lock_pid: lockPid,
+            elapsed_s: elapsed,
         }))
     }
     return findings
+}
+
+// Elapsed run time of a pid in whole seconds (ps etimes), or null when it cannot be read.
+async function elapsedSecondsOf(pid) {
+    try {
+        const { stdout } = await execFileAsync('ps', ['-o', 'etimes=', '-p', String(pid)], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] })
+        const value = Number.parseInt(stdout.trim(), 10)
+        return Number.isSafeInteger(value) && value >= 0 ? value : null
+    } catch {
+        return null
+    }
+}
+
+// The ISO time a record was written, when that is within RUNNER_QUIET_MS of now; else null. The record's own timestamp
+// (swapped_at_ts or ts, in ms) wins over its mtime.
+function recentRecordOf(file, now) {
+    let at
+    try {
+        at = statSync(file).mtimeMs
+    } catch {
+        return null
+    }
+    const body = readJson(file)
+    const stamped = Number(body?.swapped_at_ts ?? body?.ts)
+    if (Number.isFinite(stamped) && stamped > 0) at = stamped
+    return now - at < RUNNER_QUIET_MS ? new Date(at).toISOString() : null
 }
 
 // Retires what the reaper judged. Registry records go through dropHttpRecord, runner and guard processes get SIGTERM and
@@ -582,7 +630,7 @@ async function reapPass({ roots = [], apply = false, liveSessionIds = null, kind
         ...(await assessLeases({ roots })),
         ...(await assessAttributedChildren({ roots, liveSessionIds, kinds })),
         ...(unattributedEnabled ? await assessUnattributedServers({ roots, liveSessionIds, now, processes: table }) : []),
-        ...assessRunnerProcesses({ processes: table }),
+        ...(await assessRunnerProcesses({ processes: table, now })),
     ]
     const retired = apply ? await applyRetirements(findings) : []
     const counts = { retire: 0, keep: 0, unknown: 0 }

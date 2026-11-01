@@ -145,6 +145,14 @@ function keepSetOf(ownerDir) {
     return kept
 }
 
+// True when the KEEP manifest of the scratch owner dir holding target names target, something inside it, or something that contains it.
+function keptByManifest(target) {
+    const rel = path.relative(SCRATCH_ROOT, target)
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return false
+    const ownerDir = path.join(SCRATCH_ROOT, rel.split(path.sep)[0])
+    return keepSetOf(ownerDir).some((abs) => target === abs || target.startsWith(abs + path.sep) || abs.startsWith(target + path.sep))
+}
+
 function scratchItems(now, refs) {
     const items = []
     for (const owner of namesIn(SCRATCH_ROOT)) {
@@ -229,6 +237,9 @@ function installDirCandidates() {
         dirs.push(path.join(base, '.agentplug'))
         for (const name of namesIn(base)) dirs.push(path.join(base, name, '.agentplug'))
     }
+    for (const owner of namesIn(SCRATCH_ROOT)) {
+        for (const name of namesIn(path.join(SCRATCH_ROOT, owner))) dirs.push(path.join(SCRATCH_ROOT, owner, name, '.agentplug'))
+    }
     return [...new Set(dirs)].filter(isDirectory)
 }
 
@@ -236,7 +247,7 @@ function oldInstallItems(now, refs) {
     const configured = path.resolve(agentplugDir())
     const items = []
     for (const dir of installDirCandidates()) {
-        if (path.resolve(dir) === configured) continue
+        if (path.resolve(dir) === configured || keptByManifest(dir)) continue
         const owner = lockPidOf(dir, 'daemon-owner.lock')
         if (owner === null || pidAlive(owner) !== false) continue
         const newest = Math.max(0, ...namesIn(dir).map((name) => mtimeOf(path.join(dir, name))))
