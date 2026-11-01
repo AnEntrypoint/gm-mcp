@@ -14,11 +14,11 @@ import { createHash, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { lastTableError, readProcessTableAsync } from './process-table.js'
 import { appendDiagnostic } from './server-log.js'
 import { appendRowNote, checkReferences, ensureReferenceGate, readRow, recordedUrls, REFERENCE_CAP, referenceGateRefusal, rowFileOf, runGhSearch, searchPlan, validRowId } from './public-search.js'
+import { CHECKER_SOURCE } from './checker-snapshot.js'
 const LOCAL_TIMEOUT_MS = 60_000
 const NETWORK_TIMEOUT_MS = 180_000
 const FETCH_TIMEOUT_DEFAULT_S = 300
@@ -214,12 +214,14 @@ function utcStamp(now = new Date()) {
     return now.toISOString().slice(0, 19).replace(/[-:]/g, '')
 }
 
-function gmInstallRoot() {
-    let found = null
-    for (let dir = path.dirname(fileURLToPath(import.meta.url)); ; dir = path.dirname(dir)) {
-        if (isFile(path.join(dir, 'scripts', 'check-staged-secrets.mjs'))) found = dir
-        if (path.dirname(dir) === dir) return found ?? dir
-    }
+// The secrets checker is the one this build serves: CHECKER_SOURCE is embedded from scripts/check-staged-secrets.mjs
+// by scripts/embed-checker.mjs. It is written to the publish's private work dir, outside the target repo, and run with
+// cwd set to the target repo, so the scanned staged diff is the target's. An empty CHECKER_SOURCE yields null.
+function servedChecker(work) {
+    if (CHECKER_SOURCE === '') return null
+    const file = path.join(work, 'check-staged-secrets.mjs')
+    fs.writeFileSync(file, CHECKER_SOURCE)
+    return file
 }
 
 function rootOf(args) {
@@ -736,10 +738,6 @@ async function publishOnOrigin(args) {
     const message = commitMessage(args.message)
     const pins = args.pins ?? {}
     const paths = [...new Set([...(await listedPaths(args, root, repo)).map(publishPath), ...Object.keys(pins)])]
-    // The checker lives in the gm checkout's scripts/ (cwd names that checkout); the install root and repo_dir are fallbacks.
-    const checkerIn = (base) => path.join(base, 'scripts', 'check-staged-secrets.mjs')
-    const gmRoot = gmInstallRoot()
-    const checker = [root, gmRoot, repo].map(checkerIn).find(isFile) ?? checkerIn(root)
     const rowRel = path.posix.join('.gm', 'prd', path.basename(rowFileOf(repo, row)))
     const store = fs.existsSync(rowFileOf(repo, row)) ? repo : root
     const removedRowFile = paths.some((p) => p.startsWith('.gm/prd/') && p.includes(row) && !isFile(path.join(repo, p)))
@@ -767,6 +765,7 @@ async function publishOnOrigin(args) {
     }
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-publish-'))
     try {
+        const checker = servedChecker(work)
         const givenBase = typeof args.publish_base === 'string' && args.publish_base !== '' ? args.publish_base : null
         return await publishLane({ repo, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, closeRow, closeRecord, fetchMs, pins })
     } finally {
@@ -950,7 +949,7 @@ async function publishLane({ repo, message, paths, givenBase, dryRun, checker, w
     const unintended = changed.filter((name) => !paths.includes(name) && name !== 'skills/manifest.sha256')
     if (unintended.length > 0) return refused('unintended_paths', 'commit changes paths outside the list; nothing pushed', [['commit', sha]], unintended)
 
-    if (!noTrackedChange && !isFile(checker)) return refused('checker_missing', `secrets checker not found at ${checker}; nothing pushed. Remedy: copy scripts/check-staged-secrets.mjs from AnEntrypoint/gm into this repo at that path, commit it, then re-dispatch`)
+    if (!noTrackedChange && checker === null) return refused('checker_missing', 'this gm build serves no secrets checker (CHECKER_SOURCE is empty in the bundle); nothing pushed. Remedy: rebuild gm-mcp (node scripts/embed-checker.mjs) and self-update it')
     const scan = noTrackedChange ? { status: 0 } : await run(process.execPath, [checker], { cwd: repo, env: indexEnv })
     if (scan.status !== 0) {
         const output = `${utf8(scan.stdout)}\n${utf8(scan.stderr)}`.split('\n').filter((line) => line.trim() !== '')
@@ -2025,7 +2024,7 @@ export const TRIAGE_VERBS = [
             dry_run: z.boolean().optional().describe('Build and check the commit, then stop before the push. Needs origin/main in repo_dir, which a fixture repo has no way to get (git_remote never adds origin, git_init has no bare option). The planted-secret witness needs no origin: in a git repo with a HEAD commit and a staged planted key, run node <gm checkout>/scripts/check-staged-secrets.mjs; it prints RESULT: FAIL and the rule name (aws-access-key-id for AKIA keys).'),
             witness: z.string().optional().describe('Dispatch id of the live witness that closes the row: must appear in the .gm/exec-spool/.dispatch-ledger.json of repo_dir or of cwd. Required when this publish closes a row (a status is given, or the row file under .gm/prd/ is removed). A closing publish keeps the row file in repo_dir: its commit removes it from origin. A closing publish also needs references on the row: fill them with gm prd-references({cwd, id, references: [{url, why}]}) (https url), or add a row body line "No public references: <reason of at least 10 characters>"; otherwise it refuses references_required.'),
             status: z.enum(['resolved', 'stale']).optional().describe('Status the closing commit records in closes/<row>.txt. Required with witness.'),
-            cwd: z.string().optional().describe('gm checkout root. Required. The secrets checker is read from the gm install (scripts/check-staged-secrets.mjs), else from repo_dir. The row store is <repo_dir>/.gm/prd when that holds the row, else <cwd>/.gm/prd. The witness ledger is read from <repo_dir>/.gm or <cwd>/.gm.'),
+            cwd: z.string().optional().describe('gm checkout root. Required. The secrets checker is the one this build serves (embedded from scripts/check-staged-secrets.mjs) and runs with cwd set to repo_dir; nothing is read from the target repo. The row store is <repo_dir>/.gm/prd when that holds the row, else <cwd>/.gm/prd. The witness ledger is read from <repo_dir>/.gm or <cwd>/.gm.'),
         },
         handler: toolReply('publish_on_origin', publishOnOrigin),
     },
