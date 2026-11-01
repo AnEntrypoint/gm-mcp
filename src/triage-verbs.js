@@ -769,7 +769,6 @@ async function publishOnOrigin(args) {
     const closeRow = closing && paths.includes(rowRel) ? rowRel : null
     const closeRecord = closing ? { path: path.posix.join('closes', `${row}.txt`), line: `${row} ${args.status} ${args.witness} ${new Date().toISOString()}` } : null
     if (closeRecord !== null && !paths.includes(closeRecord.path)) paths.push(closeRecord.path)
-    const commitText = closeRecord === null ? message : `${message}\n\nRow: ${row}\nWitness: ${args.witness}\nStatus: ${args.status}`
     const fetchMs = fetchBudgetSeconds(args.fetch_timeout_seconds) * 1000
     const unreachable = await probeOrigin(repo)
     if (unreachable !== null) return refused(unreachable.code, `${unreachable.cause}; nothing pushed; resume state: none`)
@@ -786,7 +785,7 @@ async function publishOnOrigin(args) {
     try {
         const checker = servedChecker(work)
         const givenBase = typeof args.publish_base === 'string' && args.publish_base !== '' ? args.publish_base : null
-        return await publishLane({ repo, message: commitText, paths, givenBase, dryRun: args.dry_run === true, checker, work, closeRow, closeRecord, fetchMs, pins })
+        return await publishLane({ repo, message, paths, givenBase, dryRun: args.dry_run === true, checker, work, closeRow, closeRecord, fetchMs, pins })
     } finally {
         fs.rmSync(work, { recursive: true, force: true })
     }
