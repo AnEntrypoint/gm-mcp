@@ -1,5 +1,5 @@
 // The gm_skill verb: the skills this bundle carries, and their SKILL.md text, answered from the bundle itself.
-// A host freezes its skill list when it starts, so a session that began before gm wrote ~/.claude/skills sees no
+// A host freezes its skill list when it starts, so a session that began before the skill was served sees no
 // gm skill at all; this verb is how an agent in that session reads the instructions without restarting. Text is
 // paged by line and capped by characters, so a 54 KB SKILL.md never lands in one reply.
 import { createHash } from 'node:crypto'

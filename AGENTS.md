@@ -2,6 +2,10 @@
 
 Repo-source facts that structure and naming cannot carry. The exec-family `timeoutMs` prefix and the `raw_body`/plain-text contract are in README.md ("Exec-family timeout prefix").
 
+## Skill delivery
+
+- **MCP only.** Skills are served from the bundle over MCP: prompts `/mcp__gm__<name>`, resources `skill://<name>`, and the `gm_skill` verb (`src/skill-verb.js`). No code in this repo writes into a host skill root (`~/.claude/skills`, `~/.agents/skills`), and no flag or environment switch re-enables it.
+
 ## Runner and daemon liveness
 
 - **Runner recovery.** The daemon exits on purpose and this process brings it back. It self-recycles when idle (`self-recycling after 3600000ms fully idle` in `~/.agentplug/daemon.log`) or over its wasm memory ceiling, then hands off to a freshly downloaded runner build; a cold start costs tens of seconds of wasm compile. `ensureSpoolRunnerRunning` recovers a dead daemon. Liveness is judged by `status.json`'s `pid` via `process.kill(pid, 0)` (`liveDaemonSweepsProject`), never by heartbeat age. `daemonBootGraceActive` covers a fresh `daemon_boot_ts` in `~/.agentplug/daemon-status.json` that has not swept a project yet. The ensure spawn is idempotent, so `ENSURE_INTERVAL_MS` (2 s) and `ENSURE_LEASE_MS` (3 s) stay small. `startRunnerWatchdog` re-checks every root every 5 s (opt out `GM_MCP_RUNNER_WATCHDOG=0`). No `status.json` means never swept: that is registration, not a liveness verdict.
