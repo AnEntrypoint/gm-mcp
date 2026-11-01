@@ -193,8 +193,3 @@ export function attachSkillGate(server, records) {
     kickSkillGate()
     return controller
 }
-
-// A stdio session whose pipes moved to a relay child serves no tool calls itself, so its gate has no reader: stop its polling.
-export function detachSkillGate(server) {
-    for (const controller of [...controllers]) if (controller.server === server) dropController(controller)
-}

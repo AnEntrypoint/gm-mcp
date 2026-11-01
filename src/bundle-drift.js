@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { BUNDLE_VERSION } from './bundle-version.js'
-import { compareVersions, parseBundleVersion } from './self-update.js'
+import { parseBundleVersion } from './self-update.js'
 import { canonicalEntryPath, launchedEntryPath, serverEntryPath } from './singleton.js'
 import { appendDiagnostic } from './server-log.js'
 
@@ -9,18 +9,11 @@ const DEFAULT_INTERVAL_MS = 30_000
 const FIRST_CHECK_DELAY_MS = 5_000
 const BUNDLE_SHEBANG = '#!/usr/bin/env node'
 const BUNDLE_VERSION_ASSIGNMENT = /BUNDLE_VERSION\s*=\s*["']([^"']+)["']/
-const OFF_VALUES = new Set(['0', 'false', 'no', 'off'])
 
-const RELOAD_ENV = 'GM_MCP_BUNDLE_DRIFT_RELOAD'
 const INTERVAL_ENV = 'GM_MCP_BUNDLE_DRIFT_INTERVAL_SECONDS'
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const shortHash = (hex) => (typeof hex === 'string' ? hex.slice(0, 12) : null)
-
-function envOff(name) {
-    const raw = (process.env[name] || '').trim().toLowerCase()
-    return raw !== '' && OFF_VALUES.has(raw)
-}
 
 export function bundleDriftIntervalMs() {
     const seconds = Number((process.env[INTERVAL_ENV] || '').trim())
@@ -47,7 +40,7 @@ export function runningBundle() {
     try {
         bytes = readFileSync(path)
     } catch (error) {
-        // The errno is kept so a drift refusal can say why the running bundle could not be read.
+        // The errno is kept for the bundle-running-unreadable diagnostic.
         readError = error?.code ?? 'unknown'
         bytes = null
     }
@@ -91,28 +84,7 @@ export function installedBundle() {
     return installed
 }
 
-export function reloadDisabled() {
-    return envOff(RELOAD_ENV)
-}
-
-function reloadRefusal(runningState, installedState) {
-    if (!runningState.readable) return { code: 'running-bundle-unreadable', reason: `this process cannot re-read the file it launched from (${runningState.path})` }
-    if (!runningState.bundled) return { code: 'running-not-a-bundle', reason: `this process is running from ${runningState.path}, which is not a single-file bundle, so a reload would restart it on every edit` }
-    if (!installedState.bundled) return { code: 'installed-not-a-bundle', reason: `${installedState.path} is not a single-file bundle` }
-    if (!installedState.version) return { code: 'installed-version-unknown', reason: `${installedState.path} carries no BUNDLE_VERSION assignment, so it cannot be proven newer than the running ${runningState.version}` }
-    if (compareVersions(installedState.version, runningState.version) < 0) {
-        return { code: 'no-downgrade', reason: `${installedState.path} carries ${installedState.version} and this process is running ${runningState.version} -- a reload may not move backwards` }
-    }
-    if (reloadDisabled()) return { code: 'reload-disabled', reason: `${RELOAD_ENV} turns bundle reload off, so this process only reports the staleness` }
-    return { code: null, reason: null }
-}
-
 let servingTransport = null
-
-// Transports whose drift watch wires a handover in index.js: http replaces its listener, stdio hands over to the HTTP
-// singleton, and a stdio relay exits when idle. A stale process on one of these is reloadable, so the no-handover refusal
-// is only for a transport with no handover (gm-stale-bundle-stdio-relay-handover-1018).
-const HANDOVER_TRANSPORTS = new Set(['http', 'stdio', 'stdio-relay'])
 
 export function setServingTransport(kind) {
     servingTransport = kind
@@ -123,15 +95,15 @@ export function servingTransportKind() {
     return normalizeTransport(servingTransport)
 }
 
-// The transport arrives from setServingTransport or a caller, in any case or padding. It is compared against
-// HANDOVER_TRANSPORTS by exact string, so it is normalised first; an unset value is stdio.
+// The transport arrives from setServingTransport or a caller, in any case or padding; an unset value is stdio.
 function normalizeTransport(value) {
     const raw = (typeof value === 'string' ? value : '').trim().toLowerCase()
     return raw === '' ? 'stdio' : raw
 }
 
-export function bundleDrift({ transport } = {}) {
-    const kind = normalizeTransport(transport ?? servingTransport)
+// A running server keeps the bundle it launched with. A newer installed bundle takes effect when the next session starts,
+// so drift is reported here and never reloaded or handed over to a child.
+export function bundleDrift() {
     const runningState = runningBundle()
     const installedState = installedBundle()
     const base = {
@@ -147,38 +119,19 @@ export function bundleDrift({ transport } = {}) {
     const stale = runningState.sha256 !== installedState.sha256
     const stale_reason = !stale ? null : installedState.version === runningState.version ? 'sha' : 'version'
     if (!stale) return { ...base, stale: false, stale_reason, reloadable: false, refusal: null }
-    const refused = reloadRefusal(runningState, installedState)
-    const unhanded = refused.code === null && !HANDOVER_TRANSPORTS.has(kind)
-        ? { code: 'no-handover', reason: `a ${kind} server cannot replace itself without dropping its client, so a relaunch serves the installed bundle` }
-        : refused
-    const refusal = (unhanded.code === null ? handoverRefusalFor(installedState.sha256) : null) ?? unhanded
     return {
         ...base,
         stale: true,
         stale_reason,
-        reloadable: refusal.code === null,
-        refusal_code: refusal.code,
-        refusal_reason: refusal.reason,
-        one_command: refusal.code === null ? null : `restart the gm MCP client (or reconnect the gm MCP server) so it relaunches from ${installedState.path}`,
+        reloadable: false,
+        refusal_code: 'no-handover',
+        refusal_reason: 'this process keeps the bundle it launched with',
+        one_command: `restart the gm MCP client (or reconnect the gm MCP server) so it relaunches from ${installedState.path}`,
     }
 }
 
-// The last handover attempt for one installed bundle. A failed or deferred handover did not reload, so drift must stop
-// reporting that bundle as reloadable until a later handover for the same bundle succeeds.
-let handoverRefusal = null
-
-export function recordHandoverRefusal(installedSha256, outcome, reason) {
-    handoverRefusal = { installedSha256, code: `handover-${outcome}`, reason: reason ?? outcome }
-}
-
-function handoverRefusalFor(installedSha256) {
-    if (!handoverRefusal || handoverRefusal.installedSha256 !== installedSha256) return null
-    return { code: handoverRefusal.code, reason: handoverRefusal.reason }
-}
-
-// Each drift pair (running sha, installed sha, transport) this process has acted on. 'detected' is logged once and stays
-// retriable while a handover may still succeed (a deferred one); 'settled' and 'reconnect-needed' are final. A final pair
-// is neither logged nor acted on again, and a new installed sha is a new pair.
+// Each drift pair (running sha, installed sha, transport) this process has acted on. 'detected' is logged once; 'reconnect-needed'
+// is final. A final pair is neither logged nor announced again, and a new installed sha is a new pair.
 const driftPairs = new Map()
 
 function driftPairKey(state, transport) {
@@ -194,11 +147,8 @@ export function bundleStalenessLine(state = bundleDrift()) {
     const installedPath = state.installed_path ?? state.path
     const installed = `${state.installed_version ?? 'unknown version'} (sha ${shortHash(state.installed_sha256)})`
     const running = `${state.running_version} (sha ${shortHash(state.running_sha256)})`
-    const action = state.reloadable
-        ? 'reloading between dispatches now'
-        : `restart required (${state.refusal_reason}): restart the MCP client that launched this server (or reconnect the gm MCP server) so it relaunches from ${installedPath}`
     const runningPath = state.path && state.path !== installedPath ? ` (serving from ${state.path})` : ''
-    return `gm-mcp: this server is serving bundle ${running}${runningPath} but ${installed} is installed at ${installedPath} -- ${action}`
+    return `gm-mcp: this server is serving bundle ${running}${runningPath} but ${installed} is installed at ${installedPath} -- restart required (${state.refusal_reason}): restart the MCP client that launched this server (or reconnect the gm MCP server) so it relaunches from ${installedPath}`
 }
 
 export function bundleStalenessNotice(state = bundleDrift()) {
@@ -236,11 +186,11 @@ export function startBundleDriftWatch(onDrift, { intervalMs = bundleDriftInterva
         if (checking) return
         checking = true
         try {
-            const state = bundleDrift({ transport })
+            const state = bundleDrift()
             if (state.stale) {
                 const pair = driftPairKey(state, transport)
                 const status = driftPairs.get(pair)
-                if (status === 'settled' || status === 'reconnect-needed') return
+                if (status === 'reconnect-needed') return
                 if (status === undefined) {
                     appendDiagnostic('bundle-drift-detected', state)
                     driftPairs.set(pair, 'detected')

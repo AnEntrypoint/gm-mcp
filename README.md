@@ -58,7 +58,7 @@ process reloads into what it installed. On a sha256 mismatch it validates the fr
 bundle (size, shebang, `node --check`), keeps the old one as
 `gm-mcp-server.mjs.prev`, atomically swaps the new one in, and prints one
 stderr line (`deployed bundle was stale -- refreshed <old> -> <new> ...`); the
-refreshed tool schema is served from the next connect, or sooner when the transport hands over in-process (see gm-mcp/AGENTS.md "Bundle drift and handover"). A failed check keeps the
+refreshed tool schema is served from the next connect (see gm-mcp/AGENTS.md "Bundle drift"). A failed check keeps the
 deployed copy and prints one line. Env: `GM_MCP_SELF_UPDATE=0` disables,
 `GM_MCP_SELF_UPDATE_DEPLOYED_ONLY` set to anything but `0`/`false`/`no`/`off`
 limits refreshing to the deployed copy's own process,
@@ -131,22 +131,11 @@ serving the bundle it loaded, reports the mismatch on `/health` and in each
 dispatch reply, and picks up the installed bundle only when a human restarts it.
 Nothing spawns the newer bundle, hands it the listening socket or takes its port.
 
-A stdio handover does not start while a dispatch is in flight
-(`bundle-handover-stdio-deferred`, retried on the next tick). It waits up to
-120 s for the in-flight count to reach 0, then proceeds
-(`bundle-handover-stdio-deferral-expired`).
-
-Refusals report staleness and stay on the old bundle: `no-downgrade`,
-`installed-version-unknown` and `running-not-a-bundle` (a dev checkout would
-otherwise restart on every edit). A stdio server is not exempt. It stays the
-client's process. When a server started by hand answers on the default port, the
-stdio session relays the client's frames to it (`bundle-handover-stdio`, and
-`gm: this stdio session now relays to the installed bundle at <url>` on stderr),
-so the session is never detached and no reconnect is needed. When none answers,
-it announces the staleness and keeps serving its loaded bundle until the client
-relaunches; see AGENTS.md. Env: `GM_MCP_BUNDLE_DRIFT_INTERVAL_SECONDS` overrides the
-30s watch, `GM_MCP_BUNDLE_DRIFT_RELOAD=0` turns every reload off and keeps the
-reporting.
+A bundle change takes effect when the next session starts. A stdio server that
+finds a newer installed bundle keeps serving the bundle it loaded and says so once
+(`bundle-stale-no-handover` in the server log, and one stderr line). Nothing spawns
+the newer bundle or relays to it, so a stdio session adds no process per deploy.
+Env: `GM_MCP_BUNDLE_DRIFT_INTERVAL_SECONDS` overrides the 30s watch.
 
 Run bare in a terminal with no MCP client attached the server stays running
 until stdin closes or the process is killed; a stdin close alone does not exit
@@ -262,7 +251,7 @@ connected` for the rest of the session, and no server-side fix re-dials it.
 Restoring the port helps every new session; the stranded session needs `/mcp`
 reconnect or a restart.
 
-A stdio server cannot load a newer bundle in place, and it never exits, because the host treats its exit as a disconnect. When no dispatch is in flight and no stdin bytes are unread, a stale stdio server relays its stdin and stdout to a child started from the installed bundle (`src/stdio-respawn.js`). The host keeps the same process and pipes; the child serves the session. If the child exits before taking over, the stale server keeps serving as before, and the session needs `/mcp` then gm then Reconnect, or a restart. `node ~/.gm-tools/gm-mcp-server.mjs self-update-status` lists a stale process under `running_images` with `stale: true` until its relay or the session ends.
+A stdio server cannot load a newer bundle in place, and it never exits, because the host treats its exit as a disconnect. A stale stdio server keeps serving the bundle it loaded until its session ends; the next session starts from the installed bundle. `node ~/.gm-tools/gm-mcp-server.mjs self-update-status` lists a stale process under `running_images` with `stale: true` until then.
 
 ### Self-install on a fresh machine
 
