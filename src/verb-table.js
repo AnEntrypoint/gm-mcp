@@ -118,7 +118,7 @@ const GIT_FINALIZE_FIELDS = aliasFields('git_finalize', GIT_COMMIT_TYPES, GIT_CO
 const GIT_COMMIT_VERB_KEYS = ['message', 'paths', 'files', 'allow_whole_index', 'untrack', 'author_name', 'author_email', 'claim_only', 'patch', 'hunks']
 const GIT_COMMIT_FIELDS = aliasFields('git_commit', GIT_COMMIT_TYPES, GIT_COMMIT_VERB_KEYS)
 const GIT_SINGLE_SHAPE = (verb, keys, sample) => ` ${keys.join(', ')} ${keys.length > 1 ? 'are' : 'is'} accepted at the top level and folded into body, so {"${sample}":...} and body:{"${sample}":...} are the same call (one accepted shape for ${verb}); a key named in both takes its value from body.`
-const GIT_COMMIT_DESCRIPTION = GIT_SINGLE_SHAPE('git_commit', GIT_COMMIT_VERB_KEYS, 'message') + ` The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit. author_name and author_email must match the configured git identity; any other author is refused before the commit runs. claim_only:true only claims paths in .gm/lane-claims.json for SESSION_ID (needs a non-empty paths array) and does not commit or publish.`
+const GIT_COMMIT_DESCRIPTION = GIT_SINGLE_SHAPE('git_commit', GIT_COMMIT_VERB_KEYS, 'message') + ` The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit. Every line after the subject must be ${COMMIT_BODY_WRAP} characters or fewer; a longer line is refused before the commit runs, naming the ${COMMIT_BODY_WRAP}-character limit. author_name and author_email must match the configured git identity; any other author is refused before the commit runs. claim_only:true only claims paths in .gm/lane-claims.json for SESSION_ID (needs a non-empty paths array) and does not commit or publish.`
 const GIT_FINALIZE_DESCRIPTION = ` ${GIT_COMMIT_KEYS.join(', ')} are accepted at the top level and folded into body, so {"message":..., "paths":[...]} and body:{"message":..., "paths":[...]} are the same call; a key named in both takes its value from body. The commit subject (first line of message) must be ${COMMIT_SUBJECT_LIMIT} characters or fewer; a longer subject is refused before the commit runs, naming the ${COMMIT_SUBJECT_LIMIT}-character limit. .agentplug* paths are runtime state: add and modify are refused with a reason; untrack:true with only tracked .agentplug* paths commits their index removal (files stay on disk).`
 
 const GIT_PUSH_KEYS = ['rev', 'sha']
@@ -450,7 +450,7 @@ const FS_STAT_BODY = {
 const GIT_COMMIT_BODY = {
     required: ['message'],
     fields: {
-        message: { type: 'string', description: 'Commit message.' },
+        message: { type: 'string', description: `Commit message. Line 1 is the subject, ${COMMIT_SUBJECT_LIMIT} characters or fewer; every line after it is ${COMMIT_BODY_WRAP} characters or fewer.` },
         paths: { type: 'array', aliases: ['files'], description: 'Paths to commit; a pathless finalize sweeps every staged change, including another lane\'s. Non-string entries are refused.' },
         allow_empty: { type: 'boolean', description: 'Commits with no changes.' },
         amend: { type: 'boolean', description: 'Amends HEAD; refused on a pushed HEAD.' },
