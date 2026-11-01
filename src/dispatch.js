@@ -254,15 +254,34 @@ export function fsReadProjectRelativeBody(verb, body, cwd) {
 
 const SIBLING_ROOT_READ_VERBS = ['fs_stat', 'fs_readdir']
 
+function isWithinDir(dir, target) {
+    const rel = path.relative(dir, target)
+    return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel))
+}
+
+function declaredReadRoots(root) {
+    let entries
+    try {
+        entries = JSON.parse(fs.readFileSync(path.join(root, '.gm', 'gm.config.json'), 'utf8'))?.read_roots
+    } catch {
+        return []
+    }
+    if (!Array.isArray(entries)) return []
+    return entries
+        .filter((entry) => typeof entry === 'string' && path.isAbsolute(entry) && !entry.split(/[\\/]/).includes('..'))
+        .map((entry) => path.resolve(entry))
+        .filter((resolved) => resolved !== path.parse(resolved).root)
+}
+
 export function outsideRootReadRefusal(verb, body, cwd) {
     if (!SIBLING_ROOT_READ_VERBS.includes(verb) || !isPlainObject(body)) return null
     if (typeof body.path !== 'string' || !path.isAbsolute(body.path)) return null
     if (body.allowOutsideRoot === true || body.allow_outside_root === true) return null
     const root = resolveDispatchRoot(cwd).root
     if (!root) return null
-    const rel = path.relative(root, path.resolve(body.path))
-    const outside = rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)
-    if (!outside) return null
+    const target = path.resolve(body.path)
+    if (isWithinDir(root, target)) return null
+    if (declaredReadRoots(root).some((declared) => isWithinDir(declared, target))) return null
     return `${verb} path ${body.path} is outside the project root ${root}: pass allowOutsideRoot:true with the same path to read this sibling root (a read-only verb; allowOutsideRoot never applies to fs_write)`
 }
 
