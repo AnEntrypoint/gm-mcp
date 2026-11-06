@@ -12,7 +12,7 @@ import { renderReply, parseReply } from './reply-format.js'
 import { appendDiagnostic } from './server-log.js'
 import { gmSkillReply } from './skill-verb.js'
 import { recordChild } from './child-ledger.js'
-import { bundleDrift, bundleStalenessAnnouncement } from './bundle-drift.js'
+import { bundleDrift } from './bundle-drift.js'
 import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuationReserveFor, continuedReply, setContinuationStopped, withoutContinuationBlock } from './continuation.js'
 import { bindSpoolDispatch, closeRowId, ensureReferenceGate, prdAddQuiet, readRow, referenceGateRefusal, validRowId, withPublicSearch } from './public-search.js'
 import { prdFeedFor } from './prd-feed.js'
@@ -3025,7 +3025,12 @@ async function plainTextOwnerTransport(root, session_id, signal, budgetMs = OWNE
 
 const VERBATIM_REPLY_VERBS = new Set(['fs_read', 'result', 'gm_result'])
 
+function bundleStaleShortLine(drift) {
+    return 'bundle_stale: ' + drift.running_version + ' -> ' + (drift.installed_version ?? 'unknown') + ' (see health)'
+}
+
 function bundleNoticeTail(verb, drift) {
+    if (!READ_ONLY_STATUS_VERBS.has(verb)) return bundleStaleShortLine(drift) + '\n'
     const installedPath = drift.installed_path ?? drift.path
     const block = renderReply({
         bundle_stale: true,
@@ -3041,9 +3046,7 @@ function bundleNoticeTail(verb, drift) {
         one_command: drift.one_command ?? null,
         bundle_answer_from: 'served-bundle',
     })
-    if (READ_ONLY_STATUS_VERBS.has(verb)) return block + '\n'
-    const line = bundleStalenessAnnouncement(drift)
-    return line ? block + '\n' + line + '\n' : block + '\n'
+    return block + '\n'
 }
 
 function pendingBundleNoticeReserve(verb) {
@@ -3056,7 +3059,7 @@ function pendingBundleNoticeReserve(verb) {
 const staleNoticeAnnounced = new Set()
 
 
-// Keyed on session id and served version: each session sees the notice once, and again only when the served version changes.
+// Keyed on session id and served version: each session sees the full block once on a status read, and again only when the served version changes.
 function staleNoticeKey(drift, sessionId) {
     return [sessionId ?? '', drift.running_version].map((v) => v ?? '').join('|')
 }
@@ -3067,10 +3070,12 @@ function withStaleBundleNotice(verb, text, sessionId) {
     if (typeof text !== 'string' || text === '') return text
     const drift = bundleDrift()
     if (!drift.stale) return text
-    const key = staleNoticeKey(drift, sessionId)
-    if (staleNoticeAnnounced.has(key)) return text
-    staleNoticeAnnounced.add(key)
     const withNewline = text.endsWith('\n') ? text : text + '\n'
+    const shortLine = bundleStaleShortLine(drift) + '\n'
+    if (!READ_ONLY_STATUS_VERBS.has(verb)) return withNewline + shortLine
+    const key = staleNoticeKey(drift, sessionId)
+    if (staleNoticeAnnounced.has(key)) return withNewline + shortLine
+    staleNoticeAnnounced.add(key)
     return withNewline + bundleNoticeTail(verb, drift)
 }
 
