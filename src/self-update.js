@@ -337,10 +337,11 @@ function assertLoadableBundle(bytes, candidatePath) {
 
 function replaceDeployedBundle(deployedPath, bytes) {
     const candidatePath = `${deployedPath}.candidate.${process.pid}.mjs`
+    mkdirSync(path.dirname(deployedPath), { recursive: true })
     writeFileSync(candidatePath, bytes)
     try {
         assertLoadableBundle(bytes, candidatePath)
-        copyFileSync(deployedPath, `${deployedPath}.prev`)
+        if (existsSync(deployedPath)) copyFileSync(deployedPath, `${deployedPath}.prev`)
         renameSync(candidatePath, deployedPath)
     } catch (error) {
         if (existsSync(candidatePath)) unlinkSync(candidatePath)
@@ -354,7 +355,6 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     const self = isRunningFromDeployedBundle(deployedPath)
     const deployedOnly = deployedOnlySelfUpdateReason()
     if (deployedOnly && !self) return { outcome: 'not-deployed-copy', self, reason: deployedOnly }
-    if (!existsSync(deployedPath)) return { outcome: 'no-deployed-copy', self, deployed_bundle: deployedPath }
     const refuse = (code, reason) => {
         console.error(`gm-mcp: refusing deployed bundle self-update (${code}) -- ${reason}`)
         appendDiagnostic('self-update-refused', { code, reason, self, deployed_bundle: deployedPath })
@@ -363,18 +363,23 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     const suppressed = noSelfUpdateReason()
     if (suppressed) return refuse('frozen', suppressed)
 
+    const bootstrapping = !existsSync(deployedPath)
     const stampPath = `${deployedPath}.checked`
     const ignoreStamp = options.ignoreStamp === true || options.force === true
     if (!ignoreStamp && checkedRecently(stampPath)) return { outcome: 'checked-recently', self }
 
-    const { bytes: deployedBytes, sha256: deployedHash } = readDigest(deployedPath)
-    const pinned = localBuildPinReason(deployedHash)
-    if (pinned) return refuse(pinned.code, pinned.reason)
+    let deployedBytes = null
+    let deployedHash = null
+    if (!bootstrapping) {
+        ({ bytes: deployedBytes, sha256: deployedHash } = readDigest(deployedPath))
+        const pinned = localBuildPinReason(deployedHash)
+        if (pinned) return refuse(pinned.code, pinned.reason)
+    }
 
     const url = process.env.GM_MCP_BUNDLE_URL || DEFAULT_BUNDLE_URL
     const cached = readBundleCache(deployedPath)
     const head = url === DEFAULT_BUNDLE_URL ? await probeHeadOrNull(options.unconditional === true ? null : cached) : null
-    if (head?.notModified && cached.sha === deployedHash) {
+    if (!bootstrapping && head?.notModified && cached?.sha === deployedHash) {
         writeBundleCache(deployedPath, { ...cached, checked_at: Date.now(), outcome: 'not_modified' })
         touch(stampPath)
         return { outcome: 'current', self, hash: deployedHash, not_modified: true, probe: head.via ?? 'api' }
@@ -388,7 +393,7 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
         record = { commit_sha: head.sha, api_etag: head.etag }
     } else {
         // Fallback when the API probe fails: the raw-main fetch, with its unconditional full fetch at FULL_FETCH_INTERVAL_MS.
-        const fullDue = options.unconditional === true || !cached || cached.sha !== deployedHash ||
+        const fullDue = bootstrapping || options.unconditional === true || !cached || cached.sha !== deployedHash ||
             Date.now() - (cached.full_at || 0) >= FULL_FETCH_INTERVAL_MS
         fetched = await fetchBundle(url, fullDue ? null : cached)
         fullAt = fullDue ? Date.now() : cached.full_at
@@ -412,7 +417,7 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     // Swapping the bundle under a dispatch that is running would cut that dispatch's reply off
     // mid-write, so the swap waits -- and the wait is retried soon instead of an interval later.
     const dispatchesInflight = countInflightDispatches()
-    if (dispatchesInflight > 0) {
+    if (!bootstrapping && dispatchesInflight > 0) {
         swapDeferralStartedAt ??= Date.now()
         const waitedMs = Date.now() - swapDeferralStartedAt
         if (waitedMs < SWAP_DEFER_LIMIT_MS) return { outcome: 'deferred-dispatch-inflight', self, dispatches_inflight: dispatchesInflight, waited_ms: waitedMs }
@@ -421,8 +426,9 @@ export async function refreshStaleDeployedBundle(deployedPath = defaultDeployedP
     swapDeferralStartedAt = null
 
     replaceDeployedBundle(deployedPath, freshBytes)
-    writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash, full_at: fullAt, checked_at: Date.now(), outcome: 'refreshed', ...record })
+    writeBundleCache(deployedPath, { etag: fetched.etag, sha: freshHash, full_at: fullAt, checked_at: Date.now(), outcome: bootstrapping ? 'bootstrapped' : 'refreshed', ...record })
     touch(stampPath)
+    if (bootstrapping) return { outcome: 'bootstrapped', self, hash: freshHash, url: fetchedFrom, probe: head ? (head.via ?? 'api') : 'raw', deployed_bundle: deployedPath, version: version.candidateVersion }
     return { outcome: 'refreshed', self, from: deployedHash, to: freshHash, url: fetchedFrom, probe: head ? (head.via ?? 'api') : 'raw', deployed_bundle: deployedPath, version: `${BUNDLE_VERSION} -> ${version.candidateVersion}` }
 }
 
@@ -457,8 +463,8 @@ export function describeSelfUpdateOutcome(result) {
             return `waiting on ${result.dispatches_inflight} dispatch(es) inflight -- the swap waits rather than cutting a reply mid-write`
         case 'disabled':
             return 'GM_MCP_SELF_UPDATE=0 disables the release channel'
-        case 'no-deployed-copy':
-            return `no deployed bundle at ${result.deployed_bundle}, and one is never created behind the operator`
+        case 'bootstrapped':
+            return `installed the missing deployed bundle at ${result.deployed_bundle} (sha ${shortHash(result.hash)}, version ${result.version}) from ${result.url}`
         case 'not-deployed-copy':
             return result.reason
         case 'refused':
@@ -526,6 +532,10 @@ export function refreshStaleDeployedBundleInBackground(onRefreshed = null, optio
                 return
             }
             deferRetriesLeft = MAX_DEFER_RETRIES_PER_TRIGGER
+            if (result.outcome === 'bootstrapped') {
+                console.error(`gm-mcp: deployed bundle was missing -- installed ${shortHash(result.hash)} (${result.version}) from ${result.url} at ${result.deployed_bundle}; takes effect for whoever launches the deployed copy next`)
+                return
+            }
             if (result.outcome !== 'refreshed') return
             // Only the deployed copy may hand its listen handle over: a repo-build process that
             // refreshed a foreign deployment would otherwise reload into a bundle it is not running.

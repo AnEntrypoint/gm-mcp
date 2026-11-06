@@ -84,6 +84,9 @@ jobs:
       - name: verb registry contract
         run: node scripts/verbs-witness.mjs
 
+      - name: self-update bootstraps a missing deployed bundle
+        run: node scripts/self-update-bootstrap-witness.mjs
+
       - name: windows reap spawn witness (at most one powershell.exe spawn per reap pass)
         if: runner.os == 'Windows'
         run: node scripts/witness-reap-spawns.mjs --enforce
