@@ -6,7 +6,7 @@ import { spoolFs as fs, spoolSpawn as spawn } from './spool-port.js'
 import { claimByCreate, claimByLink, readJsonOrNull, readLockHolderPid, readOwnerText, readPidTsLock, readStatusJson, readTextOrNull, reclaimLockByRename, replaceLockText, writeTextAtomically as writeFileAtomically, SPOOL_DIR_MODE, SPOOL_FILE_MODE } from './spool-store.js'
 import os from 'node:os'
 import path from 'node:path'
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import * as yaml from 'js-yaml'
 import { renderReply, parseReply } from './reply-format.js'
 import { appendDiagnostic } from './server-log.js'
@@ -14,7 +14,7 @@ import { gmSkillReply } from './skill-verb.js'
 import { recordChild } from './child-ledger.js'
 import { bundleDrift, bundleStalenessAnnouncement } from './bundle-drift.js'
 import { CONTINUATION_RESERVE_CHARS, CONTINUATION_STOP_VERB, continuationReserveFor, continuedReply, setContinuationStopped, withoutContinuationBlock } from './continuation.js'
-import { bindSpoolDispatch, closeRowId, ensureReferenceGate, prdAddQuiet, readRow, referenceGateRefusal, withPublicSearch } from './public-search.js'
+import { bindSpoolDispatch, closeRowId, ensureReferenceGate, prdAddQuiet, readRow, referenceGateRefusal, validRowId, withPublicSearch } from './public-search.js'
 import { prdFeedFor } from './prd-feed.js'
 import { bootstrapReply } from './live-state.js'
 import { maybeStartDevSync } from './dev-sync.js'
@@ -3291,6 +3291,13 @@ async function runCiStatusWithWait(args, signal, responseValueObserver) {
 
 const PRD_ADD_VERBS = new Set(['prd-add', 'prd_add'])
 const CLOSE_VERBS = new Set(['prd-resolve', 'prd_resolve', 'prd-close', 'prd_close'])
+const CLOSE_STATUSES = ['resolved', 'stale']
+const CLOSE_IDENTITY = {
+    GIT_AUTHOR_NAME: 'lanmower',
+    GIT_AUTHOR_EMAIL: 'almagestfraternite@gmail.com',
+    GIT_COMMITTER_NAME: 'lanmower',
+    GIT_COMMITTER_EMAIL: 'almagestfraternite@gmail.com',
+}
 
 bindSpoolDispatch(gmDispatch)
 
@@ -3384,12 +3391,77 @@ function refutedStaleClose(args) {
 }
 
 function closeRecordRefusal(args) {
+    const body = isPlainObject(args?.body) ? args.body : {}
+    const numericCommit = typeof body.commit === 'string' ? body.commit : body.commit_sha
+    const event = Number(body.event)
+    if (Number.isInteger(event) && event >= 1 && typeof numericCommit === 'string' && numericCommit.trim() !== '') return null
     const id = closeRowId(args)
     const resolved = resolveDispatchRoot(args?.cwd)
     if (id === null || resolved.error || !resolved.root) return null
     if (refutedStaleClose(args) || rowCloseCommitRecorded(resolved.root, id)) return null
     const session = explicitBodySessionId(args?.body) || (typeof args?.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
     return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'close_commit_required', refused: true, error: `${args.verb} refused: row ${id} has no closing commit in the store's log. Commit the close with publish_on_origin (witness and status set) so the commit records ${CLOSE_RECORD}; nothing was closed.`, record_required: 'closes/<row>.txt' })
+}
+
+function closeRowPaths(repo, root, id, file) {
+    const relative = (full) => path.relative(repo, full).split(path.sep).join('/')
+    const paths = new Set()
+    if (typeof file === 'string') paths.add(relative(file))
+    const direct = path.join(root, '.gm', 'prd', `${id}.yml`)
+    if (existsSync(direct)) paths.add(relative(direct))
+    return [...paths].filter((name) => name !== '' && !name.startsWith('..') && !path.posix.isAbsolute(name))
+}
+
+function appendCloseRecord(repo, id, status, witness) {
+    const record = path.posix.join('closes', `${id}.txt`)
+    const file = path.join(repo, record)
+    mkdirSync(path.dirname(file), { recursive: true })
+    let prior = ''
+    if (existsSync(file)) prior = readFileSync(file, 'utf8')
+    const line = `${id} ${status} ${witness} ${new Date().toISOString()}`
+    writeFileSync(file, `${prior}${prior === '' || prior.endsWith('\n') ? '' : '\n'}${line}\n`)
+    return record
+}
+
+function landCloseCommit(repo, paths, message) {
+    return new Promise((resolve) => {
+        execFile('git', ['-C', repo, 'commit', '-m', message, '--', ...paths], { env: { ...process.env, ...CLOSE_IDENTITY }, timeout: 60_000, windowsHide: true }, (error) => resolve(error === null))
+    })
+}
+
+async function selfSufficientPrdClose(args) {
+    if (args?.verb !== 'prd-resolve' && args?.verb !== 'prd_resolve') return null
+    const body = isPlainObject(args?.body) ? args.body : {}
+    const witness = [body.witness, body.witness_evidence].find((value) => typeof value === 'string' && value.trim() !== '')
+    if (witness === undefined) return null
+    const evidence = witness.replace(/\s+/g, ' ').trim()
+    const status = CLOSE_STATUSES.includes(body.status) ? body.status : 'resolved'
+    const id = closeRowId(args)
+    if (id === null || !validRowId(id)) return null
+    const resolved = resolveDispatchRoot(args?.cwd ?? body.cwd)
+    if (resolved.error || !resolved.root) return null
+    const root = resolved.root
+    const references = closeReferenceRefusal({ ...args, cwd: root })
+    if (references !== null) return references
+    const session = explicitBodySessionId(body) || (typeof args.session_id === 'string' ? args.session_id.trim() : '') || 'no-session'
+    const callerSession = session === 'no-session' ? null : session
+    const witnessReason = closeWitnessRefusal([root], evidence, callerSession)
+    if (witnessReason !== null) return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'witness_refused', refused: true, error: `${args.verb} refused: ${witnessReason}. Nothing was written.` })
+    const read = readRow(root, id)
+    if (read.error_code !== undefined) return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: read.error_code, refused: true, error: `${args.verb} refused: ${read.error}; nothing was closed.` })
+    if (read.doc.kind !== undefined && read.doc.kind !== 'prd') return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'wrong_kind', refused: true, error: `${args.verb} refused: row ${id} is not a work item; nothing was closed.` })
+    if (read.doc.status === 'resolved') return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'already_resolved', refused: true, error: `${args.verb} refused: row ${id} is already resolved; nothing was closed.` })
+    const repo = gitToplevel(root) || root
+    const closeRel = appendCloseRecord(repo, id, status, evidence)
+    const rowPaths = closeRowPaths(repo, root, id, read.file)
+    for (const rel of rowPaths) rmSync(path.join(repo, rel), { force: true })
+    const paths = [closeRel, ...rowPaths.filter((rel) => runGit(repo, ['ls-files', '--error-unmatch', '--', rel]).ok)]
+    if (runGit(repo, ['add', '-A', '--', ...paths]).ok === false) return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'git_add_failed', refused: true, error: `${args.verb} refused: git add failed; close record is written and the row file is removed.` })
+    const message = `close ${id}\n\nRow: ${id}\nStatus: ${status}\nWitness: ${evidence}`
+    if (!(await landCloseCommit(repo, paths, message))) return renderReply({ ok: false, verb: args.verb, dispatch_id: `refused-${nextN(session)}`, error_code: 'commit_failed', refused: true, error: `${args.verb} refused: git commit failed; close record is written and the row file is removed.` })
+    const head = runGit(repo, ['rev-parse', '--short', 'HEAD'])
+    const commit = head.ok ? head.out : 'HEAD'
+    return renderReply({ ok: true, verb: args.verb, dispatch_id: `closed-${nextN(session)}`, result: `${id} ${status} by witness ${evidence} at commit ${commit}`, row: id, status, witness: evidence, record: closeRel, commit })
 }
 
 // A blocker is a note on the open row it blocks, never a row of its own: a -blocker- child whose parent row exists is refused.
@@ -3534,6 +3606,8 @@ export async function gmDispatch(args, signal, responseValueObserver) {
         if (refusal !== null) return refusal
     }
     if (CLOSE_VERBS.has(args?.verb) && !args?.resume_task) {
+        const closed = await selfSufficientPrdClose(args)
+        if (closed !== null) return closed
         const refusal = closeReferenceRefusal(args) ?? closeRecordRefusal(args)
         if (refusal !== null) return refusal
     }
