@@ -6,6 +6,8 @@ on:
     paths:
       - 'src/**'
       - 'scripts/build.mjs'
+      - 'scripts/embed-skills.mjs'
+      - 'scripts/embed-checker.mjs'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/bundle.yml'

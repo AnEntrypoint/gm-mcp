@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url'
 const RAW_BASE = 'https://raw.githubusercontent.com/AnEntrypoint/gm/main/skills/'
 const MANIFEST_URL = `${RAW_BASE}manifest.sha256`
 const GRAPH_URL = 'https://raw.githubusercontent.com/AnEntrypoint/gm-config/main/fsm/graph.json'
+const API_TREE_URL = 'https://api.github.com/repos/AnEntrypoint/gm/git/trees/main?recursive=1'
+const API_HEADERS = { accept: 'application/vnd.github+json', 'user-agent': 'gm-mcp-embed-skills' }
 const MAX_BYTES = 512 * 1024
 const CONCURRENCY = 8
 const FETCH_TIMEOUT_MS = 30_000
@@ -104,8 +106,36 @@ async function mapLimit(items, limit, fn) {
     return results
 }
 
+async function generatedManifest() {
+    let tree
+    try {
+        const response = await fetch(API_TREE_URL, { headers: API_HEADERS, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
+        if (!response.ok) throw new Error(`HTTP ${response.status} for ${API_TREE_URL}`)
+        tree = await response.json()
+    } catch (error) {
+        throw new Refusal(`skills tree could not be read: ${error.message}`)
+    }
+    if (tree.truncated === true) throw new Refusal('skills tree is truncated')
+    const names = (tree.tree ?? [])
+        .filter((entry) => entry.type === 'blob' && entry.path.startsWith('skills/') && entry.path !== 'skills/manifest.sha256')
+        .map((entry) => entry.path.slice('skills/'.length))
+        .filter((name) => SAFE_PATH.test(name) && !name.split('/').some((part) => part === '.' || part === '..'))
+        .sort()
+    if (names.length === 0) throw new Refusal('skills tree lists no files')
+    const lines = await mapLimit(names, CONCURRENCY, async (name) => {
+        const bytes = await fetchBytes(RAW_BASE + name)
+        return `${sha256Hex(bytes)}  ${name}`
+    })
+    return Buffer.from(`${lines.join('\n')}\n`, 'utf8')
+}
+
 async function main() {
-    const manifestBytes = await readSource(MANIFEST_URL, path.join(PARENT_SKILLS, 'manifest.sha256'))
+    let manifestBytes
+    try {
+        manifestBytes = await readSource(MANIFEST_URL, path.join(PARENT_SKILLS, 'manifest.sha256'))
+    } catch {
+        manifestBytes = await generatedManifest()
+    }
     const manifestSha = sha256Hex(manifestBytes)
     const entries = parseManifest(decoder.decode(manifestBytes))
 
