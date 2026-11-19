@@ -85,8 +85,12 @@ function successorsOf(graphText) {
     return successors
 }
 
+// CRLF checkouts (Windows autocrlf) hash as LF: the manifest is LF-based. latin1 keeps the bytes
+// exact so invalid UTF-8 still reaches the decoder and is refused there.
+const toLf = (bytes) => Buffer.from(bytes.toString('latin1').replace(/\r\n/g, '\n'), 'latin1')
+
 async function loadEntry(entry) {
-    const bytes = await readSource(RAW_BASE + entry.file, path.join(PARENT_SKILLS, entry.file))
+    const bytes = toLf(await readSource(RAW_BASE + entry.file, path.join(PARENT_SKILLS, entry.file)))
     const digest = sha256Hex(bytes)
     if (digest !== entry.sha256) throw new Error(`sha256 mismatch: manifest ${entry.sha256}, fetched ${digest}`)
     return { ...entry, bytes }
