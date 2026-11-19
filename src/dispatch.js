@@ -93,6 +93,53 @@ function existingProjectDir(requested) {
     return null
 }
 
+const NEUTRAL_READ_VERBS = new Set(['grep', 'rg', 'codesearch', 'fs_read', 'fs_stat', 'fs_readdir'])
+const SCAN_VERBS = new Set(['grep', 'rg', 'codesearch'])
+const NEUTRAL_READ_ROOT_NAME = 'read-root'
+const SCOPE_BODY_KEYS = ['path', 'paths', 'file', 'files', 'root', 'projectPath']
+
+function absoluteUnder(base, value) {
+    if (typeof value !== 'string' || !value.trim() || path.isAbsolute(value) || /^[A-Za-z]:/.test(value)) return value
+    return path.join(base, value).replace(/\\/g, '/')
+}
+
+function anchorScopeToCwd(body, base) {
+    const out = { ...body }
+    for (const key of SCOPE_BODY_KEYS) {
+        const value = out[key]
+        if (Array.isArray(value)) out[key] = value.map((item) => absoluteUnder(base, item))
+        else if (typeof value === 'string') out[key] = absoluteUnder(base, value)
+    }
+    if (!out.root && !out.path && !out.paths && !out.file && !out.files) out.root = base.replace(/\\/g, '/')
+    return out
+}
+
+// Read-only verbs never write a project's .gm: outside a git project they spool under a neutral root, with relative scope anchored to the caller's cwd.
+function isNeutralReadCall(verb, cwd) {
+    if (!NEUTRAL_READ_VERBS.has(verb)) return false
+    const resolved = resolveDispatchRoot(cwd)
+    if (resolved.error === 'cwd-not-found') return false
+    return Boolean(resolved.error) || gitRootAt(resolved.root) !== resolved.root
+}
+
+function neutralReadDispatch(verb, cwd, body) {
+    if (!isPlainObject(body) || !isNeutralReadCall(verb, cwd)) return null
+    const root = path.join(agentplugDir(), NEUTRAL_READ_ROOT_NAME)
+    mkdirSync(root, { recursive: true, mode: 0o700 })
+    const base = typeof cwd === 'string' && cwd.trim() ? path.resolve(cwd.trim()) : null
+    const anchored = base ? anchorScopeToCwd(body, base) : body
+    return { root, root_source: 'read_neutral', body: SCAN_VERBS.has(verb) ? rootSplitAbsoluteScan(anchored) : anchored }
+}
+
+// An absolute grep/codesearch path outside the neutral root is searched as {root: its directory, path: its last segment}.
+function rootSplitAbsoluteScan(body) {
+    if (body.root || typeof body.path !== 'string' || !path.isAbsolute(body.path)) return body
+    const slashed = body.path.replace(/\\/g, '/').replace(/\/+$/, '')
+    const cut = slashed.lastIndexOf('/')
+    if (cut <= 2) return body
+    return { ...body, root: slashed.slice(0, cut), path: slashed.slice(cut + 1) }
+}
+
 function resolveDispatchRoot(cwd) {
     if (typeof cwd === 'string' && cwd.trim()) {
         const requested = path.resolve(cwd.trim())
@@ -3665,9 +3712,10 @@ export async function gmDispatch(args, signal, responseValueObserver) {
         if (VERBATIM_REPLY_VERBS.has(args?.verb)) return reply
         const key = continuationKeyOf(args)
         // prd_feed marks the server's own reads (the feed's prd-list lookups, the bootstrap and prompt reads): they get no feed and no bootstrap.
-        const feed = args?.prd_feed === true ? undefined : await prdFeedFor(key, args?.verb, reply, gmDispatch, args)
+        const neutralRead = isNeutralReadCall(args?.verb, args?.cwd)
+        const feed = args?.prd_feed === true || neutralRead ? undefined : await prdFeedFor(key, args?.verb, reply, gmDispatch, args)
         const continued = continuedReply(key, quiet ? reply : withPublicSearch(args, reply), Date.now(), feed !== undefined, feed)
-        const attached = bundleDrift().stale ? await bootstrapReply(gmDispatch, key, continued, { reply, args, feed }) : continued
+        const attached = bundleDrift().stale && !neutralRead ? await bootstrapReply(gmDispatch, key, continued, { reply, args, feed }) : continued
         return quiet ? withoutContinuationBlock(attached) : attached
     } catch (error) {
         appendDiagnostic('dispatch-error', { call_id: callId, session_id: sessionId, verb: args?.verb ?? null, error: error?.message ? String(error.message) : String(error), stack: error?.stack ? String(error.stack) : null })
@@ -3686,7 +3734,9 @@ async function runDispatch({ verb, body, raw_body, session_id, cwd, timeout_seco
     const requestNumber = resume_task || nextN(session_id)
     const unsafeName = unsafeSpoolName('verb', verb) || unsafeSpoolName('session_id', session_id) || unsafeSpoolName('task', requestNumber)
     if (unsafeName) return `error: ${unsafeName} -- nothing was written to the spool, so no dispatch was queued`
-    const resolvedRoot = resolveDispatchRoot(cwd)
+    const neutral = neutralReadDispatch(verb, cwd, body)
+    if (neutral) body = neutral.body
+    const resolvedRoot = neutral ?? resolveDispatchRoot(cwd)
     if (resolvedRoot.error) {
         appendDiagnostic('dispatch-root-refused', { verb, root: resolvedRoot.refused_root, reason: resolvedRoot.refused_reason })
         return renderReply(resolvedRoot)
